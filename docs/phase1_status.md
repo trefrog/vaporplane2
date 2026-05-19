@@ -8,7 +8,7 @@
 - Metronome pip on beat with downbeat accent and toggle.
 - Looping sample playback with loop-start/loop-end edits while running.
 - Waveform rendering with loop markers and playhead marker.
-- Keyboard controls and partial gamepad stub.
+- Keyboard controls and first-pass gamepad editing controls.
 
 ## Build / Run
 ```bash
@@ -30,12 +30,26 @@ cmake --build build
 - `R`: reset loop to full sample
 - `Home`: jump playhead to loop start
 
+## Gamepad Controls
+- `South` / `Start`: play/pause
+- `East`: jump playhead to loop start
+- `Back`: metronome on/off
+- `West` / left shoulder: select and focus loop start
+- `North` / right shoulder: select and focus loop end
+- Left stick: pan the waveform view
+- D-pad up/down: zoom in/out
+- Right stick left/right: trim the selected loop edge
+- D-pad left/right: fine-trim the selected loop edge
+- Right trigger: faster trimming
+- Left trigger: finer trimming
+- Left stick click: reset loop to full sample
+
 ## Known limitations
-- Gamepad support is minimal in this phase and needs full control mapping.
+- Gamepad support is first-pass only and needs tuning against real hardware.
 - Playback output is mono-summed from the source clip.
 - No tempo map, no MIDI clips yet.
 
 ## Next
-- Full gamepad editing mode and UX hints.
+- Tune gamepad editing feel and add unobtrusive UX hints.
 - Better stereo playback and smoother loop crossfade.
 - Optional tempo map and clip quantized launch behavior.

@@ -6,7 +6,14 @@ bool app_init(App *app){
     if(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_AUDIO|SDL_INIT_GAMEPAD)){ fprintf(stderr,"SDL init failed: %s\n",SDL_GetError()); return false; }
     app->window=SDL_CreateWindow("vaporplane",1280,720,SDL_WINDOW_RESIZABLE); if(!app->window) return false;
     app->renderer=SDL_CreateRenderer(app->window,NULL); if(!app->renderer) return false;
-    app->gamepad=NULL; app->running=true;
+    app->gamepad=NULL; app->gamepad_id=0; app->running=true;
+    int gamepad_count = 0;
+    SDL_JoystickID *gamepads = SDL_GetGamepads(&gamepad_count);
+    if (gamepads && gamepad_count > 0) {
+        app->gamepad = SDL_OpenGamepad(gamepads[0]);
+        if (app->gamepad) app->gamepad_id = SDL_GetGamepadID(app->gamepad);
+    }
+    SDL_free(gamepads);
     if(!clip_init_from_wav(&app->clip,"assets/samples/demo_loop.wav")) clip_init_generated(&app->clip, 48000, 2.0f);
     transport_init(&app->transport, 120.0, 960, 4, 4);
     waveform_view_init(&app->view);

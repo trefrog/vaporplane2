@@ -10,6 +10,7 @@ typedef struct App {
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Gamepad *gamepad;
+    SDL_JoystickID gamepad_id;
     bool running;
 
     AudioClip clip;
