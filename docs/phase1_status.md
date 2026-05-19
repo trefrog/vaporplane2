@@ -2,13 +2,16 @@
 
 ## Implemented
 - C11 + SDL3 + CMake app split into modules: app, input, transport, audio engine, clip, waveform.
-- WAV loading from `assets/samples/demo_loop.wav` with runtime generated fallback if missing.
+- WAV loading from `assets/samples/` with runtime generated fallback if no WAV is available.
+- In-app sample selector backed by reusable `load_clip_from_path(App *, const char *)`.
 - `AudioClip` metadata for path/rate/channels/frames/loop/music metadata/gain/playback rate.
 - Transport with BPM, PPQN, beats-per-bar, beat-unit, play/pause, tick/second conversion.
 - Metronome pip on beat with downbeat accent and toggle.
 - Looping sample playback with loop-start/loop-end edits while running.
 - Waveform rendering with loop markers and playhead marker.
-- Keyboard controls and first-pass gamepad editing controls.
+- Smooth target-based waveform panning/zooming.
+- Zoom-relative keyboard and gamepad loop marker trimming.
+- Keyboard controls and first-pass gamepad editing controls with R2 chord support.
 
 ## Build / Run
 ```bash
@@ -21,14 +24,23 @@ cmake --build build
 - `Escape`: quit
 - `Space`: play/pause
 - `M`: metronome on/off
-- `Left/Right`: pan view
-- `Up/Down`: zoom in/out
-- `A/D`: move loop start (`Shift` = coarse)
-- `J/L`: move loop end (`Shift` = coarse)
+- `Tab`: open/close sample selector
+- `Left/Right`: smoothly pan view
+- `Up/Down`: smoothly zoom in/out
+- `A/D`: move loop start relative to visible zoom (`Shift` = larger step)
+- `J/L`: move loop end relative to visible zoom (`Shift` = larger step)
 - `1`: focus loop start
 - `2`: focus loop end
 - `R`: reset loop to full sample
 - `Home`: jump playhead to loop start
+
+## Sample Selector
+- Lists case-insensitive `*.wav` files from `assets/samples/`.
+- `Up/Down`: choose sample
+- `Return`: load selected sample
+- `Tab` / `Escape`: close selector
+- `R`: refresh the sample list while selector is open
+- Future file-dialog results should call `load_clip_from_path()` directly.
 
 ## Gamepad Controls
 - `South` / `Start`: play/pause
@@ -38,15 +50,17 @@ cmake --build build
 - `North` / right shoulder: select and focus loop end
 - Left stick: pan the waveform view
 - D-pad up/down: zoom in/out
-- Right stick left/right: trim the selected loop edge
-- D-pad left/right: fine-trim the selected loop edge
-- Right trigger: faster trimming
+- Right stick left/right: trim the selected loop edge relative to visible zoom
+- D-pad left/right: fine-trim the selected loop edge relative to visible zoom
 - Left trigger: finer trimming
+- Right trigger + South: set loop markers to the visible screen range
 - Left stick click: reset loop to full sample
+- Right stick click: open sample selector
+- In selector: d-pad up/down choose, south loads, east closes, back refreshes
 
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.
-- Playback output is mono-summed from the source clip.
+- Loop playback has a very short boundary crossfade, but it still needs tuning by ear.
 - No tempo map, no MIDI clips yet.
 
 ## Next

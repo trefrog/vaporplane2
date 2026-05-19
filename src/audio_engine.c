@@ -1,29 +1,62 @@
 #include "audio_engine.h"
 #include <string.h>
 
+static float clip_sample_at(const AudioClip *clip, double frame, int channel, size_t loop_start, size_t loop_end) {
+    double loop_len = (double)(loop_end - loop_start);
+    while (frame < (double)loop_start) frame += loop_len;
+    while (frame >= (double)loop_end) frame -= loop_len;
+
+    size_t i0 = (size_t)frame;
+    size_t i1 = i0 + 1 < loop_end ? i0 + 1 : loop_start;
+    double frac = frame - (double)i0;
+    float s0 = clip->samples[i0 * (size_t)clip->channels + (size_t)channel];
+    float s1 = clip->samples[i1 * (size_t)clip->channels + (size_t)channel];
+    return (float)((1.0 - frac) * s0 + frac * s1);
+}
+
 static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount){
     (void)total_amount;
     AudioEngine *a = (AudioEngine*)userdata;
     int frames = additional_amount / (int)(sizeof(float)*2);
+    if(frames <= 0) return;
     float *mix = (float*)SDL_malloc((size_t)frames * sizeof(float) * 2);
+    if(!mix) return;
     for(int i=0;i<frames;i++){
-        float s = 0.f;
+        float left = 0.f, right = 0.f;
         if (a->clip && a->clip->samples && a->clip->frame_count>1 && a->transport->playing) {
             size_t loop_start=a->clip->loop_start_frame, loop_end=a->clip->loop_end_frame;
+            if(loop_end > a->clip->frame_count) loop_end = a->clip->frame_count;
+            if(loop_start + 1 >= loop_end) loop_start = 0;
             if (a->playhead_frame >= loop_end) a->playhead_frame = (double)loop_start;
-            size_t frame=(size_t)a->playhead_frame;
-            size_t next=frame+1<loop_end?frame+1:loop_start;
-            double frac=a->playhead_frame-(double)frame;
-            float l0=a->clip->samples[frame*2], l1=a->clip->samples[next*2];
-            s = (float)((1.0-frac)*l0 + frac*l1) * a->clip->gain;
+            if (a->playhead_frame < loop_start) a->playhead_frame = (double)loop_start;
+
+            left = clip_sample_at(a->clip, a->playhead_frame, 0, loop_start, loop_end);
+            right = clip_sample_at(a->clip, a->playhead_frame, 1, loop_start, loop_end);
+
+            size_t loop_len = loop_end - loop_start;
+            size_t fade_frames = loop_len / 2 < 64 ? loop_len / 2 : 64;
+            double distance_to_end = (double)loop_end - a->playhead_frame;
+            if(fade_frames > 0 && distance_to_end < (double)fade_frames) {
+                double blend = 1.0 - distance_to_end / (double)fade_frames;
+                double wrap_frame = (double)loop_start + ((double)fade_frames - distance_to_end);
+                float wrap_left = clip_sample_at(a->clip, wrap_frame, 0, loop_start, loop_end);
+                float wrap_right = clip_sample_at(a->clip, wrap_frame, 1, loop_start, loop_end);
+                left = (float)(left * (1.0 - blend) + wrap_left * blend);
+                right = (float)(right * (1.0 - blend) + wrap_right * blend);
+            }
+
+            left *= a->clip->gain;
+            right *= a->clip->gain;
             a->playhead_frame += a->clip->playback_rate;
+            while (a->playhead_frame >= (double)loop_end) a->playhead_frame -= (double)(loop_end - loop_start);
+            if (a->playhead_frame < (double)loop_start) a->playhead_frame = (double)loop_start;
         }
         transport_update(a->transport, 1.0/(double)a->spec.freq);
         float m = transport_next_metronome_sample(a->transport, a->spec.freq);
-        float out = (s + m) * a->master_gain;
-        mix[i*2]=out; mix[i*2+1]=out;
+        mix[i*2]=(left + m) * a->master_gain;
+        mix[i*2+1]=(right + m) * a->master_gain;
     }
-    SDL_PutAudioStreamData(stream, mix, additional_amount);
+    SDL_PutAudioStreamData(stream, mix, frames * (int)sizeof(float) * 2);
     SDL_free(mix);
 }
 
@@ -36,5 +69,15 @@ bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport){
     return true;
 }
 void audio_engine_shutdown(AudioEngine *a){ if(a->stream) SDL_DestroyAudioStream(a->stream); memset(a,0,sizeof(*a)); }
-void audio_engine_set_playhead(AudioEngine *a,size_t frame){ a->playhead_frame=(double)frame; }
-size_t audio_engine_get_playhead_frame(const AudioEngine *a){ return (size_t)a->playhead_frame; }
+void audio_engine_set_playhead(AudioEngine *a,size_t frame){
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    a->playhead_frame=(double)frame;
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+}
+size_t audio_engine_get_playhead_frame(const AudioEngine *a){
+    AudioEngine *mutable_audio = (AudioEngine *)a;
+    if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
+    size_t frame = (size_t)a->playhead_frame;
+    if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
+    return frame;
+}
