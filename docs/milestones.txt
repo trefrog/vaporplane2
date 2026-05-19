@@ -1,0 +1,6 @@
+Milestone 0: SDL3 window opens
+Milestone 1: transport ticks advance
+Milestone 2: fake waveform plane renders
+Milestone 3: gamepad/camera moves
+Milestone 4: load one WAV
+Milestone 5: loop anchors play
