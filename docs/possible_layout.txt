@@ -1,0 +1,35 @@
+vaporplane/
+  CMakeLists.txt
+  README.md
+  .gitignore
+
+  src/
+    main.c
+    app.c
+    transport.c
+    audio_engine.c
+    waveform.c
+    input.c
+
+  include/
+    app.h
+    transport.h
+    audio_engine.h
+    waveform.h
+    input.h
+
+  attic/
+    README.md
+    ictgHax/
+      midi_sched.c
+      midi_sched.h
+      midi_router.h
+      midi_tracks.h
+
+  docs/
+    transplant-plan.md
+    non-imports.md
+    midi-as-clips.md
+
+  assets/
+    samples/
