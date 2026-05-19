@@ -11,6 +11,4 @@ add_executable(vaporplane
     src/main.c
 )
 
-target_include_directories(vaporplane PRIVATE include)
-
 target_link_libraries(vaporplane PRIVATE SDL3::SDL3)
