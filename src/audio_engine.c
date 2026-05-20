@@ -2,6 +2,8 @@
 #include <math.h>
 #include <string.h>
 
+#define AUDIO_CALLBACK_CHUNK_FRAMES 512
+
 static float clip_sample_at(const AudioClip *clip, double frame, int channel, size_t loop_start, size_t loop_end) {
     double loop_len = (double)(loop_end - loop_start);
     while (frame < (double)loop_start) frame += loop_len;
@@ -66,6 +68,8 @@ static bool frame_is_close_to_beat(const Transport *t, double frame, double fram
     return fabs(rel - beat_pos) <= tolerance_frames;
 }
 
+static void timeline_effective_play_range(const MasterTimeline *timeline, int64_t *start, int64_t *end);
+
 static void update_frame_metronome(AudioEngine *a, double frame) {
     Transport *t = a->transport;
     const AudioClip *clip = a->clip;
@@ -96,11 +100,15 @@ static void update_timeline_metronome(AudioEngine *a, double tick, double tick_s
     MasterTimeline *timeline = a->timeline;
     if(!timeline || !timeline->playing || !t->metronome_enabled || timeline->ticks_per_beat <= 0) return;
 
-    int64_t beat = (int64_t)floor(tick / (double)timeline->ticks_per_beat);
+    int64_t range_start = 0;
+    timeline_effective_play_range(timeline, &range_start, NULL);
+    double relative_tick = tick - (double)range_start;
+    if(relative_tick < 0.0) return;
+    int64_t beat = (int64_t)floor(relative_tick / (double)timeline->ticks_per_beat);
     if(!a->metronome_beat_valid) {
         a->last_metronome_beat = beat;
         a->metronome_beat_valid = true;
-        if(tick <= fmax(1.0, tick_step)) transport_trigger_metronome_beat(t, beat);
+        if(relative_tick <= fmax(1.0, tick_step)) transport_trigger_metronome_beat(t, beat);
         return;
     }
     if(beat != a->last_metronome_beat) {
@@ -116,6 +124,46 @@ static void sync_transport_to_timeline(AudioEngine *a) {
     a->transport->beats_per_bar = timeline->timeline_beats_per_bar > 0 ? timeline->timeline_beats_per_bar : 4;
     a->transport->beat_unit = timeline->timeline_beat_unit > 0 ? timeline->timeline_beat_unit : 4;
     a->transport->playing = timeline->playing;
+    a->transport->current_tick = timeline->playhead_tick > 0 ? (uint64_t)timeline->playhead_tick : 0;
+    a->transport->current_seconds = timeline->ticks_per_beat > 0 && a->transport->bpm > 0.0 ?
+        ((double)a->transport->current_tick / (double)timeline->ticks_per_beat) * 60.0 / a->transport->bpm : 0.0;
+}
+
+static void timeline_effective_play_range(const MasterTimeline *timeline, int64_t *start, int64_t *end) {
+    int64_t length = timeline && timeline->length_ticks > 0 ? timeline->length_ticks : 0;
+    if(length <= 0) {
+        if(start) *start = 0;
+        if(end) *end = 0;
+        return;
+    }
+
+    int64_t s = timeline->play_range_start_tick;
+    int64_t e = timeline->play_range_end_tick;
+    if(s < 0 || e > length || e <= s) {
+        s = 0;
+        e = length;
+    }
+    if(s < 0) s = 0;
+    if(s > length) s = length;
+    if(e < 0) e = 0;
+    if(e > length) e = length;
+    if(e <= s) {
+        s = 0;
+        e = length;
+    }
+    if(start) *start = s;
+    if(end) *end = e;
+}
+
+static void set_timeline_tick_unlocked(AudioEngine *a, int64_t tick) {
+    if(!a->timeline) return;
+    int64_t length = a->timeline->length_ticks > 0 ? a->timeline->length_ticks : 0;
+    if(tick < 0) tick = 0;
+    if(length > 0 && tick > length) tick = length;
+    a->timeline->playhead_tick = tick;
+    a->timeline_playhead_tick = (double)tick;
+    a->metronome_beat_valid = false;
+    sync_transport_to_timeline(a);
 }
 
 static void mix_timeline(AudioEngine *a, float *left, float *right) {
@@ -127,14 +175,21 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
         return;
     }
 
-    if(a->timeline_playhead_tick >= (double)timeline->length_ticks) {
+    int64_t range_start_tick = 0, range_end_tick = 0;
+    timeline_effective_play_range(timeline, &range_start_tick, &range_end_tick);
+    if(range_end_tick <= range_start_tick) {
         timeline->playing = false;
-        timeline->playhead_tick = 0;
-        a->timeline_playhead_tick = 0.0;
+        set_timeline_tick_unlocked(a, range_start_tick);
         a->transport->playing = false;
         a->transport->metronome_env = 0.0f;
         a->metronome_beat_valid = false;
         return;
+    }
+    if(a->timeline_playhead_tick < (double)range_start_tick ||
+       a->timeline_playhead_tick >= (double)range_end_tick) {
+        a->timeline_playhead_tick = (double)range_start_tick;
+        timeline->playhead_tick = range_start_tick;
+        a->metronome_beat_valid = false;
     }
 
     double ticks_per_second = timeline->timeline_bpm * (double)timeline->ticks_per_beat / 60.0;
@@ -169,16 +224,65 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
     }
 
     a->timeline_playhead_tick += tick_step;
-    if(a->timeline_playhead_tick >= (double)timeline->length_ticks) {
-        timeline->playing = false;
-        timeline->playhead_tick = 0;
-        a->timeline_playhead_tick = 0.0;
-        a->transport->playing = false;
-        a->transport->metronome_env = 0.0f;
-        a->metronome_beat_valid = false;
+    if(a->timeline_playhead_tick >= (double)range_end_tick) {
+        if(timeline->play_range_loop_enabled) {
+            a->timeline_playhead_tick = (double)range_start_tick;
+            timeline->playhead_tick = range_start_tick;
+            a->metronome_beat_valid = false;
+            sync_transport_to_timeline(a);
+        } else {
+            timeline->playing = false;
+            timeline->playhead_tick = range_start_tick;
+            a->timeline_playhead_tick = (double)range_start_tick;
+            a->transport->playing = false;
+            a->transport->metronome_env = 0.0f;
+            a->metronome_beat_valid = false;
+            sync_transport_to_timeline(a);
+        }
     } else {
         timeline->playhead_tick = (int64_t)floor(a->timeline_playhead_tick);
     }
+}
+
+static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right) {
+    float left = 0.f, right = 0.f;
+    if (a->playback_mode == AUDIO_PLAYBACK_TIMELINE) {
+        mix_timeline(a, &left, &right);
+    } else if (a->clip && a->clip->samples && a->clip->frame_count>1 && a->transport->playing) {
+        size_t loop_start=a->clip->loop_start_frame, loop_end=a->clip->loop_end_frame;
+        if(loop_end > a->clip->frame_count) loop_end = a->clip->frame_count;
+        if(loop_start + 1 >= loop_end) loop_start = 0;
+        if (a->playhead_frame >= loop_end) a->playhead_frame = (double)loop_start;
+        if (a->playhead_frame < loop_start) a->playhead_frame = (double)loop_start;
+        update_frame_metronome(a, a->playhead_frame);
+
+        left = clip_sample_at(a->clip, a->playhead_frame, 0, loop_start, loop_end);
+        right = clip_sample_at(a->clip, a->playhead_frame, 1, loop_start, loop_end);
+
+        size_t loop_len = loop_end - loop_start;
+        size_t fade_frames = loop_len / 2 < 64 ? loop_len / 2 : 64;
+        double distance_to_end = (double)loop_end - a->playhead_frame;
+        if(fade_frames > 0 && distance_to_end < (double)fade_frames) {
+            double blend = 1.0 - distance_to_end / (double)fade_frames;
+            double wrap_frame = (double)loop_start + ((double)fade_frames - distance_to_end);
+            float wrap_left = clip_sample_at(a->clip, wrap_frame, 0, loop_start, loop_end);
+            float wrap_right = clip_sample_at(a->clip, wrap_frame, 1, loop_start, loop_end);
+            left = (float)(left * (1.0 - blend) + wrap_left * blend);
+            right = (float)(right * (1.0 - blend) + wrap_right * blend);
+        }
+
+        left *= a->clip->gain;
+        right *= a->clip->gain;
+        a->playhead_frame += clip_frame_step(a);
+        while (a->playhead_frame >= (double)loop_end) a->playhead_frame -= (double)(loop_end - loop_start);
+        if (a->playhead_frame < (double)loop_start) a->playhead_frame = (double)loop_start;
+    } else {
+        a->metronome_beat_valid = false;
+    }
+    if(a->playback_mode == AUDIO_PLAYBACK_WAVEFORM) transport_update(a->transport, 1.0/(double)a->spec.freq);
+    float m = transport_next_metronome_sample(a->transport, a->spec.freq);
+    *out_left = (left + m) * a->master_gain;
+    *out_right = (right + m) * a->master_gain;
 }
 
 static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount){
@@ -186,50 +290,15 @@ static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int addi
     AudioEngine *a = (AudioEngine*)userdata;
     int frames = additional_amount / (int)(sizeof(float)*2);
     if(frames <= 0) return;
-    float *mix = (float*)SDL_malloc((size_t)frames * sizeof(float) * 2);
-    if(!mix) return;
-    for(int i=0;i<frames;i++){
-        float left = 0.f, right = 0.f;
-        if (a->playback_mode == AUDIO_PLAYBACK_TIMELINE) {
-            mix_timeline(a, &left, &right);
-        } else if (a->clip && a->clip->samples && a->clip->frame_count>1 && a->transport->playing) {
-            size_t loop_start=a->clip->loop_start_frame, loop_end=a->clip->loop_end_frame;
-            if(loop_end > a->clip->frame_count) loop_end = a->clip->frame_count;
-            if(loop_start + 1 >= loop_end) loop_start = 0;
-            if (a->playhead_frame >= loop_end) a->playhead_frame = (double)loop_start;
-            if (a->playhead_frame < loop_start) a->playhead_frame = (double)loop_start;
-            update_frame_metronome(a, a->playhead_frame);
-
-            left = clip_sample_at(a->clip, a->playhead_frame, 0, loop_start, loop_end);
-            right = clip_sample_at(a->clip, a->playhead_frame, 1, loop_start, loop_end);
-
-            size_t loop_len = loop_end - loop_start;
-            size_t fade_frames = loop_len / 2 < 64 ? loop_len / 2 : 64;
-            double distance_to_end = (double)loop_end - a->playhead_frame;
-            if(fade_frames > 0 && distance_to_end < (double)fade_frames) {
-                double blend = 1.0 - distance_to_end / (double)fade_frames;
-                double wrap_frame = (double)loop_start + ((double)fade_frames - distance_to_end);
-                float wrap_left = clip_sample_at(a->clip, wrap_frame, 0, loop_start, loop_end);
-                float wrap_right = clip_sample_at(a->clip, wrap_frame, 1, loop_start, loop_end);
-                left = (float)(left * (1.0 - blend) + wrap_left * blend);
-                right = (float)(right * (1.0 - blend) + wrap_right * blend);
-            }
-
-            left *= a->clip->gain;
-            right *= a->clip->gain;
-            a->playhead_frame += clip_frame_step(a);
-            while (a->playhead_frame >= (double)loop_end) a->playhead_frame -= (double)(loop_end - loop_start);
-            if (a->playhead_frame < (double)loop_start) a->playhead_frame = (double)loop_start;
-        } else {
-            a->metronome_beat_valid = false;
+    while(frames > 0) {
+        int chunk_frames = frames > AUDIO_CALLBACK_CHUNK_FRAMES ? AUDIO_CALLBACK_CHUNK_FRAMES : frames;
+        float mix[AUDIO_CALLBACK_CHUNK_FRAMES * 2];
+        for(int i=0;i<chunk_frames;i++){
+            render_audio_frame(a, &mix[i*2], &mix[i*2+1]);
         }
-        if(a->playback_mode == AUDIO_PLAYBACK_WAVEFORM) transport_update(a->transport, 1.0/(double)a->spec.freq);
-        float m = transport_next_metronome_sample(a->transport, a->spec.freq);
-        mix[i*2]=(left + m) * a->master_gain;
-        mix[i*2+1]=(right + m) * a->master_gain;
+        SDL_PutAudioStreamData(stream, mix, chunk_frames * (int)sizeof(float) * 2);
+        frames -= chunk_frames;
     }
-    SDL_PutAudioStreamData(stream, mix, frames * (int)sizeof(float) * 2);
-    SDL_free(mix);
 }
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport){
@@ -271,9 +340,11 @@ void audio_engine_set_playback_mode(AudioEngine *a, AudioPlaybackMode mode) {
     a->metronome_beat_valid = false;
     if(mode == AUDIO_PLAYBACK_TIMELINE) {
         if(a->timeline) {
+            int64_t range_start = 0;
+            timeline_effective_play_range(a->timeline, &range_start, NULL);
             a->timeline->playing = false;
-            a->timeline->playhead_tick = 0;
-            a->timeline_playhead_tick = 0.0;
+            a->timeline->playhead_tick = range_start;
+            a->timeline_playhead_tick = (double)range_start;
         }
         if(a->transport) {
             a->transport->playing = false;
@@ -288,15 +359,18 @@ void audio_engine_set_playback_mode(AudioEngine *a, AudioPlaybackMode mode) {
 
 void audio_engine_start_timeline(AudioEngine *a) {
     if(a->stream) SDL_LockAudioStream(a->stream);
-    if(a->timeline && a->timeline->instance_count > 0 && a->timeline->length_ticks > 0) {
+    int64_t range_start = 0, range_end = 0;
+    if(a->timeline) timeline_effective_play_range(a->timeline, &range_start, &range_end);
+    if(a->timeline && a->timeline->instance_count > 0 && range_end > range_start) {
         a->playback_mode = AUDIO_PLAYBACK_TIMELINE;
-        a->timeline_playhead_tick = 0.0;
-        a->timeline->playhead_tick = 0;
+        a->timeline_playhead_tick = (double)range_start;
+        a->timeline->playhead_tick = range_start;
         a->timeline->playing = true;
         sync_transport_to_timeline(a);
         if(a->transport) {
-            a->transport->current_seconds = 0.0;
-            a->transport->current_tick = 0;
+            a->transport->current_tick = range_start > 0 ? (uint64_t)range_start : 0;
+            a->transport->current_seconds = a->timeline->ticks_per_beat > 0 && a->transport->bpm > 0.0 ?
+                ((double)a->transport->current_tick / (double)a->timeline->ticks_per_beat) * 60.0 / a->transport->bpm : 0.0;
             a->transport->playing = true;
         }
         a->metronome_beat_valid = false;
@@ -309,8 +383,10 @@ void audio_engine_stop_timeline(AudioEngine *a, bool rewind) {
     if(a->timeline) {
         a->timeline->playing = false;
         if(rewind) {
-            a->timeline->playhead_tick = 0;
-            a->timeline_playhead_tick = 0.0;
+            int64_t range_start = 0;
+            timeline_effective_play_range(a->timeline, &range_start, NULL);
+            a->timeline->playhead_tick = range_start;
+            a->timeline_playhead_tick = (double)range_start;
         }
     }
     if(a->transport) {
@@ -318,6 +394,12 @@ void audio_engine_stop_timeline(AudioEngine *a, bool rewind) {
         a->transport->metronome_env = 0.0f;
     }
     a->metronome_beat_valid = false;
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+}
+
+void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick) {
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    set_timeline_tick_unlocked(a, tick);
     if(a->stream) SDL_UnlockAudioStream(a->stream);
 }
 

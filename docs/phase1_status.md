@@ -15,7 +15,8 @@
 - Zoom-relative keyboard and gamepad loop marker trimming.
 - Dedicated Tempo Lock mode for manual BPM/downbeat/meter/length calibration.
 - Loop capture roster with owned in-memory PCM clips and a first-pass tick-based master timeline.
-- Timeline view has separate one-shot playback that stops/rewinds at timeline end.
+- Timeline view has focus zones, a tick cursor, beat/bar grid, play range handles, and range playback.
+- Timeline playback starts from the play range and stops/rewinds or loops at the range end.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
 
 ## Build / Run
@@ -33,7 +34,7 @@ cmake --build build
 - `M`: metronome on/off
 - `T`: enter/exit Tempo Lock mode
 - `[` / `]`: adjust manual transport BPM
-- `Tab`: open/close sample selector
+- `Tab`: open/close sample selector in waveform view; cycle timeline focus in timeline view
 - `Left/Right`: smoothly pan view
 - `Up/Down`: smoothly zoom in/out
 - `A/D`: move loop start relative to visible zoom (`Shift` = larger step)
@@ -59,11 +60,40 @@ cmake --build build
 - Timeline instances use musical ticks internally: `roster_clip_index`, `start_tick`, and `duration_ticks`.
 - Captures fail cleanly with status text for a full roster, very short loops, oversized clips, or memory allocation failure.
 - Timeline playback is separate from waveform loop playback: switching to timeline view stops waveform playback and waits silently.
-- `Space`, South, or Start in timeline view plays from tick `0` to `timeline.length_ticks` once, then stops, rewinds to tick `0`, and stays silent.
+- Timeline focus zones are `TRANSPORT`, `RULER`, `PLAY RANGE`, `TRACK AREA`, and `ROSTER`.
+- `Tab` / `Shift+Tab` cycle timeline focus. Gamepad bumpers cycle focus in timeline view.
+- Timeline cursor movement snaps to one beat by default and clamps to the timeline length.
+- Timeline beat/bar grid is drawn from timeline ticks, BPM, and meter; bar lines are stronger than beat lines.
+- Play range defaults to the full timeline. `PLAY RANGE` focus can adjust start/end handles on the beat grid or reset to full timeline.
+- `Space` starts/stops timeline playback from the keyboard. Gamepad timeline transport uses the `R2` layer.
+- Timeline playback starts at `play_range_start_tick`.
+- If range looping is off, playback stops at `play_range_end_tick`, rewinds to `play_range_start_tick`, remains in timeline view, and stays silent.
+- If range looping is on, playback wraps back to `play_range_start_tick`.
 - Empty timelines do not play and show `timeline empty`.
 - Timeline clips play owned PCM at natural speed; no time-stretching or pitch correction is applied yet.
 - If natural PCM duration and instance tick duration disagree, playback stops at the earlier of audio end or instance end.
 - Metronome enable/disable is global, but waveform mode follows waveform/transport tempo and timeline mode follows master timeline tempo.
+- The audio callback avoids file IO and heap allocation; timeline/roster mutations are locked or rejected during timeline playback.
+
+## Timeline Controls
+- Keyboard `Tab` / `Shift+Tab`: cycle focus forward/back.
+- Keyboard `Space`: play/pause timeline transport.
+- Keyboard `Enter`: activate focused zone.
+- Keyboard `Escape`: exit play-range adjustment, otherwise guarded quit.
+- In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; `Shift+Left/Right` pans; `Up/Down` zoom.
+- In `PLAY RANGE`: `Enter` enters adjustment, `1` selects start handle, `2` selects end handle, `Left/Right` nudges the selected handle, `R` resets to full timeline.
+- In `ROSTER`: `Up/Down` selects a roster clip; `Enter` marks it selected.
+- Gamepad bumpers: cycle focus.
+- Gamepad plain South: activate focused zone.
+- Gamepad plain East: back/cancel focused adjustment.
+- Gamepad plain Start/Plus: reserved, no-op for now.
+- Gamepad Back/Minus: metronome on/off.
+- Gamepad `R2 + South`: play/pause timeline.
+- Gamepad `R2 + East`: stop and rewind to play range start.
+- Gamepad `R2 + West`: jump playhead and cursor to play range start without changing play state.
+- Gamepad `R2 + North`: toggle play range loop.
+- Gamepad `R2 + Start`: toggle waveform/timeline view.
+- Gamepad right-stick click: open sample selector.
 
 ## Tempo Lock Mode
 - Normal mode cuts/auditions loops; Tempo Lock mode calibrates the selected loop against musical time.
@@ -79,7 +109,7 @@ cmake --build build
 - `Ctrl+T`, `U`, or `R2 + East`: clear/de-apply tempo lock.
 - Clearing keeps the chosen params retained; if anchors move afterward, retained params are marked stale but can still seed re-entry.
 
-## Gamepad Controls
+## Gamepad Waveform Controls
 - `South` / `Start`: play/pause
 - `East`: jump playhead to loop start
 - `Back`: metronome on/off
@@ -97,12 +127,12 @@ cmake --build build
 - Left stick click: reset loop to full sample
 - Right stick click: open sample selector
 - In selector: d-pad up/down choose, south loads, east closes
-- In timeline view: South/Start play once or stop+rewind, East rewinds, left stick pans, d-pad up/down zooms
+- In timeline view: bumpers cycle focus, South activates focus, East cancels, R2+face buttons control transport
 
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.
 - Loop playback has a very short boundary crossfade, but it still needs tuning by ear.
-- No tempo map, no MIDI clips yet.
+- Timeline has no drag/drop clip placement, clip stretching, tempo map, MIDI clips, SMF save/load, or project persistence yet.
 
 ## Next
 - Tune gamepad editing feel and add unobtrusive UX hints.

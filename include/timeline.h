@@ -42,6 +42,20 @@ typedef struct {
     int midi_velocity;
 } TimelineInstance;
 
+typedef enum {
+    TIMELINE_FOCUS_TRANSPORT,
+    TIMELINE_FOCUS_RULER,
+    TIMELINE_FOCUS_PLAY_RANGE,
+    TIMELINE_FOCUS_TRACK_AREA,
+    TIMELINE_FOCUS_ROSTER,
+    TIMELINE_FOCUS_COUNT
+} TimelineFocusZone;
+
+typedef enum {
+    TIMELINE_RANGE_HANDLE_START,
+    TIMELINE_RANGE_HANDLE_END
+} TimelineRangeHandle;
+
 typedef struct {
     bool initialized;
     bool playing;
@@ -51,6 +65,11 @@ typedef struct {
     int ticks_per_beat;
     int64_t length_ticks;
     int64_t playhead_tick;
+    int64_t timeline_cursor_tick;
+    int64_t play_range_start_tick;
+    int64_t play_range_end_tick;
+    bool play_range_loop_enabled;
+    bool play_range_custom;
     double view_center_tick;
     double view_span_ticks;
     TimelineInstance instances[APP_MAX_TIMELINE_INSTANCES];

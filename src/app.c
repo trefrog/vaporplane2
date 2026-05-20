@@ -73,6 +73,96 @@ static int clamp_int(int value, int min_value, int max_value) {
     return value;
 }
 
+static int64_t clamp_i64(int64_t value, int64_t min_value, int64_t max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
+static int64_t timeline_snap_ticks(const MasterTimeline *timeline) {
+    return timeline->ticks_per_beat > 0 ? (int64_t)timeline->ticks_per_beat : 960;
+}
+
+static int64_t timeline_min_range_ticks(const MasterTimeline *timeline) {
+    int64_t length = timeline->length_ticks > 0 ? timeline->length_ticks : 0;
+    int64_t snap = timeline_snap_ticks(timeline);
+    if (length > 0 && snap > length) return length;
+    return snap > 0 ? snap : 1;
+}
+
+static const char *timeline_focus_label(TimelineFocusZone zone) {
+    switch (zone) {
+        case TIMELINE_FOCUS_TRANSPORT: return "TRANSPORT";
+        case TIMELINE_FOCUS_RULER: return "RULER";
+        case TIMELINE_FOCUS_PLAY_RANGE: return "PLAY RANGE";
+        case TIMELINE_FOCUS_TRACK_AREA: return "TRACK AREA";
+        case TIMELINE_FOCUS_ROSTER: return "ROSTER";
+        case TIMELINE_FOCUS_COUNT:
+        default: return "TIMELINE";
+    }
+}
+
+static void timeline_effective_play_range(const MasterTimeline *timeline, int64_t *start, int64_t *end) {
+    int64_t length = timeline->length_ticks > 0 ? timeline->length_ticks : 0;
+    if (length <= 0) {
+        if (start) *start = 0;
+        if (end) *end = 0;
+        return;
+    }
+
+    int64_t s = timeline->play_range_start_tick;
+    int64_t e = timeline->play_range_end_tick;
+    if (s < 0 || e > length || e <= s) {
+        s = 0;
+        e = length;
+    }
+    s = clamp_i64(s, 0, length);
+    e = clamp_i64(e, 0, length);
+    if (e <= s) {
+        s = 0;
+        e = length;
+    }
+
+    if (start) *start = s;
+    if (end) *end = e;
+}
+
+static void sync_timeline_play_range_no_lock(App *app) {
+    MasterTimeline *timeline = &app->timeline;
+    int64_t length = timeline->length_ticks > 0 ? timeline->length_ticks : 0;
+    if (length <= 0) {
+        timeline->play_range_start_tick = 0;
+        timeline->play_range_end_tick = 0;
+        timeline->timeline_cursor_tick = 0;
+        timeline->playhead_tick = 0;
+        return;
+    }
+
+    if (!timeline->play_range_custom) {
+        timeline->play_range_start_tick = 0;
+        timeline->play_range_end_tick = length;
+    } else {
+        int64_t min_len = timeline_min_range_ticks(timeline);
+        if (min_len < 1) min_len = 1;
+        timeline->play_range_start_tick = clamp_i64(timeline->play_range_start_tick, 0, length - 1);
+        timeline->play_range_end_tick = clamp_i64(timeline->play_range_end_tick, timeline->play_range_start_tick + min_len, length);
+        if (timeline->play_range_end_tick <= timeline->play_range_start_tick) {
+            timeline->play_range_start_tick = 0;
+            timeline->play_range_end_tick = length;
+            timeline->play_range_custom = false;
+        }
+    }
+
+    timeline->timeline_cursor_tick = clamp_i64(timeline->timeline_cursor_tick, 0, length);
+    timeline->playhead_tick = clamp_i64(timeline->playhead_tick, 0, length);
+}
+
+static void sync_timeline_play_range(App *app) {
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    sync_timeline_play_range_no_lock(app);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+}
+
 static void clamp_timeline_view(App *app) {
     MasterTimeline *timeline = &app->timeline;
     double length = timeline->length_ticks > 0 ? (double)timeline->length_ticks :
@@ -326,6 +416,7 @@ void app_capture_current_loop_to_roster(App *app) {
     int roster_index = app->roster_clip_count;
     app->roster[roster_index] = next;
     app->roster_clip_count++;
+    app->selected_roster_clip = roster_index;
 
     if (!app->timeline.initialized) {
         app->timeline.initialized = true;
@@ -342,9 +433,19 @@ void app_capture_current_loop_to_roster(App *app) {
         app->timeline.instances[0].midi_velocity = next.midi_velocity;
         app->timeline.length_ticks = app->timeline.instances[0].duration_ticks;
         app->timeline.playhead_tick = 0;
+        app->timeline.timeline_cursor_tick = 0;
+        app->timeline.play_range_start_tick = 0;
+        app->timeline.play_range_end_tick = app->timeline.length_ticks;
+        app->timeline.play_range_loop_enabled = false;
+        app->timeline.play_range_custom = false;
         app->timeline.view_center_tick = (double)app->timeline.length_ticks * 0.5;
         app->timeline.view_span_ticks = (double)app->timeline.length_ticks;
+        app->timeline_focus_zone = TIMELINE_FOCUS_RULER;
+        app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
+        app->timeline_play_range_adjusting = false;
+        app->selected_timeline_instance = 0;
     }
+    sync_timeline_play_range_no_lock(app);
     clamp_timeline_view(app);
 
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
@@ -373,7 +474,10 @@ void app_toggle_controls_legend(App *app) {
 
 void app_toggle_timeline_playback(App *app) {
     if (app->view_mode != APP_VIEW_TIMELINE) return;
-    if (!app->timeline.initialized || app->timeline.instance_count <= 0 || app->timeline.length_ticks <= 0) {
+    sync_timeline_play_range(app);
+    int64_t range_start = 0, range_end = 0;
+    timeline_effective_play_range(&app->timeline, &range_start, &range_end);
+    if (!app->timeline.initialized || app->timeline.instance_count <= 0 || range_end <= range_start) {
         app_set_status(app, "timeline empty");
         return;
     }
@@ -391,8 +495,165 @@ void app_toggle_timeline_playback(App *app) {
 void app_rewind_timeline(App *app) {
     if (app->view_mode != APP_VIEW_TIMELINE) return;
     audio_engine_stop_timeline(&app->audio, true);
+    int64_t range_start = 0;
+    timeline_effective_play_range(&app->timeline, &range_start, NULL);
+    app->timeline.timeline_cursor_tick = range_start;
     sync_transport_from_app(app);
     app_set_status(app, "Timeline rewound");
+}
+
+void app_timeline_jump_to_play_range_start(App *app) {
+    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    sync_timeline_play_range(app);
+    int64_t range_start = 0;
+    timeline_effective_play_range(&app->timeline, &range_start, NULL);
+    audio_engine_set_timeline_playhead(&app->audio, range_start);
+    app->timeline.timeline_cursor_tick = range_start;
+    sync_transport_from_app(app);
+    app_set_status(app, "Jumped to play range start");
+}
+
+void app_timeline_jump_playhead_to_cursor(App *app) {
+    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    sync_timeline_play_range(app);
+    audio_engine_set_timeline_playhead(&app->audio, app->timeline.timeline_cursor_tick);
+    sync_transport_from_app(app);
+    app_set_status(app, "Playhead jumped to cursor");
+}
+
+void app_timeline_toggle_play_range_loop(App *app) {
+    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    app->timeline.play_range_loop_enabled = !app->timeline.play_range_loop_enabled;
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    app_set_status(app, app->timeline.play_range_loop_enabled ? "Play range loop on" : "Play range loop off");
+}
+
+void app_timeline_cycle_focus(App *app, int direction) {
+    int zone = (int)app->timeline_focus_zone + direction;
+    while (zone < 0) zone += (int)TIMELINE_FOCUS_COUNT;
+    zone %= (int)TIMELINE_FOCUS_COUNT;
+    app->timeline_focus_zone = (TimelineFocusZone)zone;
+    if (app->timeline_focus_zone != TIMELINE_FOCUS_PLAY_RANGE) {
+        app->timeline_play_range_adjusting = false;
+    }
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Focus: %s", timeline_focus_label(app->timeline_focus_zone));
+}
+
+void app_timeline_move_cursor(App *app, int direction) {
+    if (direction == 0) return;
+    sync_timeline_play_range(app);
+    int64_t length = app->timeline.length_ticks > 0 ? app->timeline.length_ticks : 0;
+    int64_t snap = timeline_snap_ticks(&app->timeline);
+    app->timeline.timeline_cursor_tick = clamp_i64(app->timeline.timeline_cursor_tick + snap * direction, 0, length);
+}
+
+void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle) {
+    app->timeline_play_range_handle = handle;
+    app->timeline_focus_zone = TIMELINE_FOCUS_PLAY_RANGE;
+    app_set_status(app, handle == TIMELINE_RANGE_HANDLE_START ? "Play range start handle" : "Play range end handle");
+}
+
+void app_timeline_nudge_play_range(App *app, int direction) {
+    if (direction == 0) return;
+    int64_t length = app->timeline.length_ticks > 0 ? app->timeline.length_ticks : 0;
+    if (length <= 0) {
+        app_set_status(app, "timeline empty");
+        return;
+    }
+
+    int64_t snap = timeline_snap_ticks(&app->timeline);
+    int64_t min_len = timeline_min_range_ticks(&app->timeline);
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    sync_timeline_play_range_no_lock(app);
+    app->timeline.play_range_custom = true;
+    if (app->timeline_play_range_handle == TIMELINE_RANGE_HANDLE_START) {
+        int64_t max_start = app->timeline.play_range_end_tick - min_len;
+        app->timeline.play_range_start_tick = clamp_i64(app->timeline.play_range_start_tick + snap * direction, 0, max_start);
+        app->timeline.timeline_cursor_tick = app->timeline.play_range_start_tick;
+    } else {
+        int64_t min_end = app->timeline.play_range_start_tick + min_len;
+        app->timeline.play_range_end_tick = clamp_i64(app->timeline.play_range_end_tick + snap * direction, min_end, length);
+        app->timeline.timeline_cursor_tick = app->timeline.play_range_end_tick;
+    }
+    sync_timeline_play_range_no_lock(app);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+}
+
+void app_timeline_reset_play_range(App *app) {
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    app->timeline.play_range_custom = false;
+    app->timeline.play_range_start_tick = 0;
+    app->timeline.play_range_end_tick = app->timeline.length_ticks > 0 ? app->timeline.length_ticks : 0;
+    app->timeline.timeline_cursor_tick = app->timeline.play_range_start_tick;
+    sync_timeline_play_range_no_lock(app);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    app_set_status(app, "Play range reset");
+}
+
+void app_timeline_select_roster_delta(App *app, int delta) {
+    if (app->roster_clip_count <= 0) {
+        app->selected_roster_clip = -1;
+        app_set_status(app, "roster empty");
+        return;
+    }
+    if (app->selected_roster_clip < 0) app->selected_roster_clip = 0;
+    app->selected_roster_clip += delta;
+    if (app->selected_roster_clip < 0) app->selected_roster_clip = 0;
+    if (app->selected_roster_clip >= app->roster_clip_count) app->selected_roster_clip = app->roster_clip_count - 1;
+}
+
+static void app_timeline_select_instance_at_cursor(App *app) {
+    int64_t cursor = app->timeline.timeline_cursor_tick;
+    app->selected_timeline_instance = -1;
+    for (int i = 0; i < app->timeline.instance_count; ++i) {
+        TimelineInstance *instance = &app->timeline.instances[i];
+        int64_t start = instance->start_tick;
+        int64_t end = instance->start_tick + instance->duration_ticks;
+        if (cursor >= start && cursor < end) {
+            app->selected_timeline_instance = i;
+            app_set_status(app, "Selected timeline instance");
+            return;
+        }
+    }
+    app_set_status(app, "no instance at cursor");
+}
+
+void app_timeline_activate_focus(App *app) {
+    switch (app->timeline_focus_zone) {
+        case TIMELINE_FOCUS_TRANSPORT:
+            app_toggle_timeline_playback(app);
+            break;
+        case TIMELINE_FOCUS_RULER:
+            app_timeline_jump_playhead_to_cursor(app);
+            break;
+        case TIMELINE_FOCUS_PLAY_RANGE:
+            app->timeline_play_range_adjusting = true;
+            app_set_status(app, "Adjusting play range");
+            break;
+        case TIMELINE_FOCUS_TRACK_AREA:
+            app_timeline_select_instance_at_cursor(app);
+            break;
+        case TIMELINE_FOCUS_ROSTER:
+            if (app->selected_roster_clip >= 0 && app->selected_roster_clip < app->roster_clip_count) {
+                SDL_snprintf(app->status_text, sizeof(app->status_text), "Selected %s", app->roster[app->selected_roster_clip].name);
+            } else {
+                app_set_status(app, "roster empty");
+            }
+            break;
+        case TIMELINE_FOCUS_COUNT:
+        default:
+            break;
+    }
+}
+
+void app_timeline_cancel_focus(App *app) {
+    if (app->timeline_play_range_adjusting) {
+        app->timeline_play_range_adjusting = false;
+        app_set_status(app, "Play range adjust off");
+        return;
+    }
+    app_set_status(app, "Timeline focus idle");
 }
 
 void app_pan_timeline_view(App *app, double fraction) {
@@ -601,7 +862,7 @@ void app_select_sample_delta(App *app, int delta) {
 static void app_render_controls_legend(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
-    SDL_FRect panel = { 36.0f, 88.0f, 560.0f, 258.0f };
+    SDL_FRect panel = { 36.0f, 88.0f, 660.0f, 326.0f };
     if (panel.w > (float)w - 72.0f) panel.w = (float)w - 72.0f;
     if (panel.h > (float)h - 112.0f) panel.h = (float)h - 112.0f;
 
@@ -615,17 +876,32 @@ static void app_render_controls_legend(App *app) {
     float x = panel.x + 16.0f;
     float y = panel.y + 14.0f;
     SDL_RenderDebugText(app->renderer, x, y, "CONTROLS"); y += 22.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "F1 legend   F2 timeline/waveform   Tab sample picker"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "F1 legend   F2 timeline/waveform   Tab sample picker in waveform"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: Space play   M metronome   [/] BPM   T tempo lock"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "A/D loop start   J/L loop end   Shift = larger step"); y += 22.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space/South/Start play once   Home/East rewind"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline: arrows/left stick pan   up/down/d-pad zoom"); y += 22.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Timeline: Tab/Shift+Tab or bumpers cycle focus zones"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space play/pause   Enter/South activate focus   East cancel"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Ruler: Left/Right cursor by beat   Shift+Left/Right or stick pan"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Play Range: Enter/South adjust   1/2 or West/North choose handle"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Timeline R2: South play   East stop   West jump start   North loop"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad waveform: South/Start play   Back metronome"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "R2+South set loop to visible   L2+R2+South capture loop"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "R2+North tempo lock   R2+Start timeline/waveform"); y += 22.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Waveform R2+North tempo lock   R2+Start timeline/waveform"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: South apply   East cancel   R2+East clear"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: d-pad fine BPM/bars   sticks/bumpers downbeat");
+}
+
+static float timeline_x_for_tick(double tick, double view_start, double view_span, float x, float w) {
+    return x + (float)((tick - view_start) / view_span) * w;
+}
+
+static void render_focus_outline(App *app, SDL_FRect rect, TimelineFocusZone zone) {
+    if (app->timeline_focus_zone != zone) return;
+    SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+    SDL_RenderRect(app->renderer, &rect);
+    SDL_FRect inner = { rect.x + 2.0f, rect.y + 2.0f, rect.w - 4.0f, rect.h - 4.0f };
+    if (inner.w > 0.0f && inner.h > 0.0f) SDL_RenderRect(app->renderer, &inner);
 }
 
 static void app_render_timeline(App *app) {
@@ -634,11 +910,28 @@ static void app_render_timeline(App *app) {
     SDL_SetRenderDrawColor(app->renderer, 8, 7, 13, 255);
     SDL_RenderClear(app->renderer);
 
+    float roster_w = 300.0f;
+    float roster_x = (float)w - roster_w - 24.0f;
+    if (roster_x < 560.0f) roster_x = (float)w * 0.62f;
+    float timeline_x = 56.0f;
+    float timeline_y = 258.0f;
+    float timeline_w = roster_x - timeline_x - 28.0f;
+    if (timeline_w < 220.0f) timeline_w = (float)w - 96.0f;
+    float lane_h = 72.0f;
+    SDL_FRect transport_rect = { 24.0f, 132.0f, timeline_w + 32.0f, 72.0f };
+    SDL_FRect ruler_rect = { timeline_x, timeline_y - 58.0f, timeline_w, 42.0f };
+    SDL_FRect play_range_rect = { timeline_x, timeline_y - 12.0f, timeline_w, 18.0f };
+    SDL_FRect track_rect = { timeline_x, timeline_y + 8.0f, timeline_w, lane_h - 16.0f };
+
     SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
     SDL_RenderDebugText(app->renderer, 24, 132, "MASTER TIMELINE");
+    SDL_RenderDebugTextFormat(app->renderer, 24, 196, "focus: %s%s",
+                              timeline_focus_label(app->timeline_focus_zone),
+                              app->timeline_play_range_adjusting ? " / adjusting" : "");
     if (!app->timeline.initialized) {
         SDL_RenderDebugText(app->renderer, 24, 158, "No captured loops yet.");
         SDL_RenderDebugText(app->renderer, 24, 176, "Use L2+R2+South to capture the selected loop into the roster.");
+        render_focus_outline(app, transport_rect, TIMELINE_FOCUS_TRANSPORT);
         return;
     }
 
@@ -651,15 +944,14 @@ static void app_render_timeline(App *app) {
                               (long long)app->timeline.length_ticks,
                               (long long)audio_engine_get_timeline_playhead_tick(&app->audio),
                               audio_engine_timeline_is_playing(&app->audio) ? "playing" : "stopped");
+    int64_t range_start = 0, range_end = 0;
+    timeline_effective_play_range(&app->timeline, &range_start, &range_end);
+    SDL_RenderDebugTextFormat(app->renderer, 24, 214, "cursor: %lld  range: %lld..%lld  loop: %s",
+                              (long long)app->timeline.timeline_cursor_tick,
+                              (long long)range_start,
+                              (long long)range_end,
+                              app->timeline.play_range_loop_enabled ? "on" : "off");
 
-    float roster_w = 300.0f;
-    float roster_x = (float)w - roster_w - 24.0f;
-    if (roster_x < 560.0f) roster_x = (float)w * 0.62f;
-    float timeline_x = 56.0f;
-    float timeline_y = 228.0f;
-    float timeline_w = roster_x - timeline_x - 28.0f;
-    if (timeline_w < 220.0f) timeline_w = (float)w - 96.0f;
-    float lane_h = 54.0f;
     clamp_timeline_view(app);
     double view_start = app->timeline.view_center_tick - app->timeline.view_span_ticks * 0.5;
     double view_end = app->timeline.view_center_tick + app->timeline.view_span_ticks * 0.5;
@@ -667,28 +959,69 @@ static void app_render_timeline(App *app) {
     double view_span = view_end - view_start;
 
     SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(app->renderer, 34, 34, 48, 255);
-    SDL_FRect rail = { timeline_x, timeline_y, timeline_w, lane_h };
+    SDL_SetRenderDrawColor(app->renderer, 14, 14, 24, 255);
+    SDL_FRect rail = { timeline_x, timeline_y - 58.0f, timeline_w, lane_h + 64.0f };
     SDL_RenderFillRect(app->renderer, &rail);
     SDL_SetRenderDrawColor(app->renderer, 85, 90, 112, 255);
     SDL_RenderRect(app->renderer, &rail);
 
+    SDL_SetRenderDrawColor(app->renderer, 34, 34, 48, 255);
+    SDL_RenderFillRect(app->renderer, &track_rect);
+    SDL_SetRenderDrawColor(app->renderer, 85, 90, 112, 255);
+    SDL_RenderRect(app->renderer, &track_rect);
+
+    int64_t beat_ticks = timeline_snap_ticks(&app->timeline);
     int64_t bar_ticks = (int64_t)app->timeline.ticks_per_beat * app->timeline.timeline_beats_per_bar;
-    if (bar_ticks < 1) bar_ticks = app->timeline.ticks_per_beat;
-    int64_t first_bar = (int64_t)floor(view_start / (double)bar_ticks) * bar_ticks;
-    if (first_bar < 0) first_bar = 0;
-    for (int64_t tick = first_bar; (double)tick <= view_end; tick += bar_ticks) {
-        float x = timeline_x + (float)(((double)tick - view_start) / view_span) * timeline_w;
-        double seconds = app->timeline.timeline_bpm > 0.0 ?
-            ((double)tick / (double)app->timeline.ticks_per_beat) * 60.0 / app->timeline.timeline_bpm : 0.0;
-        SDL_SetRenderDrawColor(app->renderer, 120, 125, 150, 150);
-        SDL_RenderLine(app->renderer, x, timeline_y - 18.0f, x, timeline_y + lane_h + 8.0f);
-        SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 255);
-        SDL_RenderDebugTextFormat(app->renderer, x + 4.0f, timeline_y - 34.0f, "%.2fs", seconds);
+    if (bar_ticks < 1) bar_ticks = beat_ticks;
+    int64_t grid_step = beat_ticks > 0 ? beat_ticks : 960;
+    while (grid_step > 0 && view_span / (double)grid_step > 160.0) grid_step *= 2;
+    int64_t first_grid = (int64_t)floor(view_start / (double)grid_step) * grid_step;
+    if (first_grid < 0) first_grid = 0;
+    for (int64_t tick = first_grid; grid_step > 0 && (double)tick <= view_end; tick += grid_step) {
+        float x = timeline_x_for_tick((double)tick, view_start, view_span, timeline_x, timeline_w);
+        bool bar = bar_ticks > 0 && tick % bar_ticks == 0;
+        if (bar) SDL_SetRenderDrawColor(app->renderer, 130, 135, 170, 180);
+        else SDL_SetRenderDrawColor(app->renderer, 70, 72, 96, 120);
+        SDL_RenderLine(app->renderer, x, timeline_y - 58.0f, x, timeline_y + lane_h + 8.0f);
+        if (bar && x < timeline_x + timeline_w - 28.0f) {
+            int64_t bar_index = bar_ticks > 0 ? tick / bar_ticks + 1 : 1;
+            SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 255);
+            SDL_RenderDebugTextFormat(app->renderer, x + 4.0f, timeline_y - 52.0f, "bar %lld", (long long)bar_index);
+        } else if (view_span / (double)grid_step < 24.0 && x < timeline_x + timeline_w - 18.0f) {
+            int64_t beat_index = beat_ticks > 0 ? tick / beat_ticks + 1 : 1;
+            SDL_SetRenderDrawColor(app->renderer, 150, 158, 176, 210);
+            SDL_RenderDebugTextFormat(app->renderer, x + 4.0f, timeline_y - 38.0f, "%lld", (long long)beat_index);
+        }
+    }
+
+    if (range_end > range_start) {
+        float range_x0 = timeline_x_for_tick((double)range_start, view_start, view_span, timeline_x, timeline_w);
+        float range_x1 = timeline_x_for_tick((double)range_end, view_start, view_span, timeline_x, timeline_w);
+        if (range_x0 < timeline_x) range_x0 = timeline_x;
+        if (range_x1 > timeline_x + timeline_w) range_x1 = timeline_x + timeline_w;
+        if (range_x1 > range_x0) {
+            SDL_FRect range_rect = { range_x0, timeline_y - 12.0f, range_x1 - range_x0, lane_h + 20.0f };
+            SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, app->timeline.play_range_loop_enabled ? 56 : 34);
+            SDL_RenderFillRect(app->renderer, &range_rect);
+        }
+        float start_x = timeline_x_for_tick((double)range_start, view_start, view_span, timeline_x, timeline_w);
+        float end_x = timeline_x_for_tick((double)range_end, view_start, view_span, timeline_x, timeline_w);
+        if (start_x >= timeline_x && start_x <= timeline_x + timeline_w) {
+            SDL_FRect tab = { start_x - 5.0f, timeline_y - 20.0f, 10.0f, 18.0f };
+            SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+            SDL_RenderFillRect(app->renderer, &tab);
+            if (app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE && app->timeline_play_range_handle == TIMELINE_RANGE_HANDLE_START) SDL_RenderRect(app->renderer, &tab);
+        }
+        if (end_x >= timeline_x && end_x <= timeline_x + timeline_w) {
+            SDL_FRect tab = { end_x - 5.0f, timeline_y - 20.0f, 10.0f, 18.0f };
+            SDL_SetRenderDrawColor(app->renderer, 255, 180, 100, 255);
+            SDL_RenderFillRect(app->renderer, &tab);
+            if (app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE && app->timeline_play_range_handle == TIMELINE_RANGE_HANDLE_END) SDL_RenderRect(app->renderer, &tab);
+        }
     }
 
     if (app->timeline.length_ticks > 0) {
-        float x = timeline_x + (float)(((double)app->timeline.length_ticks - view_start) / view_span) * timeline_w;
+        float x = timeline_x_for_tick((double)app->timeline.length_ticks, view_start, view_span, timeline_x, timeline_w);
         if (x >= timeline_x && x <= timeline_x + timeline_w) {
             SDL_SetRenderDrawColor(app->renderer, 255, 215, 110, 230);
             SDL_RenderLine(app->renderer, x, timeline_y - 22.0f, x, timeline_y + lane_h + 12.0f);
@@ -696,11 +1029,18 @@ static void app_render_timeline(App *app) {
         }
     }
 
+    float cursor_x = timeline_x_for_tick((double)app->timeline.timeline_cursor_tick, view_start, view_span, timeline_x, timeline_w);
+    if (cursor_x >= timeline_x && cursor_x <= timeline_x + timeline_w) {
+        SDL_SetRenderDrawColor(app->renderer, 250, 250, 255, 255);
+        SDL_RenderLine(app->renderer, cursor_x, timeline_y - 62.0f, cursor_x, timeline_y + lane_h + 20.0f);
+        SDL_RenderDebugText(app->renderer, cursor_x + 5.0f, timeline_y + lane_h + 22.0f, "cursor");
+    }
+
     int64_t playhead_tick = audio_engine_get_timeline_playhead_tick(&app->audio);
-    float playhead_x = timeline_x + (float)(((double)playhead_tick - view_start) / view_span) * timeline_w;
+    float playhead_x = timeline_x_for_tick((double)playhead_tick, view_start, view_span, timeline_x, timeline_w);
     if (playhead_x >= timeline_x && playhead_x <= timeline_x + timeline_w) {
         SDL_SetRenderDrawColor(app->renderer, 180, 255, 120, 255);
-        SDL_RenderLine(app->renderer, playhead_x, timeline_y - 28.0f, playhead_x, timeline_y + lane_h + 16.0f);
+        SDL_RenderLine(app->renderer, playhead_x, timeline_y - 62.0f, playhead_x, timeline_y + lane_h + 20.0f);
     }
 
     for (int i = 0; i < app->timeline.instance_count; ++i) {
@@ -710,16 +1050,17 @@ static void app_render_timeline(App *app) {
         double instance_start = (double)instance->start_tick;
         double instance_end = (double)(instance->start_tick + instance->duration_ticks);
         if (instance_end < view_start || instance_start > view_end) continue;
-        float x = timeline_x + (float)((instance_start - view_start) / view_span) * timeline_w;
-        float end_x = timeline_x + (float)((instance_end - view_start) / view_span) * timeline_w;
+        float x = timeline_x_for_tick(instance_start, view_start, view_span, timeline_x, timeline_w);
+        float end_x = timeline_x_for_tick(instance_end, view_start, view_span, timeline_x, timeline_w);
         if (x < timeline_x) x = timeline_x;
         if (end_x > timeline_x + timeline_w) end_x = timeline_x + timeline_w;
         float block_w = end_x - x;
         if (block_w < 8.0f) block_w = 8.0f;
-        SDL_FRect block = { x + 2.0f, timeline_y + 8.0f, block_w - 4.0f, lane_h - 16.0f };
+        SDL_FRect block = { x + 2.0f, track_rect.y + 8.0f, block_w - 4.0f, track_rect.h - 16.0f };
         SDL_SetRenderDrawColor(app->renderer, clip->color.r, clip->color.g, clip->color.b, 218);
         SDL_RenderFillRect(app->renderer, &block);
-        SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, 220);
+        if (i == app->selected_timeline_instance) SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, 255);
+        else SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, 220);
         SDL_RenderRect(app->renderer, &block);
         SDL_SetRenderDrawColor(app->renderer, 8, 8, 12, 255);
         SDL_RenderDebugText(app->renderer, block.x + 8.0f, block.y + 10.0f, clip->name);
@@ -729,6 +1070,11 @@ static void app_render_timeline(App *app) {
     if (timeline_w >= 220.0f) {
         SDL_RenderDebugText(app->renderer, timeline_x, timeline_y + lane_h + 24.0f, "00:00:00");
     }
+
+    render_focus_outline(app, transport_rect, TIMELINE_FOCUS_TRANSPORT);
+    render_focus_outline(app, ruler_rect, TIMELINE_FOCUS_RULER);
+    render_focus_outline(app, play_range_rect, TIMELINE_FOCUS_PLAY_RANGE);
+    render_focus_outline(app, track_rect, TIMELINE_FOCUS_TRACK_AREA);
 
     if (roster_x + roster_w < (float)w) {
         SDL_FRect roster_panel = { roster_x, 132.0f, roster_w, (float)h - 162.0f };
@@ -743,6 +1089,11 @@ static void app_render_timeline(App *app) {
         for (int i = 0; i < visible; ++i) {
             RosterClip *clip = &app->roster[i];
             float y = roster_panel.y + 42.0f + (float)i * 18.0f;
+            if (i == app->selected_roster_clip) {
+                SDL_FRect row = { roster_panel.x + 10.0f, y - 3.0f, roster_panel.w - 20.0f, 16.0f };
+                SDL_SetRenderDrawColor(app->renderer, 64, 72, 96, 210);
+                SDL_RenderFillRect(app->renderer, &row);
+            }
             SDL_FRect swatch = { roster_panel.x + 14.0f, y - 1.0f, 12.0f, 12.0f };
             SDL_SetRenderDrawColor(app->renderer, clip->color.r, clip->color.g, clip->color.b, 255);
             SDL_RenderFillRect(app->renderer, &swatch);
@@ -750,6 +1101,7 @@ static void app_render_timeline(App *app) {
             SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 34.0f, y, "%s  %.1fb %.2fbpm",
                                       clip->name, clip->target_beats, clip->source_bpm);
         }
+        render_focus_outline(app, roster_panel, TIMELINE_FOCUS_ROSTER);
     }
 }
 
@@ -850,8 +1202,18 @@ bool app_init(App *app){
     app->timeline.timeline_bpm = 120.0;
     app->timeline.timeline_beats_per_bar = 4;
     app->timeline.timeline_beat_unit = 4;
+    app->timeline.timeline_cursor_tick = 0;
+    app->timeline.play_range_start_tick = 0;
+    app->timeline.play_range_end_tick = 0;
+    app->timeline.play_range_loop_enabled = false;
+    app->timeline.play_range_custom = false;
     app->timeline.view_center_tick = (double)app->timeline.ticks_per_beat * 2.0;
     app->timeline.view_span_ticks = (double)app->timeline.ticks_per_beat * 4.0;
+    app->timeline_focus_zone = TIMELINE_FOCUS_RULER;
+    app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
+    app->timeline_play_range_adjusting = false;
+    app->selected_roster_clip = -1;
+    app->selected_timeline_instance = -1;
     waveform_view_init(&app->view);
     if(!audio_engine_init(&app->audio,&app->clip,&app->transport)) return false;
     audio_engine_set_timeline(&app->audio, app->roster, &app->roster_clip_count, &app->timeline);

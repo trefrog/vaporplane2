@@ -35,5 +35,6 @@ void audio_engine_set_timeline(AudioEngine *a, RosterClip *roster, int *roster_c
 void audio_engine_set_playback_mode(AudioEngine *a, AudioPlaybackMode mode);
 void audio_engine_start_timeline(AudioEngine *a);
 void audio_engine_stop_timeline(AudioEngine *a, bool rewind);
+void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick);
 bool audio_engine_timeline_is_playing(const AudioEngine *a);
 int64_t audio_engine_get_timeline_playhead_tick(const AudioEngine *a);
