@@ -625,7 +625,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "R2+South set loop to visible   L2+R2+South capture loop"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "R2+North tempo lock   R2+Start timeline/waveform"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: South apply   East cancel   R2+East clear"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: d-pad BPM/bars   sticks/bumpers downbeat");
+    SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: d-pad fine BPM/bars   sticks/bumpers downbeat");
 }
 
 static void app_render_timeline(App *app) {

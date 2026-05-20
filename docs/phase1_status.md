@@ -69,7 +69,7 @@ cmake --build build
 - Normal mode cuts/auditions loops; Tempo Lock mode calibrates the selected loop against musical time.
 - `T` or gamepad `R2 + North`: enter/exit Tempo Lock mode.
 - While active, loop anchor editing is disabled.
-- `[` / `]` or d-pad left/right: adjust draft BPM.
+- `[` / `]` or d-pad left/right: adjust draft BPM; gamepad uses fine nudges with a slow hold-repeat.
 - `,` / `.` or d-pad up/down: cycle target bars through `0.5`, `1`, `2`, `4`, `8`.
 - `B` / `V`, `N` / `Shift+N`, left stick, or bumpers: nudge downbeat anchor.
 - Right stick: pan/zoom waveform view while calibrating.

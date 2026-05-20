@@ -34,6 +34,25 @@ static float roster_sample_at(const RosterClip *clip, double frame, int channel)
     return (float)((1.0 - frac) * s0 + frac * s1);
 }
 
+static double timeline_declik_gain(double elapsed_seconds, double source_duration_seconds, double instance_duration_seconds, int output_rate) {
+    double audible_duration = fmin(source_duration_seconds, instance_duration_seconds);
+    if(audible_duration <= 0.0) return 0.0;
+    double fade_seconds = output_rate > 0 ? 128.0 / (double)output_rate : 0.0027;
+    if(fade_seconds > audible_duration * 0.5) fade_seconds = audible_duration * 0.5;
+    if(fade_seconds <= 0.0) return 1.0;
+
+    double remaining = audible_duration - elapsed_seconds;
+    double gain = 1.0;
+    if(elapsed_seconds < fade_seconds) gain = elapsed_seconds / fade_seconds;
+    if(remaining < fade_seconds) {
+        double out_gain = remaining / fade_seconds;
+        if(out_gain < gain) gain = out_gain;
+    }
+    if(gain < 0.0) gain = 0.0;
+    if(gain > 1.0) gain = 1.0;
+    return gain;
+}
+
 static int64_t metronome_beat_for_frame(const Transport *t, const AudioClip *clip, double frame, double frames_per_beat) {
     (void)clip;
     double rel = frame - (double)t->metronome_downbeat_frame;
@@ -140,9 +159,13 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
         double elapsed_seconds = elapsed_ticks / ticks_per_second;
         double source_frame = elapsed_seconds * (double)clip->sample_rate;
         if(source_frame >= (double)clip->frame_count) continue;
+        double source_duration_seconds = (double)clip->frame_count / (double)clip->sample_rate;
+        double instance_duration_seconds = (double)instance->duration_ticks / ticks_per_second;
+        double gain = timeline_declik_gain(elapsed_seconds, source_duration_seconds, instance_duration_seconds, a->spec.freq);
+        if(gain <= 0.0) continue;
 
-        *left += roster_sample_at(clip, source_frame, 0);
-        *right += roster_sample_at(clip, source_frame, 1);
+        *left += roster_sample_at(clip, source_frame, 0) * (float)gain;
+        *right += roster_sample_at(clip, source_frame, 1) * (float)gain;
     }
 
     a->timeline_playhead_tick += tick_step;

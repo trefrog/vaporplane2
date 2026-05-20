@@ -6,6 +6,12 @@ static void nudge(size_t *v, long d, size_t minv, size_t maxv){ long nv=(long)(*
 static int gamepad_edit_target = 0;
 static bool previous_buttons[SDL_GAMEPAD_BUTTON_COUNT];
 static Uint64 quit_confirm_until_ns = 0;
+static int tempo_bpm_dpad_direction = 0;
+static double tempo_bpm_dpad_repeat_timer = 0.0;
+
+static const double TEMPO_LOCK_BPM_DPAD_NUDGE = 0.1;
+static const double TEMPO_LOCK_BPM_DPAD_REPEAT_DELAY = 0.35;
+static const double TEMPO_LOCK_BPM_DPAD_REPEAT_INTERVAL = 0.12;
 
 static void clamp_view_target(App *app) {
     if(app->view.target_span<0.01) app->view.target_span=0.01;
@@ -80,6 +86,35 @@ static void set_loop_to_visible(App *app) {
 
 static long tempo_anchor_step(App *app, double fraction) {
     return visible_fraction_frames(app, fraction);
+}
+
+static void reset_tempo_bpm_dpad_repeat(void) {
+    tempo_bpm_dpad_direction = 0;
+    tempo_bpm_dpad_repeat_timer = 0.0;
+}
+
+static void update_tempo_bpm_dpad(App *app, double dt) {
+    bool left = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    bool right = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    int direction = (right ? 1 : 0) - (left ? 1 : 0);
+
+    if(direction == 0) {
+        reset_tempo_bpm_dpad_repeat();
+        return;
+    }
+
+    if(direction != tempo_bpm_dpad_direction) {
+        tempo_bpm_dpad_direction = direction;
+        tempo_bpm_dpad_repeat_timer = TEMPO_LOCK_BPM_DPAD_REPEAT_DELAY;
+        app_adjust_tempo_lock_bpm(app, (double)direction * TEMPO_LOCK_BPM_DPAD_NUDGE);
+        return;
+    }
+
+    tempo_bpm_dpad_repeat_timer -= dt;
+    if(tempo_bpm_dpad_repeat_timer <= 0.0) {
+        app_adjust_tempo_lock_bpm(app, (double)direction * TEMPO_LOCK_BPM_DPAD_NUDGE);
+        tempo_bpm_dpad_repeat_timer = TEMPO_LOCK_BPM_DPAD_REPEAT_INTERVAL;
+    }
 }
 
 static bool handle_tempo_lock_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
@@ -215,6 +250,7 @@ bool input_handle_event(App *app, const SDL_Event *e){
 
 void input_update_gamepad(App *app, double dt){
     if(!app->gamepad) return;
+    if(!app->tempo_lock_mode) reset_tempo_bpm_dpad_repeat();
 
     if(app->sample_selector_open) {
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_select_sample_delta(app, -1);
@@ -274,8 +310,7 @@ void input_update_gamepad(App *app, double dt){
         else if(west_pressed) app_cycle_tempo_lock_meter(app, -1);
         if(back_pressed) app->transport.metronome_enabled=!app->transport.metronome_enabled;
 
-        if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_adjust_tempo_lock_bpm(app, -12.0 * dt);
-        if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_adjust_tempo_lock_bpm(app, 12.0 * dt);
+        update_tempo_bpm_dpad(app, dt);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_cycle_tempo_lock_target_bars(app, 1);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_cycle_tempo_lock_target_bars(app, -1);
 
