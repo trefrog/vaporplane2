@@ -5,3 +5,4 @@ build/
 compile_commands.json
 assets/samples/*
 !assets/samples/.gitkeep
+!assets/samples/*.wav.json

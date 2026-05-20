@@ -175,13 +175,14 @@ void input_update_gamepad(App *app, double dt){
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_select_sample_delta(app, 1);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_SOUTH) && app_load_selected_sample(app)) app->sample_selector_open=false;
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_EAST)) app->sample_selector_open=false;
-        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_BACK)) app_refresh_sample_list(app);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_BACK)) app->transport.metronome_enabled=!app->transport.metronome_enabled;
         return;
     }
 
     double lx = axis_value(app->gamepad, SDL_GAMEPAD_AXIS_LEFTX);
     double ly = axis_value(app->gamepad, SDL_GAMEPAD_AXIS_LEFTY);
     double rx = axis_value(app->gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
+    double ry = axis_value(app->gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
     double left_trigger = axis_value(app->gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
     double right_trigger = axis_value(app->gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
     if(left_trigger < 0.0) left_trigger = 0.0;
@@ -200,11 +201,12 @@ void input_update_gamepad(App *app, double dt){
 
     if(app->tempo_lock_mode) {
         if(r2_shift && north_pressed) app_cancel_tempo_lock_mode(app);
-        else if((r2_shift && east_pressed) || back_pressed) app_clear_tempo_lock(app);
+        else if(r2_shift && east_pressed) app_clear_tempo_lock(app);
         else if(south_pressed) app_apply_tempo_lock(app);
         else if(east_pressed) app_cancel_tempo_lock_mode(app);
         else if(north_pressed) app_cycle_tempo_lock_meter(app, 1);
         else if(west_pressed) app_cycle_tempo_lock_meter(app, -1);
+        if(back_pressed) app->transport.metronome_enabled=!app->transport.metronome_enabled;
 
         if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_adjust_tempo_lock_bpm(app, -12.0 * dt);
         if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_adjust_tempo_lock_bpm(app, 12.0 * dt);
@@ -218,6 +220,9 @@ void input_update_gamepad(App *app, double dt){
         if(right_shoulder_pressed || SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) anchor_frames += bumper_frames;
         if(anchor_frames != 0) app_adjust_tempo_lock_downbeat(app, anchor_frames);
 
+        app->view.target_center += rx * app->view.target_span * dt * 0.9;
+        app->view.target_span += ry * app->view.target_span * dt * 1.4;
+        clamp_view_target(app);
         return;
     }
 
@@ -257,9 +262,6 @@ void input_update_gamepad(App *app, double dt){
     if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app->view.target_span *= 1.0 - fmin(0.9, dt * 1.8);
     if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app->view.target_span *= 1.0 + dt * 1.8;
 
-    double trim_speed = (double)visible_frame_count(app) * 0.9;
-    trim_speed *= 1.0 - left_trigger * 0.8;
-    long trim_frames = (long)(rx * trim_speed * dt);
     if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) {
         gamepad_edit_target = 0;
     }
@@ -268,6 +270,7 @@ void input_update_gamepad(App *app, double dt){
     }
     long dpad_step = (long)((double)visible_frame_count(app) * 0.1 * dt * (1.0 - left_trigger * 0.8));
     if(dpad_step < 1) dpad_step = 1;
+    long trim_frames = 0;
     if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) trim_frames -= dpad_step;
     if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) trim_frames += dpad_step;
     if(trim_frames != 0) nudge_loop_edge(app, gamepad_edit_target, trim_frames);

@@ -11,6 +11,8 @@ typedef struct {
     AudioClip *clip;
     Transport *transport;
     double playhead_frame;
+    int64_t last_metronome_beat;
+    bool metronome_beat_valid;
     float master_gain;
 } AudioEngine;
 

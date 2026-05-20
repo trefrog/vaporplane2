@@ -3,10 +3,12 @@
 ## Implemented
 - C11 + SDL3 + CMake app split into modules: app, input, transport, audio engine, clip, waveform.
 - WAV loading from `assets/samples/` with runtime generated fallback if no WAV is available.
+- Optional `*.wav.json` sidecar metadata can define source BPM and related loop metadata.
 - In-app sample selector backed by reusable `load_clip_from_path(App *, const char *)`.
 - `AudioClip` metadata for path/rate/channels/frames/loop/music metadata/gain/playback rate.
 - Transport with BPM, PPQN, beats-per-bar, beat-unit, play/pause, tick/second conversion.
 - Metronome pip on beat with downbeat accent and toggle.
+- Audible metronome clicks are driven from the same frame/downbeat grid as the visual beat guides.
 - Looping sample playback with loop-start/loop-end edits while running.
 - Waveform rendering with loop markers and playhead marker.
 - Smooth target-based waveform panning/zooming.
@@ -52,10 +54,11 @@ cmake --build build
 - `[` / `]` or d-pad left/right: adjust draft BPM.
 - `,` / `.` or d-pad up/down: cycle target bars through `0.5`, `1`, `2`, `4`, `8`.
 - `B` / `V`, `N` / `Shift+N`, left stick, or bumpers: nudge downbeat anchor.
+- Right stick: pan/zoom waveform view while calibrating.
 - `M`, gamepad North, or gamepad West: cycle meter among `3/4`, `4/4`, `6/8`.
 - `Return` or South: apply tempo lock.
 - `Escape` or East: cancel without applying.
-- `Ctrl+T`, `U`, Back, or `R2 + East`: clear/de-apply tempo lock.
+- `Ctrl+T`, `U`, or `R2 + East`: clear/de-apply tempo lock.
 - Clearing keeps the chosen params retained; if anchors move afterward, retained params are marked stale but can still seed re-entry.
 
 ## Gamepad Controls
@@ -66,15 +69,14 @@ cmake --build build
 - `North` / right shoulder: select and focus loop end
 - Left stick: pan the waveform view
 - D-pad up/down: zoom in/out
-- Right stick left/right: trim the selected loop edge relative to visible zoom
-- D-pad left/right: fine-trim the selected loop edge relative to visible zoom
+- D-pad left/right: trim the selected loop edge relative to visible zoom
 - Left trigger: finer trimming
 - Right trigger + South: set loop markers to the visible screen range
 - Right trigger + North: enter/exit Tempo Lock mode
 - Right trigger + East: clear/de-apply Tempo Lock
 - Left stick click: reset loop to full sample
 - Right stick click: open sample selector
-- In selector: d-pad up/down choose, south loads, east closes, back refreshes
+- In selector: d-pad up/down choose, south loads, east closes
 
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.

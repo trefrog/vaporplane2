@@ -30,19 +30,23 @@ static void sync_transport_from_app(App *app) {
         app->transport.bpm = app->tempo_lock_draft.bpm;
         app->transport.beats_per_bar = app->tempo_lock_draft.beats_per_bar;
         app->transport.beat_unit = app->tempo_lock_draft.beat_unit;
+        app->transport.metronome_downbeat_frame = app->tempo_lock_draft.downbeat_frame;
     } else if (app->transport_bpm_manual) {
         app->transport.bpm = app->transport_bpm;
         app->transport.beats_per_bar = app->clip.beats_per_bar > 0 ? app->clip.beats_per_bar : 4;
         app->transport.beat_unit = app->clip.beat_unit > 0 ? app->clip.beat_unit : 4;
+        app->transport.metronome_downbeat_frame = app->clip.loop_start_frame;
     } else if (app->clip.clip_tempo_locked) {
         app->transport_bpm = app->clip.tempo_lock.bpm;
         app->transport.bpm = app->clip.tempo_lock.bpm;
         app->transport.beats_per_bar = app->clip.tempo_lock.beats_per_bar;
         app->transport.beat_unit = app->clip.tempo_lock.beat_unit;
+        app->transport.metronome_downbeat_frame = app->clip.tempo_lock.downbeat_frame;
     } else {
         app->transport.bpm = app->transport_bpm;
         app->transport.beats_per_bar = app->clip.beats_per_bar > 0 ? app->clip.beats_per_bar : 4;
         app->transport.beat_unit = app->clip.beat_unit > 0 ? app->clip.beat_unit : 4;
+        app->transport.metronome_downbeat_frame = app->clip.downbeat_frame;
     }
 }
 
@@ -188,6 +192,7 @@ void app_adjust_tempo_lock_downbeat(App *app, long frames) {
     if (next < 0) next = 0;
     if (app->clip.frame_count > 0 && (size_t)next >= app->clip.frame_count) next = (long)app->clip.frame_count - 1;
     app->tempo_lock_draft.downbeat_frame = (size_t)next;
+    sync_transport_from_app(app);
 }
 
 void app_cycle_tempo_lock_target_bars(App *app, int direction) {
@@ -232,6 +237,7 @@ void app_note_loop_anchors_moved(App *app) {
          app->clip.loop_end_frame != app->retained_loop_end_frame)) {
         app->retained_tempo_lock_stale = true;
     }
+    sync_transport_from_app(app);
 }
 
 void app_refresh_sample_list(App *app) {
