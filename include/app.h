@@ -14,6 +14,13 @@ typedef struct {
     char name[APP_SAMPLE_NAME_MAX];
 } SampleEntry;
 
+typedef enum {
+    BPM_SOURCE_DEFAULT_120,
+    BPM_SOURCE_TRANSPORT_MANUAL,
+    BPM_SOURCE_CLIP_METADATA,
+    BPM_SOURCE_TEMPO_LOCKED
+} BpmSource;
+
 typedef struct App {
     SDL_Window *window;
     SDL_Renderer *renderer;
@@ -31,6 +38,16 @@ typedef struct App {
     int selected_sample;
     bool sample_selector_open;
     char status_text[160];
+
+    bool tempo_lock_mode;
+    double transport_bpm;
+    bool transport_bpm_manual;
+    TempoLockParams tempo_lock_draft;
+    bool has_retained_tempo_lock_params;
+    TempoLockParams retained_tempo_lock;
+    size_t retained_loop_start_frame;
+    size_t retained_loop_end_frame;
+    bool retained_tempo_lock_stale;
 } App;
 
 bool app_init(App *app);
@@ -42,3 +59,16 @@ void app_refresh_sample_list(App *app);
 bool load_clip_from_path(App *app, const char *path);
 bool app_load_selected_sample(App *app);
 void app_select_sample_delta(App *app, int delta);
+void app_enter_tempo_lock_mode(App *app);
+void app_cancel_tempo_lock_mode(App *app);
+void app_apply_tempo_lock(App *app);
+void app_clear_tempo_lock(App *app);
+void app_adjust_transport_bpm(App *app, double delta);
+void app_adjust_tempo_lock_bpm(App *app, double delta);
+void app_adjust_tempo_lock_downbeat(App *app, long frames);
+void app_cycle_tempo_lock_target_bars(App *app, int direction);
+void app_cycle_tempo_lock_meter(App *app, int direction);
+void app_note_loop_anchors_moved(App *app);
+BpmSource app_bpm_source(const App *app);
+const char *app_bpm_source_label(const App *app);
+bool app_get_active_tempo_params(const App *app, TempoLockParams *params);

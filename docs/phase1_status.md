@@ -11,6 +11,7 @@
 - Waveform rendering with loop markers and playhead marker.
 - Smooth target-based waveform panning/zooming.
 - Zoom-relative keyboard and gamepad loop marker trimming.
+- Dedicated Tempo Lock mode for manual BPM/downbeat/meter/length calibration.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
 
 ## Build / Run
@@ -24,6 +25,8 @@ cmake --build build
 - `Escape`: quit
 - `Space`: play/pause
 - `M`: metronome on/off
+- `T`: enter/exit Tempo Lock mode
+- `[` / `]`: adjust manual transport BPM
 - `Tab`: open/close sample selector
 - `Left/Right`: smoothly pan view
 - `Up/Down`: smoothly zoom in/out
@@ -42,6 +45,19 @@ cmake --build build
 - `R`: refresh the sample list while selector is open
 - Future file-dialog results should call `load_clip_from_path()` directly.
 
+## Tempo Lock Mode
+- Normal mode cuts/auditions loops; Tempo Lock mode calibrates the selected loop against musical time.
+- `T` or gamepad `R2 + North`: enter/exit Tempo Lock mode.
+- While active, loop anchor editing is disabled.
+- `[` / `]` or d-pad left/right: adjust draft BPM.
+- `,` / `.` or d-pad up/down: cycle target bars through `0.5`, `1`, `2`, `4`, `8`.
+- `B` / `V`, `N` / `Shift+N`, left stick, or bumpers: nudge downbeat anchor.
+- `M`, gamepad North, or gamepad West: cycle meter among `3/4`, `4/4`, `6/8`.
+- `Return` or South: apply tempo lock.
+- `Escape` or East: cancel without applying.
+- `Ctrl+T`, `U`, Back, or `R2 + East`: clear/de-apply tempo lock.
+- Clearing keeps the chosen params retained; if anchors move afterward, retained params are marked stale but can still seed re-entry.
+
 ## Gamepad Controls
 - `South` / `Start`: play/pause
 - `East`: jump playhead to loop start
@@ -54,6 +70,8 @@ cmake --build build
 - D-pad left/right: fine-trim the selected loop edge relative to visible zoom
 - Left trigger: finer trimming
 - Right trigger + South: set loop markers to the visible screen range
+- Right trigger + North: enter/exit Tempo Lock mode
+- Right trigger + East: clear/de-apply Tempo Lock
 - Left stick click: reset loop to full sample
 - Right stick click: open sample selector
 - In selector: d-pad up/down choose, south loads, east closes, back refreshes

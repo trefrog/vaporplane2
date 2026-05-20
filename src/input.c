@@ -34,6 +34,7 @@ static void nudge_loop_edge(App *app, int target, long frames) {
     } else {
         nudge(&app->clip.loop_end_frame, frames, app->clip.loop_start_frame + 1, app->clip.frame_count);
     }
+    app_note_loop_anchors_moved(app);
 }
 
 static size_t visible_frame_count(App *app) {
@@ -61,7 +62,33 @@ static void set_loop_to_visible(App *app) {
     app->clip.loop_start_frame = start;
     app->clip.loop_end_frame = end;
     clip_clamp_loop(&app->clip);
+    app_note_loop_anchors_moved(app);
     jump_to_loop_start(app);
+}
+
+static long tempo_anchor_step(App *app, double fraction) {
+    return visible_fraction_frames(app, fraction);
+}
+
+static bool handle_tempo_lock_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
+    switch(key) {
+        case SDLK_ESCAPE: app_cancel_tempo_lock_mode(app); return true;
+        case SDLK_RETURN: app_apply_tempo_lock(app); return true;
+        case SDLK_U: app_clear_tempo_lock(app); return true;
+        case SDLK_T:
+            if(mod & SDL_KMOD_CTRL) app_clear_tempo_lock(app);
+            else app_cancel_tempo_lock_mode(app);
+            return true;
+        case SDLK_LEFTBRACKET: app_adjust_tempo_lock_bpm(app, -0.5); return true;
+        case SDLK_RIGHTBRACKET: app_adjust_tempo_lock_bpm(app, 0.5); return true;
+        case SDLK_COMMA: app_cycle_tempo_lock_target_bars(app, -1); return true;
+        case SDLK_PERIOD: app_cycle_tempo_lock_target_bars(app, 1); return true;
+        case SDLK_B: app_adjust_tempo_lock_downbeat(app, -tempo_anchor_step(app, 0.0025)); return true;
+        case SDLK_V: app_adjust_tempo_lock_downbeat(app, tempo_anchor_step(app, 0.0025)); return true;
+        case SDLK_N: app_adjust_tempo_lock_downbeat(app, (mod & SDL_KMOD_SHIFT) ? tempo_anchor_step(app, 0.0025) : -tempo_anchor_step(app, 0.0025)); return true;
+        case SDLK_M: app_cycle_tempo_lock_meter(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1); return true;
+        default: return false;
+    }
 }
 
 static bool button_pressed(SDL_Gamepad *gamepad, SDL_GamepadButton button) {
@@ -107,22 +134,33 @@ bool input_handle_event(App *app, const SDL_Event *e){
         return true;
     }
     SDL_Keymod mod = SDL_GetModState();
+    if(app->tempo_lock_mode) return handle_tempo_lock_key(app, e->key.key, mod);
+    if(e->key.key==SDLK_U || (e->key.key==SDLK_T && (mod & SDL_KMOD_CTRL))) {
+        app_clear_tempo_lock(app);
+        return true;
+    }
+    if(e->key.key==SDLK_T) {
+        app_enter_tempo_lock_mode(app);
+        return true;
+    }
     long step=(mod & SDL_KMOD_SHIFT)?visible_fraction_frames(app, 0.05):visible_fraction_frames(app, 0.0025);
     switch(e->key.key){
         case SDLK_ESCAPE: return false;
         case SDLK_SPACE: toggle_playing(app); break;
         case SDLK_M: app->transport.metronome_enabled=!app->transport.metronome_enabled; break;
+        case SDLK_LEFTBRACKET: app_adjust_transport_bpm(app, -0.5); break;
+        case SDLK_RIGHTBRACKET: app_adjust_transport_bpm(app, 0.5); break;
         case SDLK_LEFT: app->view.target_center -= 0.12*app->view.target_span; break;
         case SDLK_RIGHT: app->view.target_center += 0.12*app->view.target_span; break;
         case SDLK_UP: app->view.target_span *= 0.8; break;
         case SDLK_DOWN: app->view.target_span *= 1.25; break;
-        case SDLK_A: nudge(&app->clip.loop_start_frame,-step,0,app->clip.loop_end_frame-1); break;
-        case SDLK_D: nudge(&app->clip.loop_start_frame,step,0,app->clip.loop_end_frame-1); break;
-        case SDLK_J: nudge(&app->clip.loop_end_frame,-step,app->clip.loop_start_frame+1,app->clip.frame_count); break;
-        case SDLK_L: nudge(&app->clip.loop_end_frame,step,app->clip.loop_start_frame+1,app->clip.frame_count); break;
+        case SDLK_A: nudge_loop_edge(app, 0, -step); break;
+        case SDLK_D: nudge_loop_edge(app, 0, step); break;
+        case SDLK_J: nudge_loop_edge(app, 1, -step); break;
+        case SDLK_L: nudge_loop_edge(app, 1, step); break;
         case SDLK_1: gamepad_edit_target=0; app_focus_loop_start(app); break;
         case SDLK_2: gamepad_edit_target=1; app_focus_loop_end(app); break;
-        case SDLK_R: app->clip.loop_start_frame=0; app->clip.loop_end_frame=app->clip.frame_count; break;
+        case SDLK_R: app->clip.loop_start_frame=0; app->clip.loop_end_frame=app->clip.frame_count; app_note_loop_anchors_moved(app); break;
         case SDLK_HOME: jump_to_loop_start(app); break;
     }
     clamp_view_target(app);
@@ -155,9 +193,39 @@ void input_update_gamepad(App *app, double dt){
     bool west_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_WEST);
     bool north_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_NORTH);
     bool start_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_START);
+    bool back_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_BACK);
+    bool left_shoulder_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    bool right_shoulder_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+    bool left_stick_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+
+    if(app->tempo_lock_mode) {
+        if(r2_shift && north_pressed) app_cancel_tempo_lock_mode(app);
+        else if((r2_shift && east_pressed) || back_pressed) app_clear_tempo_lock(app);
+        else if(south_pressed) app_apply_tempo_lock(app);
+        else if(east_pressed) app_cancel_tempo_lock_mode(app);
+        else if(north_pressed) app_cycle_tempo_lock_meter(app, 1);
+        else if(west_pressed) app_cycle_tempo_lock_meter(app, -1);
+
+        if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_adjust_tempo_lock_bpm(app, -12.0 * dt);
+        if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_adjust_tempo_lock_bpm(app, 12.0 * dt);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_cycle_tempo_lock_target_bars(app, 1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_cycle_tempo_lock_target_bars(app, -1);
+
+        long anchor_frames = (long)(lx * (double)visible_frame_count(app) * 0.35 * dt);
+        long bumper_frames = (long)((double)visible_frame_count(app) * 0.08 * dt);
+        if(bumper_frames < 1) bumper_frames = 1;
+        if(left_shoulder_pressed || SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) anchor_frames -= bumper_frames;
+        if(right_shoulder_pressed || SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) anchor_frames += bumper_frames;
+        if(anchor_frames != 0) app_adjust_tempo_lock_downbeat(app, anchor_frames);
+
+        return;
+    }
 
     if(r2_shift) {
         if(south_pressed) set_loop_to_visible(app);
+        if(north_pressed) app_enter_tempo_lock_mode(app);
+        if(east_pressed) app_clear_tempo_lock(app);
+        if(south_pressed || north_pressed || east_pressed) return;
     } else {
         if(south_pressed || start_pressed) toggle_playing(app);
         if(east_pressed) jump_to_loop_start(app);
@@ -172,16 +240,16 @@ void input_update_gamepad(App *app, double dt){
     }
 
     if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) app->sample_selector_open=true;
-    if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_BACK)) app->transport.metronome_enabled=!app->transport.metronome_enabled;
-    if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) {
+    if(back_pressed) app->transport.metronome_enabled=!app->transport.metronome_enabled;
+    if(left_shoulder_pressed) {
         gamepad_edit_target=0;
         app_focus_loop_start(app);
     }
-    if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
+    if(right_shoulder_pressed) {
         gamepad_edit_target=1;
         app_focus_loop_end(app);
     }
-    if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK)) clip_reset_loop(&app->clip);
+    if(left_stick_pressed) { clip_reset_loop(&app->clip); app_note_loop_anchors_moved(app); }
 
     app->view.target_center += lx * app->view.target_span * dt * 0.9;
     app->view.target_span += ly * app->view.target_span * dt * 1.4;

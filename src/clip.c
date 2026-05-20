@@ -6,9 +6,17 @@
 
 static void clip_defaults(AudioClip *clip) {
     clip->source_bpm = 120.0;
+    clip->has_clip_metadata_bpm = false;
+    clip->clip_metadata_bpm = 120.0;
+    clip->clip_tempo_locked = false;
+    clip->tempo_lock.bpm = 120.0;
+    clip->tempo_lock.downbeat_frame = clip->loop_start_frame;
+    clip->tempo_lock.beats_per_bar = 4;
+    clip->tempo_lock.beat_unit = 4;
+    clip->tempo_lock.target_bars = 4.0;
     clip->beats_per_bar = 4;
     clip->beat_unit = 4;
-    clip->downbeat_frame = 0;
+    clip->downbeat_frame = clip->loop_start_frame;
     clip->playback_rate = 1.0;
     clip->gain = 0.9f;
 }

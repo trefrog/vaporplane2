@@ -5,6 +5,14 @@
 #define CLIP_MAX_PATH 256
 
 typedef struct {
+    double bpm;
+    size_t downbeat_frame;
+    int beats_per_bar;
+    int beat_unit;
+    double target_bars;
+} TempoLockParams;
+
+typedef struct {
     char file_path[CLIP_MAX_PATH];
     int sample_rate;
     int channels;
@@ -15,6 +23,10 @@ typedef struct {
     size_t loop_end_frame;
 
     double source_bpm;
+    bool has_clip_metadata_bpm;
+    double clip_metadata_bpm;
+    bool clip_tempo_locked;
+    TempoLockParams tempo_lock;
     int beats_per_bar;
     int beat_unit;
     size_t downbeat_frame;

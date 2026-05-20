@@ -42,7 +42,7 @@ void waveform_view_get_frame_bounds(const WaveformView *v, const AudioClip *clip
     if(end_frame) *end_frame = ef;
 }
 
-void waveform_render(SDL_Renderer *r,const AudioClip *clip,const WaveformView *v,size_t playhead){
+void waveform_render(SDL_Renderer *r,const AudioClip *clip,const WaveformView *v,size_t playhead,const TempoLockParams *tempo_params){
     int w,h; SDL_GetRenderOutputSize(r,&w,&h);
     SDL_SetRenderDrawColor(r, 14, 10, 20, 255); SDL_RenderClear(r);
     int ymid=h/2;
@@ -60,6 +60,28 @@ void waveform_render(SDL_Renderer *r,const AudioClip *clip,const WaveformView *v
         for(size_t i=i0;i<i1;i++){ float s=clip->samples[i*clip->channels]; if(s<minv)minv=s;if(s>maxv)maxv=s; }
         int y0=ymid-(int)(maxv*ymid*0.8f), y1=ymid-(int)(minv*ymid*0.8f);
         SDL_RenderLine(r,x,y0,x,y1);
+    }
+    if(tempo_params && tempo_params->bpm > 0.0 && clip->sample_rate > 0) {
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+        double frames_per_beat = (60.0 / tempo_params->bpm) * (double)clip->sample_rate;
+        int total_beats = (int)ceil(tempo_params->target_bars * (double)tempo_params->beats_per_bar);
+        if(total_beats < 1) total_beats = tempo_params->beats_per_bar;
+        for(int beat = 0; beat <= total_beats; ++beat) {
+            double frame = (double)tempo_params->downbeat_frame + frames_per_beat * (double)beat;
+            double fn = frame / (double)clip->frame_count;
+            if(fn<start||fn>end) continue;
+            int x=(int)(((fn-start)/(end-start))*w);
+            if(beat == 0) {
+                SDL_SetRenderDrawColor(r, 255, 80, 220, 255);
+                SDL_RenderLine(r,x,0,x,h);
+            } else if((beat % tempo_params->beats_per_bar) == 0) {
+                SDL_SetRenderDrawColor(r, 160, 125, 220, 190);
+                SDL_RenderLine(r,x,0,x,h);
+            } else {
+                SDL_SetRenderDrawColor(r, 100, 95, 140, 120);
+                SDL_RenderLine(r,x,h/6,x,(h*5)/6);
+            }
+        }
     }
     size_t marks[3]={clip->loop_start_frame, clip->loop_end_frame, playhead}; SDL_Color cols[3]={{255,100,120,255},{255,200,110,255},{180,255,120,255}};
     for(int k=0;k<3;k++){ double fn=(double)marks[k]/(double)clip->frame_count; if(fn<start||fn>end) continue; int x=(int)(((fn-start)/(end-start))*w); SDL_SetRenderDrawColor(r,cols[k].r,cols[k].g,cols[k].b,255); SDL_RenderLine(r,x,0,x,h); }
