@@ -5,6 +5,7 @@
 static void nudge(size_t *v, long d, size_t minv, size_t maxv){ long nv=(long)(*v)+d; if(nv<(long)minv)nv=(long)minv; if(nv>(long)maxv)nv=(long)maxv; *v=(size_t)nv; }
 static int gamepad_edit_target = 0;
 static bool previous_buttons[SDL_GAMEPAD_BUTTON_COUNT];
+static Uint64 quit_confirm_until_ns = 0;
 
 static void clamp_view_target(App *app) {
     if(app->view.target_span<0.01) app->view.target_span=0.01;
@@ -20,6 +21,17 @@ static void set_playing(App *app, bool playing) {
 
 static void toggle_playing(App *app) {
     set_playing(app, !app->transport.playing);
+}
+
+static bool confirm_quit(App *app) {
+    Uint64 now = SDL_GetTicksNS();
+    if (quit_confirm_until_ns && now <= quit_confirm_until_ns) {
+        quit_confirm_until_ns = 0;
+        return true;
+    }
+    quit_confirm_until_ns = now + SDL_NS_PER_SECOND * 2;
+    SDL_strlcpy(app->status_text, "Press Escape again to quit", sizeof(app->status_text));
+    return false;
 }
 
 static void jump_to_loop_start(App *app) {
@@ -118,6 +130,14 @@ bool input_handle_event(App *app, const SDL_Event *e){
         SDL_memset(previous_buttons, 0, sizeof(previous_buttons));
     }
     if(e->type!=SDL_EVENT_KEY_DOWN) return true;
+    if(e->key.key==SDLK_F1) {
+        app_toggle_controls_legend(app);
+        return true;
+    }
+    if(e->key.key==SDLK_F2) {
+        app_toggle_view_mode(app);
+        return true;
+    }
     if(e->key.key==SDLK_TAB) {
         app->sample_selector_open = !app->sample_selector_open;
         return true;
@@ -145,7 +165,13 @@ bool input_handle_event(App *app, const SDL_Event *e){
     }
     long step=(mod & SDL_KMOD_SHIFT)?visible_fraction_frames(app, 0.05):visible_fraction_frames(app, 0.0025);
     switch(e->key.key){
-        case SDLK_ESCAPE: return false;
+        case SDLK_ESCAPE:
+            if(app->controls_legend_open) {
+                app->controls_legend_open = false;
+                break;
+            }
+            if(confirm_quit(app)) return false;
+            break;
         case SDLK_SPACE: toggle_playing(app); break;
         case SDLK_M: app->transport.metronome_enabled=!app->transport.metronome_enabled; break;
         case SDLK_LEFTBRACKET: app_adjust_transport_bpm(app, -0.5); break;
@@ -187,6 +213,7 @@ void input_update_gamepad(App *app, double dt){
     double right_trigger = axis_value(app->gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
     if(left_trigger < 0.0) left_trigger = 0.0;
     if(right_trigger < 0.0) right_trigger = 0.0;
+    bool l2_shift = left_trigger > 0.65;
     bool r2_shift = right_trigger > 0.65;
 
     bool south_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_SOUTH);
@@ -198,6 +225,11 @@ void input_update_gamepad(App *app, double dt){
     bool left_shoulder_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
     bool right_shoulder_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
     bool left_stick_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+
+    if(r2_shift && start_pressed) {
+        app_toggle_view_mode(app);
+        return;
+    }
 
     if(app->tempo_lock_mode) {
         if(r2_shift && north_pressed) app_cancel_tempo_lock_mode(app);
@@ -227,7 +259,8 @@ void input_update_gamepad(App *app, double dt){
     }
 
     if(r2_shift) {
-        if(south_pressed) set_loop_to_visible(app);
+        if(l2_shift && south_pressed) app_capture_current_loop_to_roster(app);
+        else if(south_pressed) set_loop_to_visible(app);
         if(north_pressed) app_enter_tempo_lock_mode(app);
         if(east_pressed) app_clear_tempo_lock(app);
         if(south_pressed || north_pressed || east_pressed) return;

@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include <SDL3/SDL.h>
 #include "clip.h"
 #include "audio_engine.h"
@@ -8,6 +9,12 @@
 
 #define APP_MAX_SAMPLES 64
 #define APP_SAMPLE_NAME_MAX 128
+#define APP_MAX_ROSTER_CLIPS 64
+#define APP_MAX_TIMELINE_INSTANCES 128
+#define APP_ROSTER_CLIP_NAME_MAX 128
+#define APP_MIN_CAPTURE_FRAMES 64
+#define APP_MAX_CAPTURE_FRAMES (48000 * 60 * 5)
+#define APP_MAX_CAPTURE_BYTES (64u * 1024u * 1024u)
 
 typedef struct {
     char path[CLIP_MAX_PATH];
@@ -21,6 +28,45 @@ typedef enum {
     BPM_SOURCE_TEMPO_LOCKED
 } BpmSource;
 
+typedef enum {
+    APP_VIEW_WAVEFORM,
+    APP_VIEW_TIMELINE
+} AppViewMode;
+
+typedef struct {
+    char name[APP_ROSTER_CLIP_NAME_MAX];
+    char source_path[CLIP_MAX_PATH];
+    size_t source_loop_start_frame;
+    size_t source_loop_end_frame;
+    int sample_rate;
+    int channels;
+    size_t frame_count;
+    float *samples;
+    double source_bpm;
+    int beats_per_bar;
+    int beat_unit;
+    double target_bars;
+    double target_beats;
+    size_t downbeat_offset_frames;
+    SDL_Color color;
+} RosterClip;
+
+typedef struct {
+    int roster_clip_index;
+    int64_t start_tick;
+    int64_t duration_ticks;
+} TimelineInstance;
+
+typedef struct {
+    bool initialized;
+    double timeline_bpm;
+    int timeline_beats_per_bar;
+    int timeline_beat_unit;
+    int ticks_per_beat;
+    TimelineInstance instances[APP_MAX_TIMELINE_INSTANCES];
+    int instance_count;
+} MasterTimeline;
+
 typedef struct App {
     SDL_Window *window;
     SDL_Renderer *renderer;
@@ -32,6 +78,8 @@ typedef struct App {
     Transport transport;
     AudioEngine audio;
     WaveformView view;
+    AppViewMode view_mode;
+    bool controls_legend_open;
 
     SampleEntry samples[APP_MAX_SAMPLES];
     int sample_count;
@@ -48,6 +96,10 @@ typedef struct App {
     size_t retained_loop_start_frame;
     size_t retained_loop_end_frame;
     bool retained_tempo_lock_stale;
+
+    RosterClip roster[APP_MAX_ROSTER_CLIPS];
+    int roster_clip_count;
+    MasterTimeline timeline;
 } App;
 
 bool app_init(App *app);
@@ -69,6 +121,9 @@ void app_adjust_tempo_lock_downbeat(App *app, long frames);
 void app_cycle_tempo_lock_target_bars(App *app, int direction);
 void app_cycle_tempo_lock_meter(App *app, int direction);
 void app_note_loop_anchors_moved(App *app);
+void app_capture_current_loop_to_roster(App *app);
+void app_toggle_view_mode(App *app);
+void app_toggle_controls_legend(App *app);
 BpmSource app_bpm_source(const App *app);
 const char *app_bpm_source_label(const App *app);
 bool app_get_active_tempo_params(const App *app, TempoLockParams *params);

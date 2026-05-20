@@ -14,6 +14,7 @@
 - Smooth target-based waveform panning/zooming.
 - Zoom-relative keyboard and gamepad loop marker trimming.
 - Dedicated Tempo Lock mode for manual BPM/downbeat/meter/length calibration.
+- Loop capture roster with owned in-memory PCM clips and a first-pass tick-based master timeline.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
 
 ## Build / Run
@@ -24,7 +25,9 @@ cmake --build build
 ```
 
 ## Controls
-- `Escape`: quit
+- `Escape`: close active panel/mode, then press twice within 2s to quit
+- `F1`: show/hide controls legend
+- `F2`: toggle waveform/timeline view
 - `Space`: play/pause
 - `M`: metronome on/off
 - `T`: enter/exit Tempo Lock mode
@@ -46,6 +49,14 @@ cmake --build build
 - `Tab` / `Escape`: close selector
 - `R`: refresh the sample list while selector is open
 - Future file-dialog results should call `load_clip_from_path()` directly.
+
+## Loop Capture / Timeline
+- `L2 + R2 + South` captures the current loop into the roster as an owned in-memory PCM clip.
+- Captured clips are in-memory only; they retain source path, source loop frames, copied PCM, color, source BPM, meter, target bars/beats, and downbeat offset.
+- The first captured clip initializes the master timeline BPM/meter from that clip and creates one timeline instance at tick `0`.
+- Later captures add roster entries only for now.
+- Timeline instances use musical ticks internally: `roster_clip_index`, `start_tick`, and `duration_ticks`.
+- Captures fail cleanly with status text for a full roster, very short loops, oversized clips, or memory allocation failure.
 
 ## Tempo Lock Mode
 - Normal mode cuts/auditions loops; Tempo Lock mode calibrates the selected loop against musical time.
@@ -71,9 +82,11 @@ cmake --build build
 - D-pad up/down: zoom in/out
 - D-pad left/right: trim the selected loop edge relative to visible zoom
 - Left trigger: finer trimming
+- Left trigger + right trigger + South: capture the current loop to the roster
 - Right trigger + South: set loop markers to the visible screen range
 - Right trigger + North: enter/exit Tempo Lock mode
 - Right trigger + East: clear/de-apply Tempo Lock
+- Right trigger + Start: toggle waveform/timeline view
 - Left stick click: reset loop to full sample
 - Right stick click: open sample selector
 - In selector: d-pad up/down choose, south loads, east closes
