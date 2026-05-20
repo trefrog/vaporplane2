@@ -15,6 +15,13 @@ static float clip_sample_at(const AudioClip *clip, double frame, int channel, si
     return (float)((1.0 - frac) * s0 + frac * s1);
 }
 
+static double clip_frame_step(const AudioEngine *a) {
+    if(!a || !a->clip) return 1.0;
+    double playback_rate = a->clip->playback_rate > 0.0 ? a->clip->playback_rate : 1.0;
+    if(a->clip->sample_rate <= 0 || a->spec.freq <= 0) return playback_rate;
+    return ((double)a->clip->sample_rate / (double)a->spec.freq) * playback_rate;
+}
+
 static float roster_sample_at(const RosterClip *clip, double frame, int channel) {
     if(!clip || !clip->samples || clip->frame_count == 0 || clip->channels <= 0) return 0.0f;
     if(frame < 0.0 || frame >= (double)clip->frame_count) return 0.0f;
@@ -53,7 +60,7 @@ static void update_frame_metronome(AudioEngine *a, double frame) {
     if(!a->metronome_beat_valid) {
         a->last_metronome_beat = beat;
         a->metronome_beat_valid = true;
-        if(frame_is_close_to_beat(t, frame, frames_per_beat, fmax(1.0, a->clip->playback_rate))) {
+        if(frame_is_close_to_beat(t, frame, frames_per_beat, fmax(1.0, clip_frame_step(a)))) {
             transport_trigger_metronome_beat(t, beat);
         }
         return;
@@ -187,7 +194,7 @@ static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int addi
 
             left *= a->clip->gain;
             right *= a->clip->gain;
-            a->playhead_frame += a->clip->playback_rate;
+            a->playhead_frame += clip_frame_step(a);
             while (a->playhead_frame >= (double)loop_end) a->playhead_frame -= (double)(loop_end - loop_start);
             if (a->playhead_frame < (double)loop_start) a->playhead_frame = (double)loop_start;
         } else {
