@@ -3,6 +3,14 @@
 #include <string.h>
 
 #define AUDIO_CALLBACK_CHUNK_FRAMES 512
+#define WAVEFORM_LOOP_CROSSFADE_FRAMES 512
+#define TIMELINE_DECLICK_FRAMES 512
+
+static double smoothstep01(double x) {
+    if(x <= 0.0) return 0.0;
+    if(x >= 1.0) return 1.0;
+    return x * x * (3.0 - 2.0 * x);
+}
 
 static float clip_sample_at(const AudioClip *clip, double frame, int channel, size_t loop_start, size_t loop_end) {
     double loop_len = (double)(loop_end - loop_start);
@@ -39,15 +47,15 @@ static float roster_sample_at(const RosterClip *clip, double frame, int channel)
 static double timeline_declik_gain(double elapsed_seconds, double source_duration_seconds, double instance_duration_seconds, int output_rate) {
     double audible_duration = fmin(source_duration_seconds, instance_duration_seconds);
     if(audible_duration <= 0.0) return 0.0;
-    double fade_seconds = output_rate > 0 ? 128.0 / (double)output_rate : 0.0027;
+    double fade_seconds = output_rate > 0 ? (double)TIMELINE_DECLICK_FRAMES / (double)output_rate : 0.0107;
     if(fade_seconds > audible_duration * 0.5) fade_seconds = audible_duration * 0.5;
     if(fade_seconds <= 0.0) return 1.0;
 
     double remaining = audible_duration - elapsed_seconds;
     double gain = 1.0;
-    if(elapsed_seconds < fade_seconds) gain = elapsed_seconds / fade_seconds;
+    if(elapsed_seconds < fade_seconds) gain = smoothstep01(elapsed_seconds / fade_seconds);
     if(remaining < fade_seconds) {
-        double out_gain = remaining / fade_seconds;
+        double out_gain = smoothstep01(remaining / fade_seconds);
         if(out_gain < gain) gain = out_gain;
     }
     if(gain < 0.0) gain = 0.0;
@@ -217,6 +225,10 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
         double source_duration_seconds = (double)clip->frame_count / (double)clip->sample_rate;
         double instance_duration_seconds = (double)instance->duration_ticks / ticks_per_second;
         double gain = timeline_declik_gain(elapsed_seconds, source_duration_seconds, instance_duration_seconds, a->spec.freq);
+        double range_elapsed_seconds = (a->timeline_playhead_tick - (double)range_start_tick) / ticks_per_second;
+        double range_duration_seconds = ((double)range_end_tick - (double)range_start_tick) / ticks_per_second;
+        double range_gain = timeline_declik_gain(range_elapsed_seconds, range_duration_seconds, range_duration_seconds, a->spec.freq);
+        if(range_gain < gain) gain = range_gain;
         if(gain <= 0.0) continue;
 
         *left += roster_sample_at(clip, source_frame, 0) * (float)gain;
@@ -260,10 +272,10 @@ static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right
         right = clip_sample_at(a->clip, a->playhead_frame, 1, loop_start, loop_end);
 
         size_t loop_len = loop_end - loop_start;
-        size_t fade_frames = loop_len / 2 < 64 ? loop_len / 2 : 64;
+        size_t fade_frames = loop_len / 2 < WAVEFORM_LOOP_CROSSFADE_FRAMES ? loop_len / 2 : WAVEFORM_LOOP_CROSSFADE_FRAMES;
         double distance_to_end = (double)loop_end - a->playhead_frame;
         if(fade_frames > 0 && distance_to_end < (double)fade_frames) {
-            double blend = 1.0 - distance_to_end / (double)fade_frames;
+            double blend = smoothstep01(1.0 - distance_to_end / (double)fade_frames);
             double wrap_frame = (double)loop_start + ((double)fade_frames - distance_to_end);
             float wrap_left = clip_sample_at(a->clip, wrap_frame, 0, loop_start, loop_end);
             float wrap_right = clip_sample_at(a->clip, wrap_frame, 1, loop_start, loop_end);
