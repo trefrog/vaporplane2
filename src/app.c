@@ -67,6 +67,36 @@ static int64_t beats_to_ticks(double beats, int ticks_per_beat) {
     return (int64_t)llround(ticks);
 }
 
+static int clamp_int(int value, int min_value, int max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
+static void clamp_timeline_view(App *app) {
+    MasterTimeline *timeline = &app->timeline;
+    double length = timeline->length_ticks > 0 ? (double)timeline->length_ticks :
+                    (double)(timeline->ticks_per_beat > 0 ? timeline->ticks_per_beat * 4 : 3840);
+    if (length < 1.0) length = 1.0;
+    if (timeline->view_span_ticks <= 0.0) timeline->view_span_ticks = length;
+    if (timeline->view_span_ticks < (double)(timeline->ticks_per_beat > 0 ? timeline->ticks_per_beat / 4 : 240)) {
+        timeline->view_span_ticks = (double)(timeline->ticks_per_beat > 0 ? timeline->ticks_per_beat / 4 : 240);
+    }
+    if (timeline->view_span_ticks > length) timeline->view_span_ticks = length;
+    double half = timeline->view_span_ticks * 0.5;
+    if (timeline->view_center_tick < half) timeline->view_center_tick = half;
+    if (timeline->view_center_tick > length - half) timeline->view_center_tick = length - half;
+}
+
+static void sync_transport_to_timeline(App *app) {
+    app->transport.bpm = app->timeline.timeline_bpm > 0.0 ? app->timeline.timeline_bpm : 120.0;
+    app->transport.beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
+    app->transport.beat_unit = app->timeline.timeline_beat_unit > 0 ? app->timeline.timeline_beat_unit : 4;
+    app->transport.current_tick = app->timeline.playhead_tick > 0 ? (uint64_t)app->timeline.playhead_tick : 0;
+    app->transport.current_seconds = app->timeline.ticks_per_beat > 0 && app->transport.bpm > 0.0 ?
+        ((double)app->transport.current_tick / (double)app->timeline.ticks_per_beat) * 60.0 / app->transport.bpm : 0.0;
+}
+
 static TempoLockParams default_tempo_params(const App *app) {
     TempoLockParams params;
     params.bpm = app->clip.has_clip_metadata_bpm ? app->clip.clip_metadata_bpm : 120.0;
@@ -78,7 +108,9 @@ static TempoLockParams default_tempo_params(const App *app) {
 }
 
 static void sync_transport_from_app(App *app) {
-    if (app->tempo_lock_mode) {
+    if (app->view_mode == APP_VIEW_TIMELINE) {
+        sync_transport_to_timeline(app);
+    } else if (app->tempo_lock_mode) {
         app->transport.bpm = app->tempo_lock_draft.bpm;
         app->transport.beats_per_bar = app->tempo_lock_draft.beats_per_bar;
         app->transport.beat_unit = app->tempo_lock_draft.beat_unit;
@@ -131,6 +163,7 @@ static void copy_tempo_params_to_clip(AudioClip *clip, const TempoLockParams *pa
 }
 
 BpmSource app_bpm_source(const App *app) {
+    if (app->view_mode == APP_VIEW_TIMELINE) return BPM_SOURCE_MASTER_TIMELINE;
     if (app->tempo_lock_mode) return BPM_SOURCE_TEMPO_LOCKED;
     if (app->transport_bpm_manual) return BPM_SOURCE_TRANSPORT_MANUAL;
     if (app->clip.clip_tempo_locked) return BPM_SOURCE_TEMPO_LOCKED;
@@ -140,6 +173,7 @@ BpmSource app_bpm_source(const App *app) {
 
 const char *app_bpm_source_label(const App *app) {
     switch (app_bpm_source(app)) {
+        case BPM_SOURCE_MASTER_TIMELINE: return "master timeline";
         case BPM_SOURCE_TEMPO_LOCKED: return "tempo locked";
         case BPM_SOURCE_TRANSPORT_MANUAL: return "transport/manual";
         case BPM_SOURCE_CLIP_METADATA: return "clip metadata";
@@ -183,6 +217,10 @@ static TempoLockParams capture_tempo_params(const App *app) {
 }
 
 void app_capture_current_loop_to_roster(App *app) {
+    if (audio_engine_timeline_is_playing(&app->audio)) {
+        app_set_status(app, "Stop timeline before capture");
+        return;
+    }
     if (!app->clip.samples || app->clip.frame_count < 2) {
         app_set_status(app, "No clip to capture");
         return;
@@ -238,6 +276,24 @@ void app_capture_current_loop_to_roster(App *app) {
     if (tempo.beat_unit <= 0) tempo.beat_unit = 4;
     if (tempo.target_bars <= 0.0) tempo.target_bars = 4.0;
 
+    if (app->audio.stream && !SDL_LockAudioStream(app->audio.stream)) {
+        SDL_free(samples);
+        app_set_status(app, "Could not lock audio stream");
+        return;
+    }
+    if (app->timeline.playing) {
+        if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+        SDL_free(samples);
+        app_set_status(app, "Stop timeline before capture");
+        return;
+    }
+    if (app->roster_clip_count >= APP_MAX_ROSTER_CLIPS) {
+        if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+        SDL_free(samples);
+        app_set_status(app, "Roster full");
+        return;
+    }
+
     RosterClip next;
     SDL_memset(&next, 0, sizeof(next));
     char base[APP_ROSTER_CLIP_NAME_MAX];
@@ -256,6 +312,9 @@ void app_capture_current_loop_to_roster(App *app) {
     next.beat_unit = tempo.beat_unit;
     next.target_bars = tempo.target_bars;
     next.target_beats = tempo.target_bars * (double)tempo.beats_per_bar;
+    next.midi_note = clamp_int(60 + (app->roster_clip_count % 36), 0, 127);
+    next.midi_channel = 0;
+    next.midi_velocity = 100;
     if (tempo.downbeat_frame > start) {
         size_t offset = tempo.downbeat_frame - start;
         next.downbeat_offset_frames = offset < frame_count ? offset : frame_count - 1;
@@ -278,17 +337,73 @@ void app_capture_current_loop_to_roster(App *app) {
         app->timeline.instances[0].roster_clip_index = roster_index;
         app->timeline.instances[0].start_tick = 0;
         app->timeline.instances[0].duration_ticks = beats_to_ticks(next.target_beats, app->timeline.ticks_per_beat);
+        app->timeline.instances[0].midi_note = next.midi_note;
+        app->timeline.instances[0].midi_channel = next.midi_channel;
+        app->timeline.instances[0].midi_velocity = next.midi_velocity;
+        app->timeline.length_ticks = app->timeline.instances[0].duration_ticks;
+        app->timeline.playhead_tick = 0;
+        app->timeline.view_center_tick = (double)app->timeline.length_ticks * 0.5;
+        app->timeline.view_span_ticks = (double)app->timeline.length_ticks;
     }
+    clamp_timeline_view(app);
 
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Captured %s to roster", app->roster[roster_index].name);
 }
 
 void app_toggle_view_mode(App *app) {
-    app->view_mode = app->view_mode == APP_VIEW_WAVEFORM ? APP_VIEW_TIMELINE : APP_VIEW_WAVEFORM;
+    if (app->view_mode == APP_VIEW_WAVEFORM) {
+        app->transport.playing = false;
+        audio_engine_set_playback_mode(&app->audio, AUDIO_PLAYBACK_TIMELINE);
+        app->view_mode = APP_VIEW_TIMELINE;
+        app->tempo_lock_mode = false;
+        sync_transport_from_app(app);
+    } else {
+        audio_engine_stop_timeline(&app->audio, true);
+        audio_engine_set_playback_mode(&app->audio, AUDIO_PLAYBACK_WAVEFORM);
+        app->view_mode = APP_VIEW_WAVEFORM;
+        app->transport.playing = false;
+        sync_transport_from_app(app);
+    }
 }
 
 void app_toggle_controls_legend(App *app) {
     app->controls_legend_open = !app->controls_legend_open;
+}
+
+void app_toggle_timeline_playback(App *app) {
+    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    if (!app->timeline.initialized || app->timeline.instance_count <= 0 || app->timeline.length_ticks <= 0) {
+        app_set_status(app, "timeline empty");
+        return;
+    }
+    if (audio_engine_timeline_is_playing(&app->audio)) {
+        audio_engine_stop_timeline(&app->audio, true);
+        sync_transport_from_app(app);
+        app_set_status(app, "Timeline stopped");
+    } else {
+        sync_transport_from_app(app);
+        audio_engine_start_timeline(&app->audio);
+        app_set_status(app, "Timeline playing");
+    }
+}
+
+void app_rewind_timeline(App *app) {
+    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    audio_engine_stop_timeline(&app->audio, true);
+    sync_transport_from_app(app);
+    app_set_status(app, "Timeline rewound");
+}
+
+void app_pan_timeline_view(App *app, double fraction) {
+    app->timeline.view_center_tick += app->timeline.view_span_ticks * fraction;
+    clamp_timeline_view(app);
+}
+
+void app_zoom_timeline_view(App *app, double scale) {
+    if (scale <= 0.0) return;
+    app->timeline.view_span_ticks *= scale;
+    clamp_timeline_view(app);
 }
 
 void app_enter_tempo_lock_mode(App *app) {
@@ -501,10 +616,12 @@ static void app_render_controls_legend(App *app) {
     float y = panel.y + 14.0f;
     SDL_RenderDebugText(app->renderer, x, y, "CONTROLS"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "F1 legend   F2 timeline/waveform   Tab sample picker"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Space play   M metronome   [/] BPM   T tempo lock"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Waveform: Space play   M metronome   [/] BPM   T tempo lock"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "A/D loop start   J/L loop end   Shift = larger step"); y += 22.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Gamepad: South/Start play   Back metronome"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space/South/Start play once   Home/East rewind"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Timeline: arrows/left stick pan   up/down/d-pad zoom"); y += 22.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Gamepad waveform: South/Start play   Back metronome"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "R2+South set loop to visible   L2+R2+South capture loop"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "R2+North tempo lock   R2+Start timeline/waveform"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: South apply   East cancel   R2+East clear"); y += 16.0f;
@@ -530,6 +647,10 @@ static void app_render_timeline(App *app) {
                               app->timeline.timeline_beats_per_bar,
                               app->timeline.timeline_beat_unit,
                               app->roster_clip_count);
+    SDL_RenderDebugTextFormat(app->renderer, 24, 176, "length: %lld ticks  playhead: %lld  %s",
+                              (long long)app->timeline.length_ticks,
+                              (long long)audio_engine_get_timeline_playhead_tick(&app->audio),
+                              audio_engine_timeline_is_playing(&app->audio) ? "playing" : "stopped");
 
     float roster_w = 300.0f;
     float roster_x = (float)w - roster_w - 24.0f;
@@ -539,15 +660,11 @@ static void app_render_timeline(App *app) {
     float timeline_w = roster_x - timeline_x - 28.0f;
     if (timeline_w < 220.0f) timeline_w = (float)w - 96.0f;
     float lane_h = 54.0f;
-
-    int64_t max_tick = app->timeline.ticks_per_beat * app->timeline.timeline_beats_per_bar * 4;
-    for (int i = 0; i < app->timeline.instance_count; ++i) {
-        TimelineInstance *instance = &app->timeline.instances[i];
-        int64_t end_tick = instance->start_tick + instance->duration_ticks;
-        if (end_tick > max_tick) max_tick = end_tick;
-    }
-    if (max_tick < app->timeline.ticks_per_beat) max_tick = app->timeline.ticks_per_beat;
-    double max_tick_d = (double)max_tick;
+    clamp_timeline_view(app);
+    double view_start = app->timeline.view_center_tick - app->timeline.view_span_ticks * 0.5;
+    double view_end = app->timeline.view_center_tick + app->timeline.view_span_ticks * 0.5;
+    if (view_end <= view_start) view_end = view_start + 1.0;
+    double view_span = view_end - view_start;
 
     SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(app->renderer, 34, 34, 48, 255);
@@ -558,8 +675,10 @@ static void app_render_timeline(App *app) {
 
     int64_t bar_ticks = (int64_t)app->timeline.ticks_per_beat * app->timeline.timeline_beats_per_bar;
     if (bar_ticks < 1) bar_ticks = app->timeline.ticks_per_beat;
-    for (int64_t tick = 0; tick <= max_tick; tick += bar_ticks) {
-        float x = timeline_x + (float)((double)tick / max_tick_d) * timeline_w;
+    int64_t first_bar = (int64_t)floor(view_start / (double)bar_ticks) * bar_ticks;
+    if (first_bar < 0) first_bar = 0;
+    for (int64_t tick = first_bar; (double)tick <= view_end; tick += bar_ticks) {
+        float x = timeline_x + (float)(((double)tick - view_start) / view_span) * timeline_w;
         double seconds = app->timeline.timeline_bpm > 0.0 ?
             ((double)tick / (double)app->timeline.ticks_per_beat) * 60.0 / app->timeline.timeline_bpm : 0.0;
         SDL_SetRenderDrawColor(app->renderer, 120, 125, 150, 150);
@@ -568,12 +687,34 @@ static void app_render_timeline(App *app) {
         SDL_RenderDebugTextFormat(app->renderer, x + 4.0f, timeline_y - 34.0f, "%.2fs", seconds);
     }
 
+    if (app->timeline.length_ticks > 0) {
+        float x = timeline_x + (float)(((double)app->timeline.length_ticks - view_start) / view_span) * timeline_w;
+        if (x >= timeline_x && x <= timeline_x + timeline_w) {
+            SDL_SetRenderDrawColor(app->renderer, 255, 215, 110, 230);
+            SDL_RenderLine(app->renderer, x, timeline_y - 22.0f, x, timeline_y + lane_h + 12.0f);
+            SDL_RenderDebugText(app->renderer, x + 4.0f, timeline_y + lane_h + 10.0f, "end");
+        }
+    }
+
+    int64_t playhead_tick = audio_engine_get_timeline_playhead_tick(&app->audio);
+    float playhead_x = timeline_x + (float)(((double)playhead_tick - view_start) / view_span) * timeline_w;
+    if (playhead_x >= timeline_x && playhead_x <= timeline_x + timeline_w) {
+        SDL_SetRenderDrawColor(app->renderer, 180, 255, 120, 255);
+        SDL_RenderLine(app->renderer, playhead_x, timeline_y - 28.0f, playhead_x, timeline_y + lane_h + 16.0f);
+    }
+
     for (int i = 0; i < app->timeline.instance_count; ++i) {
         TimelineInstance *instance = &app->timeline.instances[i];
         if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
         RosterClip *clip = &app->roster[instance->roster_clip_index];
-        float x = timeline_x + (float)((double)instance->start_tick / max_tick_d) * timeline_w;
-        float block_w = (float)((double)instance->duration_ticks / max_tick_d) * timeline_w;
+        double instance_start = (double)instance->start_tick;
+        double instance_end = (double)(instance->start_tick + instance->duration_ticks);
+        if (instance_end < view_start || instance_start > view_end) continue;
+        float x = timeline_x + (float)((instance_start - view_start) / view_span) * timeline_w;
+        float end_x = timeline_x + (float)((instance_end - view_start) / view_span) * timeline_w;
+        if (x < timeline_x) x = timeline_x;
+        if (end_x > timeline_x + timeline_w) end_x = timeline_x + timeline_w;
+        float block_w = end_x - x;
         if (block_w < 8.0f) block_w = 8.0f;
         SDL_FRect block = { x + 2.0f, timeline_y + 8.0f, block_w - 4.0f, lane_h - 16.0f };
         SDL_SetRenderDrawColor(app->renderer, clip->color.r, clip->color.g, clip->color.b, 218);
@@ -709,8 +850,11 @@ bool app_init(App *app){
     app->timeline.timeline_bpm = 120.0;
     app->timeline.timeline_beats_per_bar = 4;
     app->timeline.timeline_beat_unit = 4;
+    app->timeline.view_center_tick = (double)app->timeline.ticks_per_beat * 2.0;
+    app->timeline.view_span_ticks = (double)app->timeline.ticks_per_beat * 4.0;
     waveform_view_init(&app->view);
     if(!audio_engine_init(&app->audio,&app->clip,&app->transport)) return false;
+    audio_engine_set_timeline(&app->audio, app->roster, &app->roster_clip_count, &app->timeline);
     if(app->sample_count > 0) app_load_selected_sample(app);
     return true;
 }

@@ -15,6 +15,7 @@
 - Zoom-relative keyboard and gamepad loop marker trimming.
 - Dedicated Tempo Lock mode for manual BPM/downbeat/meter/length calibration.
 - Loop capture roster with owned in-memory PCM clips and a first-pass tick-based master timeline.
+- Timeline view has separate one-shot playback that stops/rewinds at timeline end.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
 
 ## Build / Run
@@ -57,6 +58,12 @@ cmake --build build
 - Later captures add roster entries only for now.
 - Timeline instances use musical ticks internally: `roster_clip_index`, `start_tick`, and `duration_ticks`.
 - Captures fail cleanly with status text for a full roster, very short loops, oversized clips, or memory allocation failure.
+- Timeline playback is separate from waveform loop playback: switching to timeline view stops waveform playback and waits silently.
+- `Space`, South, or Start in timeline view plays from tick `0` to `timeline.length_ticks` once, then stops, rewinds to tick `0`, and stays silent.
+- Empty timelines do not play and show `timeline empty`.
+- Timeline clips play owned PCM at natural speed; no time-stretching or pitch correction is applied yet.
+- If natural PCM duration and instance tick duration disagree, playback stops at the earlier of audio end or instance end.
+- Metronome enable/disable is global, but waveform mode follows waveform/transport tempo and timeline mode follows master timeline tempo.
 
 ## Tempo Lock Mode
 - Normal mode cuts/auditions loops; Tempo Lock mode calibrates the selected loop against musical time.
@@ -90,6 +97,7 @@ cmake --build build
 - Left stick click: reset loop to full sample
 - Right stick click: open sample selector
 - In selector: d-pad up/down choose, south loads, east closes
+- In timeline view: South/Start play once or stop+rewind, East rewinds, left stick pans, d-pad up/down zooms
 
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.

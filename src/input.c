@@ -103,6 +103,25 @@ static bool handle_tempo_lock_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
     }
 }
 
+static bool handle_timeline_key(App *app, SDL_Keycode key) {
+    switch(key) {
+        case SDLK_ESCAPE:
+            if(app->controls_legend_open) {
+                app->controls_legend_open = false;
+                return true;
+            }
+            return !confirm_quit(app);
+        case SDLK_SPACE: app_toggle_timeline_playback(app); return true;
+        case SDLK_M: app->transport.metronome_enabled=!app->transport.metronome_enabled; return true;
+        case SDLK_HOME: app_rewind_timeline(app); return true;
+        case SDLK_LEFT: app_pan_timeline_view(app, -0.12); return true;
+        case SDLK_RIGHT: app_pan_timeline_view(app, 0.12); return true;
+        case SDLK_UP: app_zoom_timeline_view(app, 0.8); return true;
+        case SDLK_DOWN: app_zoom_timeline_view(app, 1.25); return true;
+        default: return true;
+    }
+}
+
 static bool button_pressed(SDL_Gamepad *gamepad, SDL_GamepadButton button) {
     bool down = SDL_GetGamepadButton(gamepad, button);
     bool pressed = down && !previous_buttons[button];
@@ -154,6 +173,7 @@ bool input_handle_event(App *app, const SDL_Event *e){
         return true;
     }
     SDL_Keymod mod = SDL_GetModState();
+    if(app->view_mode == APP_VIEW_TIMELINE) return handle_timeline_key(app, e->key.key);
     if(app->tempo_lock_mode) return handle_tempo_lock_key(app, e->key.key, mod);
     if(e->key.key==SDLK_U || (e->key.key==SDLK_T && (mod & SDL_KMOD_CTRL))) {
         app_clear_tempo_lock(app);
@@ -228,6 +248,20 @@ void input_update_gamepad(App *app, double dt){
 
     if(r2_shift && start_pressed) {
         app_toggle_view_mode(app);
+        return;
+    }
+
+    if(app->view_mode == APP_VIEW_TIMELINE) {
+        if(south_pressed || start_pressed) app_toggle_timeline_playback(app);
+        if(east_pressed) app_rewind_timeline(app);
+        if(back_pressed) app->transport.metronome_enabled=!app->transport.metronome_enabled;
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) app->sample_selector_open=true;
+
+        app_pan_timeline_view(app, lx * dt * 0.9);
+        if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_pan_timeline_view(app, -dt * 0.9);
+        if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_pan_timeline_view(app, dt * 0.9);
+        if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_zoom_timeline_view(app, 1.0 - fmin(0.9, dt * 1.8));
+        if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_zoom_timeline_view(app, 1.0 + dt * 1.8);
         return;
     }
 
