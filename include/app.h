@@ -70,6 +70,7 @@ typedef struct App {
     TimelineFocusZone timeline_focus_zone;
     TimelineRangeHandle timeline_play_range_handle;
     bool timeline_play_range_adjusting;
+    bool timeline_context_menu_open;
     TimelineEditMode timeline_edit_mode;
     int timeline_edit_instance_index;
     int timeline_edit_roster_clip_index;
@@ -85,6 +86,7 @@ typedef struct App {
 bool app_init(App *app);
 void app_run(App *app);
 void app_shutdown(App *app);
+void app_close_gamepad(App *app);
 void app_focus_loop_start(App *app);
 void app_focus_loop_end(App *app);
 void app_refresh_sample_list(App *app);
@@ -112,6 +114,9 @@ void app_timeline_toggle_play_range_loop(App *app);
 void app_timeline_cycle_focus(App *app, int direction);
 void app_timeline_activate_focus(App *app);
 void app_timeline_cancel_focus(App *app);
+void app_timeline_open_context_menu(App *app);
+void app_timeline_close_context_menu(App *app);
+void app_timeline_remove_selected_instance(App *app);
 void app_timeline_move_cursor(App *app, int direction);
 void app_timeline_nudge_play_range(App *app, int direction);
 void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle);

@@ -80,12 +80,17 @@ cmake --build build
 - Keyboard `Space`: play/pause timeline transport.
 - Keyboard `Enter`: activate focused zone.
 - Keyboard `Escape`: exit play-range adjustment, otherwise guarded quit.
-- In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; `Shift+Left/Right` pans; `Up/Down` zoom.
+- Gamepad Start/Plus opens a context menu for the selected timeline instance.
+- In the instance context menu, South removes the selected instance and East/Start cancels.
+- In timeline view, left stick pans horizontally and zooms vertically across focus zones; hold L2 for 3x faster viewport movement.
+- In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; `Shift+Left/Right` pans.
 - In `PLAY RANGE`: `Enter` enters adjustment, `1` selects start handle, `2` selects end handle, `Left/Right` nudges the selected handle, `R` resets to full timeline.
 - In `TRACK AREA`: `Enter`/South selects the instance under the cursor; pressing it again enters `MOVE INSTANCE`.
-- In `MOVE INSTANCE`: d-pad or arrow left/right moves the ghost by snap units, left stick or `Shift+Left/Right` pans, South/Enter confirms, East/Escape cancels and keeps the original start tick.
+- In `MOVE INSTANCE`: d-pad or arrow left/right moves a lifted ghost by snap units, South/Enter confirms, East/Escape cancels and keeps the original start tick.
 - In `ROSTER`: `Up/Down` selects a roster row; South/Enter arms it, and pressing again enters `PLACE CLIP` at the snapped cursor.
-- In `PLACE CLIP`: d-pad or arrow left/right moves the ghost by snap units, left stick or `Shift+Left/Right` pans, South/Enter confirms, East/Escape cancels.
+- In `PLACE CLIP`: d-pad or arrow left/right moves a lifted ghost by snap units, South/Enter confirms, East/Escape cancels.
+- Moving shows the original instance as a dim origin block until the ghost is dropped.
+- Armed roster rows, selected instances, valid ghosts, and invalid overlap ghosts use distinct depth-ready 2D cues.
 - Timeline move/place drops reject overlaps with status text and do not commit.
 - Gamepad bumpers: cycle focus.
 - Gamepad plain South: activate focused zone.
@@ -131,7 +136,7 @@ cmake --build build
 - Left stick click: reset loop to full sample
 - Right stick click: open sample selector
 - In selector: d-pad up/down choose, south loads, east closes
-- In timeline view: bumpers cycle focus, South activates focus, East cancels, R2+face buttons control transport
+- In timeline view: left stick pans/zooms, L2 accelerates viewport movement, bumpers cycle focus, South activates focus, East cancels, R2+face buttons control transport
 
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.
