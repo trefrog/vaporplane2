@@ -82,7 +82,11 @@ cmake --build build
 - Keyboard `Escape`: exit play-range adjustment, otherwise guarded quit.
 - In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; `Shift+Left/Right` pans; `Up/Down` zoom.
 - In `PLAY RANGE`: `Enter` enters adjustment, `1` selects start handle, `2` selects end handle, `Left/Right` nudges the selected handle, `R` resets to full timeline.
-- In `ROSTER`: `Up/Down` selects a roster clip; `Enter` marks it selected.
+- In `TRACK AREA`: `Enter`/South selects the instance under the cursor; pressing it again enters `MOVE INSTANCE`.
+- In `MOVE INSTANCE`: d-pad or arrow left/right moves the ghost by snap units, left stick or `Shift+Left/Right` pans, South/Enter confirms, East/Escape cancels and keeps the original start tick.
+- In `ROSTER`: `Up/Down` selects a roster row; South/Enter arms it, and pressing again enters `PLACE CLIP` at the snapped cursor.
+- In `PLACE CLIP`: d-pad or arrow left/right moves the ghost by snap units, left stick or `Shift+Left/Right` pans, South/Enter confirms, East/Escape cancels.
+- Timeline move/place drops reject overlaps with status text and do not commit.
 - Gamepad bumpers: cycle focus.
 - Gamepad plain South: activate focused zone.
 - Gamepad plain East: back/cancel focused adjustment.
@@ -132,7 +136,7 @@ cmake --build build
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.
 - Loop playback has a very short boundary crossfade, but it still needs tuning by ear.
-- Timeline has no drag/drop clip placement, clip stretching, tempo map, MIDI clips, SMF save/load, or project persistence yet.
+- Timeline has no drag/drop editing, clip stretching, tempo map, MIDI clips, SMF save/load, or project persistence yet.
 
 ## Next
 - Tune gamepad editing feel and add unobtrusive UX hints.

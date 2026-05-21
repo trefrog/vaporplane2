@@ -28,6 +28,12 @@ typedef enum {
     APP_VIEW_TIMELINE
 } AppViewMode;
 
+typedef enum {
+    TIMELINE_EDIT_NONE,
+    TIMELINE_EDIT_MOVE_INSTANCE,
+    TIMELINE_EDIT_PLACE_CLIP
+} TimelineEditMode;
+
 typedef struct App {
     SDL_Window *window;
     SDL_Renderer *renderer;
@@ -64,7 +70,15 @@ typedef struct App {
     TimelineFocusZone timeline_focus_zone;
     TimelineRangeHandle timeline_play_range_handle;
     bool timeline_play_range_adjusting;
+    TimelineEditMode timeline_edit_mode;
+    int timeline_edit_instance_index;
+    int timeline_edit_roster_clip_index;
+    int64_t timeline_edit_original_start_tick;
+    int64_t timeline_edit_ghost_start_tick;
+    int64_t timeline_edit_duration_ticks;
+    bool timeline_edit_ghost_valid;
     int selected_roster_clip;
+    bool selected_roster_clip_armed;
     int selected_timeline_instance;
 } App;
 
@@ -103,6 +117,7 @@ void app_timeline_nudge_play_range(App *app, int direction);
 void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle);
 void app_timeline_reset_play_range(App *app);
 void app_timeline_select_roster_delta(App *app, int delta);
+void app_timeline_nudge_edit_ghost(App *app, int direction);
 void app_pan_timeline_view(App *app, double fraction);
 void app_zoom_timeline_view(App *app, double scale);
 BpmSource app_bpm_source(const App *app);
