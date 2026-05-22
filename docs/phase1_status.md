@@ -15,6 +15,7 @@
 - Zoom-relative keyboard and gamepad loop marker trimming.
 - Dedicated Tempo Lock mode for manual BPM/downbeat/meter/length calibration.
 - Loop capture roster with owned in-memory PCM clips and a first-pass tick-based master timeline.
+- Timeline roster preview plays the selected roster clip as a restartable one-shot.
 - Timeline view has focus zones, a tick cursor, beat/bar grid, play range handles, and range playback.
 - Timeline playback starts from the play range and stops/rewinds or loops at the range end.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
@@ -99,11 +100,11 @@ cmake --build build
 - Gamepad plain Start/Plus: reserved, no-op for now.
 - Gamepad Back/Minus: metronome on/off.
 - Gamepad `R2 + South`: play/pause timeline.
-- Gamepad `R2 + East`: stop and rewind to play range start.
+- Gamepad `R2 + East`: stop preview, stop timeline playback, and rewind to play range start.
 - Gamepad `R2 + West`: jump playhead and cursor to play range start without changing play state.
 - Gamepad `R2 + North`: toggle play range loop.
 - Gamepad `R2 + Start`: toggle waveform/timeline view.
-- Gamepad right-stick click: open sample selector.
+- In `ROSTER`, gamepad right-stick click previews the selected roster clip without changing placement state.
 
 ## Tempo Lock Mode
 - Normal mode cuts/auditions loops; Tempo Lock mode calibrates the selected loop against musical time.
@@ -136,9 +137,10 @@ cmake --build build
 - Right trigger + East: clear/de-apply Tempo Lock
 - Right trigger + Start: toggle waveform/timeline view
 - Left stick click: reset loop to full sample
-- Right stick click: open sample selector
+- Right stick click: open sample selector in waveform view
 - In selector: d-pad up/down choose, south loads, east closes
 - In timeline view: left stick pans/zooms, L2 accelerates viewport movement, bumpers cycle focus, South activates focus, East cancels, R2+face buttons control transport
+- In timeline roster focus: right stick click previews the selected roster clip
 
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.

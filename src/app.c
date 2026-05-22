@@ -631,6 +631,7 @@ void app_toggle_timeline_playback(App *app) {
 void app_rewind_timeline(App *app) {
     if (app->view_mode != APP_VIEW_TIMELINE) return;
     audio_engine_stop_timeline(&app->audio, true);
+    audio_engine_stop_preview(&app->audio);
     int64_t range_start = 0;
     timeline_effective_play_range(&app->timeline, &range_start, NULL);
     app->timeline.timeline_cursor_tick = range_start;
@@ -978,6 +979,26 @@ void app_timeline_remove_selected_instance(App *app) {
     app_set_status(app, "Removed timeline instance");
 }
 
+void app_preview_selected_roster_clip(App *app) {
+    if (app->roster_clip_count <= 0) {
+        app->selected_roster_clip = -1;
+        app->selected_roster_clip_armed = false;
+        app_set_status(app, "roster empty");
+        return;
+    }
+    if (app->selected_roster_clip < 0 || app->selected_roster_clip >= app->roster_clip_count) {
+        app->selected_roster_clip = 0;
+        app->selected_roster_clip_armed = false;
+    }
+
+    RosterClip *clip = &app->roster[app->selected_roster_clip];
+    if (audio_engine_preview_roster_clip(&app->audio, app->selected_roster_clip)) {
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Preview %s", clip->name);
+    } else {
+        app_set_status(app, "Preview unavailable");
+    }
+}
+
 void app_pan_timeline_view(App *app, double fraction) {
     app->timeline.view_center_tick += app->timeline.view_span_ticks * fraction;
     clamp_timeline_view(app);
@@ -1214,12 +1235,13 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Timeline stick: Left/Right pan   Up/Down zoom   L2 turbo"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Ruler: Left/Right cursor by beat   Shift+Left/Right pans"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Play Range: Enter/South adjust   1/2 or West/North choose handle"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Track/Roster: South selects, South again lifts ghost, East cancels"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline R2: South play   East stop   West jump start   North loop"); y += 22.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Roster: South arms/places   Right stick previews selected clip"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Timeline R2: South play   East stop all   West jump start   North loop"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad waveform: South/Start play   Back metronome"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "R2+South set loop to visible   L2+R2+South capture loop"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Waveform R2+North tempo lock   R2+Start timeline/waveform"); y += 22.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Waveform right stick picker   R2+Start timeline/waveform"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Waveform R2+North tempo lock"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: South apply   East/T cancel   R2+East clear"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: R2+North snaps downbeat to loop start"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: d-pad fine BPM/bars   sticks/bumpers downbeat");

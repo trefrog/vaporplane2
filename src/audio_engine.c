@@ -44,6 +44,33 @@ static float roster_sample_at(const RosterClip *clip, double frame, int channel)
     return (float)((1.0 - frac) * s0 + frac * s1);
 }
 
+static void mix_preview(AudioEngine *a, float *left, float *right) {
+    if(!a->preview_active || !a->roster || !a->roster_clip_count) return;
+    int roster_count = *a->roster_clip_count;
+    if(a->preview_roster_clip_index < 0 || a->preview_roster_clip_index >= roster_count) {
+        a->preview_active = false;
+        return;
+    }
+
+    RosterClip *clip = &a->roster[a->preview_roster_clip_index];
+    if(!clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0) {
+        a->preview_active = false;
+        return;
+    }
+    if(a->preview_frame >= (double)clip->frame_count) {
+        a->preview_active = false;
+        return;
+    }
+
+    *left += roster_sample_at(clip, a->preview_frame, 0);
+    *right += roster_sample_at(clip, a->preview_frame, 1);
+
+    double frame_step = a->spec.freq > 0 ? (double)clip->sample_rate / (double)a->spec.freq : 1.0;
+    if(frame_step <= 0.0) frame_step = 1.0;
+    a->preview_frame += frame_step;
+    if(a->preview_frame >= (double)clip->frame_count) a->preview_active = false;
+}
+
 static double timeline_declik_gain(double elapsed_seconds, double source_duration_seconds, double instance_duration_seconds, int output_rate) {
     double audible_duration = fmin(source_duration_seconds, instance_duration_seconds);
     if(audible_duration <= 0.0) return 0.0;
@@ -289,6 +316,7 @@ static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right
     } else {
         a->metronome_beat_valid = false;
     }
+    mix_preview(a, &left, &right);
     if(a->playback_mode == AUDIO_PLAYBACK_WAVEFORM) transport_update(a->transport, 1.0/(double)a->spec.freq);
     float m = transport_next_metronome_sample(a->transport, a->spec.freq);
     *out_left = (left + m) * a->master_gain;
@@ -404,6 +432,36 @@ void audio_engine_stop_timeline(AudioEngine *a, bool rewind) {
         a->transport->metronome_env = 0.0f;
     }
     a->metronome_beat_valid = false;
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+}
+
+bool audio_engine_preview_roster_clip(AudioEngine *a, int roster_index) {
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    bool ok = false;
+    if(a->roster && a->roster_clip_count &&
+       roster_index >= 0 && roster_index < *a->roster_clip_count) {
+        RosterClip *clip = &a->roster[roster_index];
+        if(clip->samples && clip->frame_count > 0 && clip->sample_rate > 0) {
+            a->preview_roster_clip_index = roster_index;
+            a->preview_frame = 0.0;
+            a->preview_active = true;
+            ok = true;
+        }
+    }
+    if(!ok) {
+        a->preview_active = false;
+        a->preview_roster_clip_index = -1;
+        a->preview_frame = 0.0;
+    }
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+    return ok;
+}
+
+void audio_engine_stop_preview(AudioEngine *a) {
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    a->preview_active = false;
+    a->preview_roster_clip_index = -1;
+    a->preview_frame = 0.0;
     if(a->stream) SDL_UnlockAudioStream(a->stream);
 }
 

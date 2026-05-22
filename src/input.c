@@ -354,7 +354,6 @@ void input_update_gamepad(App *app, double dt){
         }
 
         if(back_pressed) app->transport.metronome_enabled=!app->transport.metronome_enabled;
-        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) app->sample_selector_open=true;
         if(left_shoulder_pressed) app_timeline_cycle_focus(app, -1);
         if(right_shoulder_pressed) app_timeline_cycle_focus(app, 1);
 
@@ -380,6 +379,10 @@ void input_update_gamepad(App *app, double dt){
         }
 
         if(app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) {
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) {
+                app_preview_selected_roster_clip(app);
+                return;
+            }
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_select_roster_delta(app, -1);
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_select_roster_delta(app, 1);
             return;

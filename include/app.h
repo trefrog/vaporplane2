@@ -118,6 +118,7 @@ void app_timeline_cancel_focus(App *app);
 void app_timeline_open_context_menu(App *app);
 void app_timeline_close_context_menu(App *app);
 void app_timeline_remove_selected_instance(App *app);
+void app_preview_selected_roster_clip(App *app);
 void app_timeline_move_cursor(App *app, int direction);
 void app_timeline_nudge_play_range(App *app, int direction);
 void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle);
