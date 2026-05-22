@@ -276,8 +276,8 @@ static void timeline_enter_place_clip(App *app) {
         return;
     }
     int64_t duration = timeline_clip_duration_ticks(app, app->selected_roster_clip);
-    if (duration <= 0 || app->timeline.length_ticks <= 0) {
-        app_set_status(app, "timeline empty");
+    if (duration <= 0) {
+        app_set_status(app, "Invalid roster clip");
         return;
     }
     app->timeline_edit_mode = TIMELINE_EDIT_PLACE_CLIP;
