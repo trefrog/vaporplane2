@@ -52,6 +52,9 @@ typedef struct App {
     int sample_count;
     int selected_sample;
     bool sample_selector_open;
+    char sample_dir[CLIP_MAX_PATH];
+    char roster_export_dir[CLIP_MAX_PATH];
+    bool roster_export_dir_is_base_path;
     char status_text[160];
 
     bool tempo_lock_mode;
@@ -71,6 +74,7 @@ typedef struct App {
     TimelineRangeHandle timeline_play_range_handle;
     bool timeline_play_range_adjusting;
     bool timeline_context_menu_open;
+    bool timeline_context_menu_roster;
     TimelineEditMode timeline_edit_mode;
     TimelineInstanceRef timeline_edit_instance;
     int timeline_edit_roster_clip_index;
@@ -121,6 +125,7 @@ void app_timeline_cancel_focus(App *app);
 void app_timeline_open_context_menu(App *app);
 void app_timeline_close_context_menu(App *app);
 void app_timeline_remove_selected_instance(App *app);
+void app_export_selected_roster_clip(App *app);
 void app_preview_selected_roster_clip(App *app);
 void app_timeline_move_cursor(App *app, int direction);
 void app_timeline_nudge_play_range(App *app, int direction);

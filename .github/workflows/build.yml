@@ -1,0 +1,66 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu
+            os: ubuntu-24.04
+          - name: macOS
+            os: macos-15-intel
+          - name: Windows
+            os: windows-2022
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install SDL3 with Homebrew
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # Ubuntu runner images include Homebrew, but it is not on PATH by default.
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          fi
+          brew install sdl3
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix)" >> "$GITHUB_ENV"
+
+      - name: Install SDL3 with vcpkg
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Windows GitHub-hosted runners are expected to provide vcpkg here.
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            throw "VCPKG_INSTALLATION_ROOT is not set on this Windows runner."
+          }
+          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
+          $toolchain = Join-Path $env:VCPKG_INSTALLATION_ROOT "scripts/buildsystems/vcpkg.cmake"
+          & $vcpkg install sdl3:x64-windows
+          "CMAKE_TOOLCHAIN_FILE=$toolchain" >> $env:GITHUB_ENV
+          "VCPKG_TARGET_TRIPLET=x64-windows" >> $env:GITHUB_ENV
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $cmakeArgs = @("-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release")
+          if ($env:CMAKE_TOOLCHAIN_FILE) {
+            $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$env:CMAKE_TOOLCHAIN_FILE"
+          }
+          if ($env:VCPKG_TARGET_TRIPLET) {
+            $cmakeArgs += "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET"
+          }
+          cmake @cmakeArgs
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel

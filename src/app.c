@@ -15,6 +15,53 @@ static void app_set_status(App *app, const char *text) {
     SDL_strlcpy(app->status_text, text, sizeof(app->status_text));
 }
 
+static bool path_is_directory(const char *path) {
+    SDL_PathInfo info;
+    return path && path[0] && SDL_GetPathInfo(path, &info) && info.type == SDL_PATHTYPE_DIRECTORY;
+}
+
+static void path_join(char *out, size_t out_size, const char *base, const char *leaf) {
+    if (!out || out_size == 0) return;
+    if (!base || !base[0]) {
+        SDL_strlcpy(out, leaf ? leaf : "", out_size);
+        return;
+    }
+    size_t len = SDL_strlen(base);
+    const char *separator = (len > 0 && (base[len - 1] == '/' || base[len - 1] == '\\')) ? "" : "/";
+    SDL_snprintf(out, out_size, "%s%s%s", base, separator, leaf ? leaf : "");
+}
+
+static void app_resolve_sample_dir(App *app) {
+    char candidate[CLIP_MAX_PATH];
+    const char *base = SDL_GetBasePath();
+    if (base && base[0]) {
+        path_join(candidate, sizeof(candidate), base, "wav");
+        if (path_is_directory(candidate)) {
+            SDL_strlcpy(app->sample_dir, candidate, sizeof(app->sample_dir));
+            return;
+        }
+    }
+    SDL_strlcpy(app->sample_dir, "assets/samples", sizeof(app->sample_dir));
+}
+
+static void app_resolve_roster_export_dir(App *app) {
+    char exports_dir[CLIP_MAX_PATH];
+    const char *base = SDL_GetBasePath();
+    if (base && base[0]) {
+        path_join(exports_dir, sizeof(exports_dir), base, "exports");
+        path_join(app->roster_export_dir, sizeof(app->roster_export_dir), exports_dir, "roster");
+        if (SDL_CreateDirectory(app->roster_export_dir)) {
+            app->roster_export_dir_is_base_path = true;
+            return;
+        }
+    }
+
+    path_join(exports_dir, sizeof(exports_dir), "exports", "roster");
+    SDL_strlcpy(app->roster_export_dir, exports_dir, sizeof(app->roster_export_dir));
+    app->roster_export_dir_is_base_path = false;
+    SDL_CreateDirectory(app->roster_export_dir);
+}
+
 static const SDL_Color roster_palette[] = {
     { 255, 105, 120, 255 },
     {  80, 220, 230, 255 },
@@ -681,6 +728,7 @@ void app_toggle_view_mode(App *app) {
         app->view_mode = APP_VIEW_TIMELINE;
         app->tempo_lock_mode = false;
         app->timeline_context_menu_open = false;
+        app->timeline_context_menu_roster = false;
         sync_transport_from_app(app);
     } else {
         audio_engine_stop_timeline(&app->audio, true);
@@ -688,6 +736,7 @@ void app_toggle_view_mode(App *app) {
         app->view_mode = APP_VIEW_WAVEFORM;
         app->transport.playing = false;
         app->timeline_context_menu_open = false;
+        app->timeline_context_menu_roster = false;
         sync_transport_from_app(app);
     }
 }
@@ -760,6 +809,7 @@ void app_timeline_cycle_focus(App *app, int direction) {
         return;
     }
     app->timeline_context_menu_open = false;
+    app->timeline_context_menu_roster = false;
     int zone = (int)app->timeline_focus_zone + direction;
     while (zone < 0) zone += (int)TIMELINE_FOCUS_COUNT;
     zone %= (int)TIMELINE_FOCUS_COUNT;
@@ -792,6 +842,7 @@ void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle)
     app->timeline_play_range_handle = handle;
     app->timeline_focus_zone = TIMELINE_FOCUS_PLAY_RANGE;
     app->timeline_context_menu_open = false;
+    app->timeline_context_menu_roster = false;
     app_set_status(app, handle == TIMELINE_RANGE_HANDLE_START ? "Play range start handle" : "Play range end handle");
 }
 
@@ -850,6 +901,7 @@ void app_timeline_select_lane_delta(App *app, int delta) {
     if (delta == 0) return;
     app->selected_timeline_lane = clamp_int(app->selected_timeline_lane + delta, 0, TIMELINE_MAX_LANES - 1);
     app->timeline_context_menu_open = false;
+    app->timeline_context_menu_roster = false;
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Track lane %d", app->selected_timeline_lane + 1);
 }
 
@@ -906,6 +958,7 @@ static void app_timeline_select_instance_at_cursor(App *app) {
         app->selected_timeline_instance = ref;
         app->selected_timeline_lane = ref.lane_index;
         app->timeline_context_menu_open = false;
+        app->timeline_context_menu_roster = false;
         app_set_status(app, "Selected timeline instance");
         return;
     }
@@ -1014,6 +1067,7 @@ static void app_timeline_cancel_edit_mode(App *app) {
 
 void app_timeline_activate_focus(App *app) {
     app->timeline_context_menu_open = false;
+    app->timeline_context_menu_roster = false;
     if (app->timeline_edit_mode != TIMELINE_EDIT_NONE) {
         app_timeline_confirm_edit_mode(app);
         return;
@@ -1039,6 +1093,7 @@ void app_timeline_activate_focus(App *app) {
                     app->selected_timeline_instance = under_cursor;
                     app->selected_timeline_lane = under_cursor.lane_index;
                     app->timeline_context_menu_open = false;
+                    app->timeline_context_menu_roster = false;
                     app_set_status(app, "Selected timeline instance");
                 }
             } else {
@@ -1091,22 +1146,36 @@ void app_timeline_open_context_menu(App *app) {
         app_set_status(app, "Finish current edit first");
         return;
     }
+    if (app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) {
+        if (app->selected_roster_clip < 0 || app->selected_roster_clip >= app->roster_clip_count) {
+            app_set_status(app, "Select a roster clip first");
+            return;
+        }
+        app->timeline_context_menu_open = true;
+        app->timeline_context_menu_roster = true;
+        app_set_status(app, "Roster menu");
+        return;
+    }
     if (!timeline_instance_ref_valid(&app->timeline, app->selected_timeline_instance)) {
         app_set_status(app, "Select an instance first");
         return;
     }
     app->timeline_context_menu_open = true;
+    app->timeline_context_menu_roster = false;
     app_set_status(app, "Instance menu");
 }
 
 void app_timeline_close_context_menu(App *app) {
+    bool roster_menu = app->timeline_context_menu_roster;
     app->timeline_context_menu_open = false;
-    app_set_status(app, "Instance menu closed");
+    app->timeline_context_menu_roster = false;
+    app_set_status(app, roster_menu ? "Roster menu closed" : "Instance menu closed");
 }
 
 void app_timeline_remove_selected_instance(App *app) {
     if (!timeline_instance_ref_valid(&app->timeline, app->selected_timeline_instance)) {
         app->timeline_context_menu_open = false;
+        app->timeline_context_menu_roster = false;
         app_set_status(app, "No instance selected");
         return;
     }
@@ -1136,7 +1205,141 @@ void app_timeline_remove_selected_instance(App *app) {
 
     audio_engine_set_timeline_playhead(&app->audio, playhead);
     app->timeline_context_menu_open = false;
+    app->timeline_context_menu_roster = false;
     app_set_status(app, "Removed timeline instance");
+}
+
+static bool write_fourcc(SDL_IOStream *io, const char text[4]) {
+    return SDL_WriteIO(io, text, 4) == 4;
+}
+
+static bool write_roster_clip_wav(const RosterClip *clip, const char *path) {
+    if (!clip || !clip->samples || clip->frame_count == 0 ||
+        clip->channels <= 0 || clip->sample_rate <= 0) {
+        return false;
+    }
+
+    Uint64 sample_count = (Uint64)clip->frame_count * (Uint64)clip->channels;
+    Uint64 data_size = sample_count * sizeof(Sint16);
+    if (data_size > 0xffffffffu) return false;
+
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io) return false;
+
+    bool ok = true;
+    Uint32 byte_rate = (Uint32)clip->sample_rate * (Uint32)clip->channels * (Uint32)sizeof(Sint16);
+    Uint16 block_align = (Uint16)(clip->channels * (int)sizeof(Sint16));
+
+    ok = ok && write_fourcc(io, "RIFF");
+    ok = ok && SDL_WriteU32LE(io, 36u + (Uint32)data_size);
+    ok = ok && write_fourcc(io, "WAVE");
+    ok = ok && write_fourcc(io, "fmt ");
+    ok = ok && SDL_WriteU32LE(io, 16);
+    ok = ok && SDL_WriteU16LE(io, 1);
+    ok = ok && SDL_WriteU16LE(io, (Uint16)clip->channels);
+    ok = ok && SDL_WriteU32LE(io, (Uint32)clip->sample_rate);
+    ok = ok && SDL_WriteU32LE(io, byte_rate);
+    ok = ok && SDL_WriteU16LE(io, block_align);
+    ok = ok && SDL_WriteU16LE(io, 16);
+    ok = ok && write_fourcc(io, "data");
+    ok = ok && SDL_WriteU32LE(io, (Uint32)data_size);
+
+    for (Uint64 i = 0; ok && i < sample_count; ++i) {
+        float sample = clip->samples[i];
+        if (sample > 1.0f) sample = 1.0f;
+        if (sample < -1.0f) sample = -1.0f;
+        Sint16 pcm = (Sint16)lrintf(sample * 32767.0f);
+        ok = ok && SDL_WriteS16LE(io, pcm);
+    }
+
+    ok = SDL_CloseIO(io) && ok;
+    return ok;
+}
+
+static void roster_export_filename(const RosterClip *clip, char *out, size_t out_size) {
+    char clean[APP_ROSTER_CLIP_NAME_MAX];
+    const char *name = clip && clip->name[0] ? clip->name : "roster_clip";
+    size_t write = 0;
+    for (size_t read = 0; name[read] && write + 1 < sizeof(clean); ++read) {
+        char c = name[read];
+        bool keep = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '#';
+        clean[write++] = keep ? c : '_';
+    }
+    if (write == 0) clean[write++] = 'c';
+    clean[write] = '\0';
+    SDL_snprintf(out, out_size, "%s.wav", clean);
+}
+
+static bool unique_roster_export_path(const App *app, const RosterClip *clip, char *out, size_t out_size) {
+    char filename[APP_ROSTER_CLIP_NAME_MAX + 8];
+    char stem[APP_ROSTER_CLIP_NAME_MAX];
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    roster_export_filename(clip, filename, sizeof(filename));
+    SDL_strlcpy(stem, filename, sizeof(stem));
+    char *dot = SDL_strrchr(stem, '.');
+    if (dot) *dot = '\0';
+
+    for (int suffix = 0; suffix < 1000; ++suffix) {
+        if (suffix == 0) {
+            path_join(out, out_size, app->roster_export_dir, filename);
+        } else {
+            SDL_snprintf(filename, sizeof(filename), "%s_%03d.wav", stem, suffix + 1);
+            path_join(out, out_size, app->roster_export_dir, filename);
+        }
+        SDL_PathInfo info;
+        if (!SDL_GetPathInfo(out, &info)) return true;
+    }
+    out[0] = '\0';
+    return false;
+}
+
+static void app_use_cwd_roster_export_dir(App *app) {
+    char dir[CLIP_MAX_PATH];
+    path_join(dir, sizeof(dir), "exports", "roster");
+    SDL_strlcpy(app->roster_export_dir, dir, sizeof(app->roster_export_dir));
+    app->roster_export_dir_is_base_path = false;
+    SDL_CreateDirectory(app->roster_export_dir);
+}
+
+void app_export_selected_roster_clip(App *app) {
+    if (app->selected_roster_clip < 0 || app->selected_roster_clip >= app->roster_clip_count) {
+        app->timeline_context_menu_open = false;
+        app->timeline_context_menu_roster = false;
+        app_set_status(app, "No roster clip selected");
+        return;
+    }
+    if (!SDL_CreateDirectory(app->roster_export_dir)) {
+        if (app->roster_export_dir_is_base_path) app_use_cwd_roster_export_dir(app);
+        if (!SDL_CreateDirectory(app->roster_export_dir)) {
+            app_set_status(app, "Could not create roster export folder");
+            return;
+        }
+    }
+
+    const RosterClip *clip = &app->roster[app->selected_roster_clip];
+    char path[CLIP_MAX_PATH];
+    if (!unique_roster_export_path(app, clip, path, sizeof(path))) {
+        app_set_status(app, "Could not create export path");
+        return;
+    }
+
+    bool exported = write_roster_clip_wav(clip, path);
+    if (!exported && app->roster_export_dir_is_base_path) {
+        app_use_cwd_roster_export_dir(app);
+        if (unique_roster_export_path(app, clip, path, sizeof(path))) {
+            exported = write_roster_clip_wav(clip, path);
+        }
+    }
+    if (!exported) {
+        app_set_status(app, "Could not export roster WAV");
+        return;
+    }
+
+    app->timeline_context_menu_open = false;
+    app->timeline_context_menu_roster = false;
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Exported %s", path);
 }
 
 void app_timeline_adjust_selected_instance_velocity(App *app, int delta) {
@@ -1316,15 +1519,16 @@ void app_note_loop_anchors_moved(App *app) {
 void app_refresh_sample_list(App *app) {
     app->sample_count = 0;
     app->selected_sample = 0;
+    app_resolve_sample_dir(app);
 
     int count = 0;
-    char **names = SDL_GlobDirectory("assets/samples", "*.wav", SDL_GLOB_CASEINSENSITIVE, &count);
+    char **names = SDL_GlobDirectory(app->sample_dir, "*.wav", SDL_GLOB_CASEINSENSITIVE, &count);
     if (!names) return;
     qsort(names, (size_t)count, sizeof(char *), compare_strings);
 
     for (int i = 0; i < count && app->sample_count < APP_MAX_SAMPLES; ++i) {
         SampleEntry *entry = &app->samples[app->sample_count++];
-        SDL_snprintf(entry->path, sizeof(entry->path), "assets/samples/%s", names[i]);
+        path_join(entry->path, sizeof(entry->path), app->sample_dir, names[i]);
         SDL_strlcpy(entry->name, names[i], sizeof(entry->name));
     }
     SDL_free(names);
@@ -1371,7 +1575,7 @@ bool load_clip_from_path(App *app, const char *path) {
 
 bool app_load_selected_sample(App *app) {
     if (app->sample_count <= 0) {
-        app_set_status(app, "No WAV files in assets/samples");
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "No WAV files in %s", app->sample_dir);
         return false;
     }
     return load_clip_from_path(app, app->samples[app->selected_sample].path);
@@ -1405,14 +1609,14 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "A/D loop start   J/L loop end   Shift = larger step"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Tab/Shift+Tab or bumpers cycle focus zones"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space play/pause   Enter/South activate focus   East cancel"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline: Start opens selected instance menu   South removes   East cancels"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Timeline: C/Start opens focus menu   South exports/removes   East cancels"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline stick: Left/Right pan   Up/Down zoom   L2 turbo"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Ruler: Left/Right cursor by beat   Shift+Left/Right pans"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Play Range: Enter/South adjust   1/2 or West/North choose handle"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Track: L/R cursor   U/D lane cursor   South select/move   [/] velocity"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad track: L2+stick X glide   L2+D-pad L/R bars   L2+D-pad U/D velocity"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Move/Place: D-pad L/R ticks   D-pad U/D lane   same-lane overlap blocked"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Roster: South arms/places   Right stick previews selected clip"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Roster: South arms/places   C/Start exports WAV   Right stick previews"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline R2: South play   East stop all   West jump start   North loop"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad waveform: South/Start play   Back metronome"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
@@ -1826,25 +2030,39 @@ static void app_render_timeline(App *app) {
         render_focus_outline(app, roster_panel, TIMELINE_FOCUS_ROSTER);
     }
 
-    if (app->timeline_context_menu_open &&
-        timeline_instance_ref_valid(&app->timeline, app->selected_timeline_instance)) {
-        const TimelineInstance *selected = timeline_const_instance_from_ref(&app->timeline, app->selected_timeline_instance);
+    if (app->timeline_context_menu_open) {
+        const char *title = app->timeline_context_menu_roster ? "ROSTER MENU" : "INSTANCE MENU";
         const char *name = "instance";
-        if (selected->roster_clip_index >= 0 && selected->roster_clip_index < app->roster_clip_count) {
-            name = app->roster[selected->roster_clip_index].name;
+        const char *action = app->timeline_context_menu_roster ? "South export WAV" : "South remove instance";
+        if (app->timeline_context_menu_roster) {
+            if (app->selected_roster_clip >= 0 && app->selected_roster_clip < app->roster_clip_count) {
+                name = app->roster[app->selected_roster_clip].name;
+            }
+        } else if (timeline_instance_ref_valid(&app->timeline, app->selected_timeline_instance)) {
+            const TimelineInstance *selected = timeline_const_instance_from_ref(&app->timeline, app->selected_timeline_instance);
+            if (selected->roster_clip_index >= 0 && selected->roster_clip_index < app->roster_clip_count) {
+                name = app->roster[selected->roster_clip_index].name;
+            }
         }
-        SDL_FRect menu = { timeline_x + 18.0f, timeline_y + track_h + 50.0f, 280.0f, 78.0f };
+        SDL_FRect menu = { app->timeline_context_menu_roster ? roster_x + 6.0f : timeline_x + 18.0f,
+                           timeline_y + track_h + 50.0f,
+                           app->timeline_context_menu_roster ? 320.0f : 280.0f,
+                           app->timeline_context_menu_roster ? 96.0f : 78.0f };
         SDL_SetRenderDrawColor(app->renderer, 12, 13, 20, 238);
         SDL_RenderFillRect(app->renderer, &menu);
         SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
         SDL_RenderRect(app->renderer, &menu);
         SDL_SetRenderDrawColor(app->renderer, 230, 238, 242, 255);
-        SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 10.0f, "INSTANCE MENU");
+        SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 10.0f, title);
         SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 28.0f, name);
         SDL_SetRenderDrawColor(app->renderer, 255, 160, 150, 255);
-        SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 48.0f, "South remove instance");
+        SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 48.0f, action);
+        if (app->timeline_context_menu_roster) {
+            SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 255);
+            SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 62.0f, app->roster_export_dir);
+        }
         SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 255);
-        SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 62.0f, "East/Start cancel");
+        SDL_RenderDebugText(app->renderer, menu.x + 12.0f, app->timeline_context_menu_roster ? menu.y + 80.0f : menu.y + 62.0f, "East/Start cancel");
     }
 }
 
@@ -1888,7 +2106,7 @@ static void app_render_overlay(App *app) {
         SDL_SetRenderDrawColor(app->renderer, 100, 230, 240, 255);
         SDL_RenderRect(app->renderer, &panel);
 
-        SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 14.0f, "assets/samples/");
+        SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 14.0f, app->sample_dir);
         SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 30.0f, "Up/Down select   Return load   Tab close");
 
         if (app->sample_count <= 0) {
@@ -1934,6 +2152,7 @@ bool app_init(App *app){
         if (app->gamepad) app->gamepad_id = SDL_GetGamepadID(app->gamepad);
     }
     SDL_free(gamepads);
+    app_resolve_roster_export_dir(app);
     app_refresh_sample_list(app);
     clip_init_generated(&app->clip, 48000, 2.0f);
     transport_init(&app->transport, 120.0, 960, 4, 4);
@@ -1957,6 +2176,7 @@ bool app_init(App *app){
     app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
     app->timeline_play_range_adjusting = false;
     app->timeline_context_menu_open = false;
+    app->timeline_context_menu_roster = false;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
     app->timeline_edit_original_lane = 0;
     app->timeline_edit_ghost_lane = 0;
