@@ -17,6 +17,8 @@
 - Loop capture roster with owned in-memory PCM clips and a first-pass tick-based master timeline.
 - Timeline roster preview plays the selected roster clip as a restartable one-shot.
 - Timeline view has focus zones, a tick cursor, beat/bar grid, play range handles, and range playback.
+- Timeline sequencing uses 8 lanes with same-lane overlap blocking and cross-lane overlap allowed.
+- Timeline playback applies per-instance velocity and shows a compact master output meter/clipping indicator.
 - Timeline playback starts from the play range and stops/rewinds or loops at the range end.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
 
@@ -56,9 +58,14 @@ cmake --build build
 ## Loop Capture / Timeline
 - `L2 + R2 + South` captures the current loop into the roster as an owned in-memory PCM clip.
 - Captured clips are in-memory only; they retain source path, source loop frames, copied PCM, color, source BPM, meter, target bars/beats, and downbeat offset.
-- The first captured clip initializes the master timeline BPM/meter from that clip and creates one timeline instance at tick `0`.
+- The first captured clip initializes the master timeline BPM/meter from that clip and creates one timeline instance at tick `0` in lane 1.
 - Later captures add roster entries only for now.
-- Timeline instances use musical ticks internally: `roster_clip_index`, `start_tick`, and `duration_ticks`.
+- Timeline has 8 fixed lanes. Each lane owns fixed-capacity timeline instances.
+- Timeline instances use musical ticks internally: `roster_clip_index`, `start_tick`, `duration_ticks`, MIDI-friendly note/channel, and velocity.
+- Same-lane instance overlap is blocked; different-lane overlap is allowed and mixed together.
+- Instance velocity is `1..127`, defaults to `100`, and uses a simple perceptual gain curve: `(velocity / 127)^1.5`.
+- Lane gain/mute exist only as internal structure for now; there is no lane mixer UI.
+- The master output monitor shows peak level and a `CLIP` flash/count when output exceeds the safe range.
 - Captures fail cleanly with status text for a full roster, very short loops, oversized clips, or memory allocation failure.
 - Timeline playback is separate from waveform loop playback: switching to timeline view stops waveform playback and waits silently.
 - Timeline focus zones are `TRANSPORT`, `RULER`, `PLAY RANGE`, `TRACK AREA`, and `ROSTER`.
@@ -75,6 +82,7 @@ cmake --build build
 - Timeline clips play owned PCM at natural speed; no time-stretching or pitch correction is applied yet.
 - If natural PCM duration and instance tick duration disagree, playback stops at the earlier of audio end or instance end.
 - Metronome enable/disable is global, but waveform mode follows waveform/transport tempo and timeline mode follows master timeline tempo.
+- Timeline audio mixes as instance -> lane sum -> master sum -> output.
 - The audio callback avoids file IO and heap allocation; timeline/roster mutations are locked or rejected during timeline playback.
 
 ## Timeline Controls
@@ -88,16 +96,17 @@ cmake --build build
 - In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; `Shift+Left/Right` pans.
 - In `PLAY RANGE`: `Enter` enters adjustment, `1` selects start handle, `2` selects end handle, `Left/Right` nudges the selected handle, `R` resets to full timeline.
 - In `TRACK AREA`: `Enter`/South selects the instance under the cursor; pressing it again enters `MOVE INSTANCE`.
-- In `MOVE INSTANCE`: d-pad or arrow left/right moves a lifted ghost by snap units, South/Enter confirms, East/Escape cancels and keeps the original start tick.
+- In `TRACK AREA`, `[` / `]` decreases/increases selected instance velocity. Gamepad `L2 + d-pad up/down` also adjusts velocity.
+- In `MOVE INSTANCE`: d-pad or arrow left/right moves a lifted ghost by snap units, d-pad or arrow up/down moves it between lanes, South/Enter confirms, East/Escape cancels and keeps the original lane/start tick.
 - In `ROSTER`: `Up/Down` selects a roster row; South/Enter arms it, and pressing again enters `PLACE CLIP` at the snapped cursor.
-- In `PLACE CLIP`: d-pad or arrow left/right moves a lifted ghost by snap units, South/Enter confirms, East/Escape cancels.
+- In `PLACE CLIP`: d-pad or arrow left/right moves a lifted ghost by snap units, d-pad or arrow up/down chooses lane 1..8, South/Enter confirms, East/Escape cancels.
 - Moving shows the original instance as a dim origin block until the ghost is dropped.
 - Armed roster rows, selected instances, valid ghosts, and invalid overlap ghosts use distinct depth-ready 2D cues.
-- Timeline move/place drops reject overlaps with status text and do not commit.
+- Timeline move/place drops reject same-lane overlaps with status text and do not commit. Cross-lane overlaps are allowed.
 - Gamepad bumpers: cycle focus.
 - Gamepad plain South: activate focused zone.
 - Gamepad plain East: back/cancel focused adjustment.
-- Gamepad plain Start/Plus: reserved, no-op for now.
+- Gamepad plain Start/Plus: opens the selected instance context menu.
 - Gamepad Back/Minus: metronome on/off.
 - Gamepad `R2 + South`: play/pause timeline.
 - Gamepad `R2 + East`: stop preview, stop timeline playback, and rewind to play range start.
@@ -140,12 +149,14 @@ cmake --build build
 - Right stick click: open sample selector in waveform view
 - In selector: d-pad up/down choose, south loads, east closes
 - In timeline view: left stick pans/zooms, L2 accelerates viewport movement, bumpers cycle focus, South activates focus, East cancels, R2+face buttons control transport
+- In timeline move/place: d-pad left/right moves by snap units and d-pad up/down chooses lane
+- In timeline track focus: L2 + d-pad up/down adjusts selected instance velocity
 - In timeline roster focus: right stick click previews the selected roster clip
 
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.
 - Loop playback has a very short boundary crossfade, but it still needs tuning by ear.
-- Timeline has no drag/drop editing, clip stretching, tempo map, MIDI clips, SMF save/load, or project persistence yet.
+- Timeline has no mouse drag/drop editing, clip stretching, tempo map, MIDI clips, SMF save/load, project persistence, routing, effects, pan, sends, or mixer UI yet.
 
 ## Next
 - Tune gamepad editing feel and add unobtrusive UX hints.

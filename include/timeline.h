@@ -6,7 +6,8 @@
 #include "clip.h"
 
 #define APP_MAX_ROSTER_CLIPS 64
-#define APP_MAX_TIMELINE_INSTANCES 128
+#define TIMELINE_MAX_LANES 8
+#define APP_MAX_TIMELINE_INSTANCES_PER_LANE 32
 #define APP_ROSTER_CLIP_NAME_MAX 128
 #define APP_MIN_CAPTURE_FRAMES 64
 #define APP_MAX_CAPTURE_FRAMES (48000 * 60 * 5)
@@ -42,6 +43,19 @@ typedef struct {
     int midi_velocity;
 } TimelineInstance;
 
+typedef struct {
+    int lane_index;
+    int instance_index;
+} TimelineInstanceRef;
+
+typedef struct {
+    char name[32];
+    float gain;
+    bool muted;
+    TimelineInstance instances[APP_MAX_TIMELINE_INSTANCES_PER_LANE];
+    int instance_count;
+} TimelineLane;
+
 typedef enum {
     TIMELINE_FOCUS_TRANSPORT,
     TIMELINE_FOCUS_RULER,
@@ -72,6 +86,5 @@ typedef struct {
     bool play_range_custom;
     double view_center_tick;
     double view_span_ticks;
-    TimelineInstance instances[APP_MAX_TIMELINE_INSTANCES];
-    int instance_count;
+    TimelineLane lanes[TIMELINE_MAX_LANES];
 } MasterTimeline;

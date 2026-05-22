@@ -12,6 +12,16 @@ typedef enum {
 } AudioPlaybackMode;
 
 typedef struct {
+    float peak_l;
+    float peak_r;
+    float rms_l;
+    float rms_r;
+    unsigned int clip_count;
+    float clip_flash_seconds;
+    unsigned int histogram[4];
+} MasterMeterState;
+
+typedef struct {
     SDL_AudioStream *stream;
     SDL_AudioSpec spec;
     AudioClip *clip;
@@ -28,6 +38,7 @@ typedef struct {
     int preview_roster_clip_index;
     double preview_frame;
     float master_gain;
+    MasterMeterState meter;
 } AudioEngine;
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport);
@@ -43,3 +54,4 @@ void audio_engine_stop_preview(AudioEngine *a);
 void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick);
 bool audio_engine_timeline_is_playing(const AudioEngine *a);
 int64_t audio_engine_get_timeline_playhead_tick(const AudioEngine *a);
+void audio_engine_get_master_meter(const AudioEngine *a, MasterMeterState *meter);

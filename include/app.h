@@ -72,15 +72,18 @@ typedef struct App {
     bool timeline_play_range_adjusting;
     bool timeline_context_menu_open;
     TimelineEditMode timeline_edit_mode;
-    int timeline_edit_instance_index;
+    TimelineInstanceRef timeline_edit_instance;
     int timeline_edit_roster_clip_index;
+    int timeline_edit_original_lane;
     int64_t timeline_edit_original_start_tick;
+    int timeline_edit_ghost_lane;
     int64_t timeline_edit_ghost_start_tick;
     int64_t timeline_edit_duration_ticks;
     bool timeline_edit_ghost_valid;
     int selected_roster_clip;
     bool selected_roster_clip_armed;
-    int selected_timeline_instance;
+    int selected_timeline_lane;
+    TimelineInstanceRef selected_timeline_instance;
 } App;
 
 bool app_init(App *app);
@@ -125,6 +128,8 @@ void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle)
 void app_timeline_reset_play_range(App *app);
 void app_timeline_select_roster_delta(App *app, int delta);
 void app_timeline_nudge_edit_ghost(App *app, int direction);
+void app_timeline_nudge_edit_lane(App *app, int direction);
+void app_timeline_adjust_selected_instance_velocity(App *app, int delta);
 void app_pan_timeline_view(App *app, double fraction);
 void app_zoom_timeline_view(App *app, double scale);
 BpmSource app_bpm_source(const App *app);
