@@ -8,10 +8,15 @@ static bool previous_buttons[SDL_GAMEPAD_BUTTON_COUNT];
 static Uint64 quit_confirm_until_ns = 0;
 static int tempo_bpm_dpad_direction = 0;
 static double tempo_bpm_dpad_repeat_timer = 0.0;
+static int timeline_cursor_stick_direction = 0;
+static double timeline_cursor_stick_repeat_timer = 0.0;
+static double timeline_cursor_stick_held_seconds = 0.0;
 
 static const double TEMPO_LOCK_BPM_DPAD_NUDGE = 0.1;
 static const double TEMPO_LOCK_BPM_DPAD_REPEAT_DELAY = 0.35;
 static const double TEMPO_LOCK_BPM_DPAD_REPEAT_INTERVAL = 0.12;
+static const double TIMELINE_CURSOR_STICK_THRESHOLD = 0.28;
+static const double TIMELINE_CURSOR_STICK_MAX_HELD = 3.0;
 
 static void clamp_view_target(App *app) {
     if(app->view.target_span<0.01) app->view.target_span=0.01;
@@ -91,6 +96,48 @@ static long tempo_anchor_step(App *app, double fraction) {
 static void reset_tempo_bpm_dpad_repeat(void) {
     tempo_bpm_dpad_direction = 0;
     tempo_bpm_dpad_repeat_timer = 0.0;
+}
+
+static void reset_timeline_cursor_stick_repeat(void) {
+    timeline_cursor_stick_direction = 0;
+    timeline_cursor_stick_repeat_timer = 0.0;
+    timeline_cursor_stick_held_seconds = 0.0;
+}
+
+static double timeline_cursor_stick_interval(double strength, double held_seconds) {
+    if(strength < 0.0) strength = 0.0;
+    if(strength > 1.0) strength = 1.0;
+    if(held_seconds > TIMELINE_CURSOR_STICK_MAX_HELD) held_seconds = TIMELINE_CURSOR_STICK_MAX_HELD;
+    double steps_per_second = 3.0 + strength * 6.0 + held_seconds * 5.0;
+    if(steps_per_second > 24.0) steps_per_second = 24.0;
+    return 1.0 / steps_per_second;
+}
+
+static void update_timeline_cursor_stick(App *app, double x_axis, double dt) {
+    double strength = fabs(x_axis);
+    int direction = 0;
+    if(strength >= TIMELINE_CURSOR_STICK_THRESHOLD) direction = x_axis > 0.0 ? 1 : -1;
+    if(direction == 0) {
+        reset_timeline_cursor_stick_repeat();
+        return;
+    }
+
+    if(direction != timeline_cursor_stick_direction) {
+        timeline_cursor_stick_direction = direction;
+        timeline_cursor_stick_held_seconds = 0.0;
+        app_timeline_move_cursor(app, direction);
+        timeline_cursor_stick_repeat_timer = timeline_cursor_stick_interval(strength, timeline_cursor_stick_held_seconds);
+        return;
+    }
+
+    timeline_cursor_stick_held_seconds += dt;
+    timeline_cursor_stick_repeat_timer -= dt;
+    int safety = 0;
+    while(timeline_cursor_stick_repeat_timer <= 0.0 && safety < 8) {
+        app_timeline_move_cursor(app, direction);
+        timeline_cursor_stick_repeat_timer += timeline_cursor_stick_interval(strength, timeline_cursor_stick_held_seconds);
+        safety++;
+    }
 }
 
 static void update_tempo_bpm_dpad(App *app, double dt) {
@@ -182,11 +229,13 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
         case SDLK_UP:
             if(app->timeline_edit_mode != TIMELINE_EDIT_NONE) app_timeline_nudge_edit_lane(app, -1);
             else if(app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) app_timeline_select_roster_delta(app, -1);
+            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA && !(mod & SDL_KMOD_SHIFT)) app_timeline_select_lane_delta(app, -1);
             else app_zoom_timeline_view(app, 0.8);
             return true;
         case SDLK_DOWN:
             if(app->timeline_edit_mode != TIMELINE_EDIT_NONE) app_timeline_nudge_edit_lane(app, 1);
             else if(app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) app_timeline_select_roster_delta(app, 1);
+            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA && !(mod & SDL_KMOD_SHIFT)) app_timeline_select_lane_delta(app, 1);
             else app_zoom_timeline_view(app, 1.25);
             return true;
         default: return true;
@@ -359,9 +408,16 @@ void input_update_gamepad(App *app, double dt){
         if(left_shoulder_pressed) app_timeline_cycle_focus(app, -1);
         if(right_shoulder_pressed) app_timeline_cycle_focus(app, 1);
 
+        bool l2_track_cursor_grab = l2_shift &&
+                                    app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA &&
+                                    app->timeline_edit_mode == TIMELINE_EDIT_NONE &&
+                                    !app->timeline_play_range_adjusting;
+        if(l2_track_cursor_grab) update_timeline_cursor_stick(app, lx, dt);
+        else reset_timeline_cursor_stick_repeat();
+
         double timeline_view_speed = l2_shift ? 3.0 : 1.0;
-        app_pan_timeline_view(app, lx * dt * 0.9 * timeline_view_speed);
-        app_zoom_timeline_view(app, 1.0 + ly * dt * 1.4 * timeline_view_speed);
+        app_pan_timeline_view(app, (l2_track_cursor_grab ? 0.0 : lx) * dt * 0.9 * timeline_view_speed);
+        app_zoom_timeline_view(app, 1.0 + (l2_track_cursor_grab ? 0.0 : ly) * dt * 1.4 * timeline_view_speed);
 
         if(south_pressed) app_timeline_activate_focus(app);
         if(east_pressed) app_timeline_cancel_focus(app);
@@ -399,8 +455,18 @@ void input_update_gamepad(App *app, double dt){
         }
 
         if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER || app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA) {
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_timeline_move_cursor(app, -1);
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_timeline_move_cursor(app, 1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
+                if(l2_shift) app_timeline_move_cursor_by_bar(app, -1);
+                else app_timeline_move_cursor(app, -1);
+            }
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
+                if(l2_shift) app_timeline_move_cursor_by_bar(app, 1);
+                else app_timeline_move_cursor(app, 1);
+            }
+            if(app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA) {
+                if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_select_lane_delta(app, -1);
+                if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_select_lane_delta(app, 1);
+            }
             return;
         }
 

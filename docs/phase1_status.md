@@ -95,7 +95,9 @@ cmake --build build
 - In timeline view, left stick pans horizontally and zooms vertically across focus zones; hold L2 for 3x faster viewport movement.
 - In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; `Shift+Left/Right` pans.
 - In `PLAY RANGE`: `Enter` enters adjustment, `1` selects start handle, `2` selects end handle, `Left/Right` nudges the selected handle, `R` resets to full timeline.
-- In `TRACK AREA`: `Enter`/South selects the instance under the cursor; pressing it again enters `MOVE INSTANCE`.
+- In `TRACK AREA`: `Up/Down` moves the lane cursor, and `Enter`/South selects the instance under the cursor in that lane; pressing it again enters `MOVE INSTANCE`.
+- In `TRACK AREA`, gamepad `L2 + left stick X` glides the cursor horizontally with hold acceleration.
+- In `RULER` or `TRACK AREA`, gamepad `L2 + d-pad left/right` moves the cursor by one bar.
 - In `TRACK AREA`, `[` / `]` decreases/increases selected instance velocity. Gamepad `L2 + d-pad up/down` also adjusts velocity.
 - In `MOVE INSTANCE`: d-pad or arrow left/right moves a lifted ghost by snap units, d-pad or arrow up/down moves it between lanes, South/Enter confirms, East/Escape cancels and keeps the original lane/start tick.
 - In `ROSTER`: `Up/Down` selects a roster row; South/Enter arms it, and pressing again enters `PLACE CLIP` at the snapped cursor.
@@ -150,7 +152,7 @@ cmake --build build
 - In selector: d-pad up/down choose, south loads, east closes
 - In timeline view: left stick pans/zooms, L2 accelerates viewport movement, bumpers cycle focus, South activates focus, East cancels, R2+face buttons control transport
 - In timeline move/place: d-pad left/right moves by snap units and d-pad up/down chooses lane
-- In timeline track focus: L2 + d-pad up/down adjusts selected instance velocity
+- In timeline track focus: L2 + left stick X glides the cursor, L2 + d-pad left/right moves by bar, and L2 + d-pad up/down adjusts selected instance velocity
 - In timeline roster focus: right stick click previews the selected roster clip
 
 ## Known limitations
