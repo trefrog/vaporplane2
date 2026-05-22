@@ -64,6 +64,7 @@ cmake --build build
 - `Tab` / `Shift+Tab` cycle timeline focus. Gamepad bumpers cycle focus in timeline view.
 - Timeline cursor movement snaps to one beat by default and clamps to the timeline length.
 - Timeline beat/bar grid is drawn from timeline ticks, BPM, and meter; bar lines are stronger than beat lines.
+- Timeline metronome downbeat accents follow the master timeline grid, not play range starts or source clip anchors.
 - Play range defaults to the full timeline. `PLAY RANGE` focus can adjust start/end handles on the beat grid or reset to full timeline.
 - `Space` starts/stops timeline playback from the keyboard. Gamepad timeline transport uses the `R2` layer.
 - Timeline playback starts at `play_range_start_tick`.
@@ -106,15 +107,16 @@ cmake --build build
 
 ## Tempo Lock Mode
 - Normal mode cuts/auditions loops; Tempo Lock mode calibrates the selected loop against musical time.
-- `T` or gamepad `R2 + North`: enter/exit Tempo Lock mode.
+- `T` or gamepad `R2 + North`: enter Tempo Lock mode; `T` cancels while active.
 - While active, loop anchor editing is disabled.
 - `[` / `]` or d-pad left/right: adjust draft BPM; gamepad uses fine nudges with a slow hold-repeat.
 - `,` / `.` or d-pad up/down: cycle target bars through `0.5`, `1`, `2`, `4`, `8`.
 - `B` / `V`, `N` / `Shift+N`, left stick, or bumpers: nudge downbeat anchor.
+- Gamepad `R2 + North`: snap downbeat anchor to the left loop marker while Tempo Lock is active.
 - Right stick: pan/zoom waveform view while calibrating.
 - `M`, gamepad North, or gamepad West: cycle meter among `3/4`, `4/4`, `6/8`.
 - `Return` or South: apply tempo lock.
-- `Escape` or East: cancel without applying.
+- `Escape`, `T`, or East: cancel without applying.
 - `Ctrl+T`, `U`, or `R2 + East`: clear/de-apply tempo lock.
 - Clearing keeps the chosen params retained; if anchors move afterward, retained params are marked stale but can still seed re-entry.
 
@@ -130,7 +132,7 @@ cmake --build build
 - Left trigger: finer trimming
 - Left trigger + right trigger + South: capture the current loop to the roster
 - Right trigger + South: set loop markers to the visible screen range
-- Right trigger + North: enter/exit Tempo Lock mode
+- Right trigger + North: enter Tempo Lock mode; while active, snap downbeat to loop start
 - Right trigger + East: clear/de-apply Tempo Lock
 - Right trigger + Start: toggle waveform/timeline view
 - Left stick click: reset loop to full sample

@@ -1066,6 +1066,13 @@ void app_adjust_tempo_lock_downbeat(App *app, long frames) {
     sync_transport_from_app(app);
 }
 
+void app_snap_tempo_lock_downbeat_to_loop_start(App *app) {
+    app->tempo_lock_draft.downbeat_frame = app->clip.loop_start_frame;
+    clamp_tempo_params(app, &app->tempo_lock_draft);
+    sync_transport_from_app(app);
+    app_set_status(app, "Downbeat snapped to loop start");
+}
+
 void app_cycle_tempo_lock_target_bars(App *app, int direction) {
     static const double options[] = {0.5, 1.0, 2.0, 4.0, 8.0};
     int count = (int)(sizeof(options) / sizeof(options[0]));
@@ -1213,7 +1220,8 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "R2+South set loop to visible   L2+R2+South capture loop"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform R2+North tempo lock   R2+Start timeline/waveform"); y += 22.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: South apply   East cancel   R2+East clear"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: South apply   East/T cancel   R2+East clear"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: R2+North snaps downbeat to loop start"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: d-pad fine BPM/bars   sticks/bumpers downbeat");
 }
 

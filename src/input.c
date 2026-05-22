@@ -395,7 +395,7 @@ void input_update_gamepad(App *app, double dt){
     }
 
     if(app->tempo_lock_mode) {
-        if(r2_shift && north_pressed) app_cancel_tempo_lock_mode(app);
+        if(r2_shift && north_pressed) app_snap_tempo_lock_downbeat_to_loop_start(app);
         else if(r2_shift && east_pressed) app_clear_tempo_lock(app);
         else if(south_pressed) app_apply_tempo_lock(app);
         else if(east_pressed) app_cancel_tempo_lock_mode(app);

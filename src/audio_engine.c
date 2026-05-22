@@ -108,15 +108,13 @@ static void update_timeline_metronome(AudioEngine *a, double tick, double tick_s
     MasterTimeline *timeline = a->timeline;
     if(!timeline || !timeline->playing || !t->metronome_enabled || timeline->ticks_per_beat <= 0) return;
 
-    int64_t range_start = 0;
-    timeline_effective_play_range(timeline, &range_start, NULL);
-    double relative_tick = tick - (double)range_start;
-    if(relative_tick < 0.0) return;
-    int64_t beat = (int64_t)floor(relative_tick / (double)timeline->ticks_per_beat);
+    if(tick < 0.0) return;
+    int64_t beat = (int64_t)floor(tick / (double)timeline->ticks_per_beat);
     if(!a->metronome_beat_valid) {
         a->last_metronome_beat = beat;
         a->metronome_beat_valid = true;
-        if(relative_tick <= fmax(1.0, tick_step)) transport_trigger_metronome_beat(t, beat);
+        double tick_into_beat = tick - floor(tick / (double)timeline->ticks_per_beat) * (double)timeline->ticks_per_beat;
+        if(tick_into_beat <= fmax(1.0, tick_step)) transport_trigger_metronome_beat(t, beat);
         return;
     }
     if(beat != a->last_metronome_beat) {

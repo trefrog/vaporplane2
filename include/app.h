@@ -100,6 +100,7 @@ void app_clear_tempo_lock(App *app);
 void app_adjust_transport_bpm(App *app, double delta);
 void app_adjust_tempo_lock_bpm(App *app, double delta);
 void app_adjust_tempo_lock_downbeat(App *app, long frames);
+void app_snap_tempo_lock_downbeat_to_loop_start(App *app);
 void app_cycle_tempo_lock_target_bars(App *app, int direction);
 void app_cycle_tempo_lock_meter(App *app, int direction);
 void app_note_loop_anchors_moved(App *app);
