@@ -1,5 +1,6 @@
 #include "audio_engine.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #define AUDIO_CALLBACK_CHUNK_FRAMES 512
@@ -399,8 +400,8 @@ bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport){
     memset(a,0,sizeof(*a)); a->clip=clip;a->transport=transport;a->master_gain=0.9f; a->playhead_frame=0; a->playback_mode=AUDIO_PLAYBACK_WAVEFORM;
     a->spec.format=SDL_AUDIO_F32; a->spec.channels=2; a->spec.freq=48000;
     a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &a->spec, feed_audio, a);
-    if(!a->stream) return false;
-    if (!SDL_ResumeAudioStreamDevice(a->stream)) return false;
+    if(!a->stream){ fprintf(stderr,"SDL_OpenAudioDeviceStream failed: %s\n",SDL_GetError()); return false; }
+    if (!SDL_ResumeAudioStreamDevice(a->stream)){ fprintf(stderr,"SDL_ResumeAudioStreamDevice failed: %s\n",SDL_GetError()); return false; }
     return true;
 }
 void audio_engine_shutdown(AudioEngine *a){ if(a->stream) SDL_DestroyAudioStream(a->stream); memset(a,0,sizeof(*a)); }
@@ -452,6 +453,7 @@ void audio_engine_set_playback_mode(AudioEngine *a, AudioPlaybackMode mode) {
 }
 
 void audio_engine_start_timeline(AudioEngine *a) {
+    if(!a->stream) return;
     if(a->stream) SDL_LockAudioStream(a->stream);
     int64_t range_start = 0, range_end = 0;
     if(a->timeline) timeline_effective_play_range(a->timeline, &range_start, &range_end);
@@ -492,6 +494,7 @@ void audio_engine_stop_timeline(AudioEngine *a, bool rewind) {
 }
 
 bool audio_engine_preview_roster_clip(AudioEngine *a, int roster_index) {
+    if(!a->stream) return false;
     if(a->stream) SDL_LockAudioStream(a->stream);
     bool ok = false;
     if(a->roster && a->roster_clip_count &&
@@ -528,6 +531,7 @@ void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick) {
 }
 
 bool audio_engine_timeline_is_playing(const AudioEngine *a) {
+    if(!a->stream) return false;
     AudioEngine *mutable_audio = (AudioEngine *)a;
     if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
     bool playing = a->timeline && a->timeline->playing;

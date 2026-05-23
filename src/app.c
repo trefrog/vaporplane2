@@ -15,6 +15,10 @@ static void app_set_status(App *app, const char *text) {
     SDL_strlcpy(app->status_text, text, sizeof(app->status_text));
 }
 
+static void app_set_audio_unavailable_status(App *app) {
+    app_set_status(app, "Audio unavailable");
+}
+
 static bool path_is_directory(const char *path) {
     SDL_PathInfo info;
     return path && path[0] && SDL_GetPathInfo(path, &info) && info.type == SDL_PATHTYPE_DIRECTORY;
@@ -747,6 +751,12 @@ void app_toggle_controls_legend(App *app) {
 
 void app_toggle_timeline_playback(App *app) {
     if (app->view_mode != APP_VIEW_TIMELINE) return;
+    if (!app->audio.stream) {
+        app->timeline.playing = false;
+        app->transport.playing = false;
+        app_set_audio_unavailable_status(app);
+        return;
+    }
     sync_timeline_play_range(app);
     int64_t range_start = 0, range_end = 0;
     timeline_effective_play_range(&app->timeline, &range_start, &range_end);
@@ -1357,6 +1367,10 @@ void app_timeline_adjust_selected_instance_velocity(App *app, int delta) {
 }
 
 void app_preview_selected_roster_clip(App *app) {
+    if (!app->audio.stream) {
+        app_set_audio_unavailable_status(app);
+        return;
+    }
     if (app->roster_clip_count <= 0) {
         app->selected_roster_clip = -1;
         app->selected_roster_clip_armed = false;
@@ -2142,8 +2156,8 @@ static void app_render_overlay(App *app) {
 
 bool app_init(App *app){
     if(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_AUDIO|SDL_INIT_GAMEPAD)){ fprintf(stderr,"SDL init failed: %s\n",SDL_GetError()); return false; }
-    app->window=SDL_CreateWindow("vaporplane",1280,720,SDL_WINDOW_RESIZABLE); if(!app->window) return false;
-    app->renderer=SDL_CreateRenderer(app->window,NULL); if(!app->renderer) return false;
+    app->window=SDL_CreateWindow("vaporplane",1280,720,SDL_WINDOW_RESIZABLE); if(!app->window){ fprintf(stderr,"SDL_CreateWindow failed: %s\n",SDL_GetError()); return false; }
+    app->renderer=SDL_CreateRenderer(app->window,NULL); if(!app->renderer){ fprintf(stderr,"SDL_CreateRenderer failed: %s\n",SDL_GetError()); return false; }
     app->gamepad=NULL; app->gamepad_id=0; app->running=true;
     int gamepad_count = 0;
     SDL_JoystickID *gamepads = SDL_GetGamepads(&gamepad_count);
@@ -2185,9 +2199,19 @@ bool app_init(App *app){
     app->selected_timeline_lane = 0;
     app->selected_timeline_instance = timeline_instance_ref_invalid();
     waveform_view_init(&app->view);
-    if(!audio_engine_init(&app->audio,&app->clip,&app->transport)) return false;
+    bool audio_ok = audio_engine_init(&app->audio,&app->clip,&app->transport);
+    char audio_unavailable_status[sizeof(app->status_text)] = {0};
+    if(!audio_ok){
+        const char *audio_error = SDL_GetError();
+        fprintf(stderr,"audio_engine_init failed: %s\n",audio_error);
+        SDL_snprintf(audio_unavailable_status, sizeof(audio_unavailable_status),
+                     "Audio unavailable: %s",
+                     audio_error && audio_error[0] ? audio_error : "unknown SDL audio error");
+        audio_engine_shutdown(&app->audio);
+    }
     audio_engine_set_timeline(&app->audio, app->roster, &app->roster_clip_count, &app->timeline);
     if(app->sample_count > 0) app_load_selected_sample(app);
+    if(!audio_ok) app_set_status(app, audio_unavailable_status);
     return true;
 }
 

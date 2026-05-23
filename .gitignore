@@ -1,8 +1,10 @@
 build/
+build-mingw/
 .DS_Store
 *.o
 *.dSYM/
 compile_commands.json
+run.log
 assets/samples/*
 !assets/samples/.gitkeep
 !assets/samples/*.wav.json

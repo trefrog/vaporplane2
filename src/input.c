@@ -27,11 +27,24 @@ static void clamp_view_target(App *app) {
 }
 
 static void set_playing(App *app, bool playing) {
+    if (playing && !app->audio.stream) {
+        app->transport.playing = false;
+        SDL_strlcpy(app->status_text, "Audio unavailable", sizeof(app->status_text));
+        return;
+    }
     app->transport.playing = playing;
 }
 
 static void toggle_playing(App *app) {
     set_playing(app, !app->transport.playing);
+}
+
+static void toggle_metronome(App *app) {
+    if (!app->audio.stream) {
+        SDL_strlcpy(app->status_text, "Audio unavailable", sizeof(app->status_text));
+        return;
+    }
+    app->transport.metronome_enabled = !app->transport.metronome_enabled;
 }
 
 static bool confirm_quit(App *app) {
@@ -206,7 +219,7 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
             return true;
         case SDLK_RETURN: app_timeline_activate_focus(app); return true;
         case SDLK_SPACE: app_toggle_timeline_playback(app); return true;
-        case SDLK_M: app->transport.metronome_enabled=!app->transport.metronome_enabled; return true;
+        case SDLK_M: toggle_metronome(app); return true;
         case SDLK_HOME: app_rewind_timeline(app); return true;
         case SDLK_C: app_timeline_open_context_menu(app); return true;
         case SDLK_LEFTBRACKET: app_timeline_adjust_selected_instance_velocity(app, -5); return true;
@@ -331,7 +344,7 @@ bool input_handle_event(App *app, const SDL_Event *e){
             if(confirm_quit(app)) return false;
             break;
         case SDLK_SPACE: toggle_playing(app); break;
-        case SDLK_M: app->transport.metronome_enabled=!app->transport.metronome_enabled; break;
+        case SDLK_M: toggle_metronome(app); break;
         case SDLK_LEFTBRACKET: app_adjust_transport_bpm(app, -0.5); break;
         case SDLK_RIGHTBRACKET: app_adjust_transport_bpm(app, 0.5); break;
         case SDLK_LEFT: app->view.target_center -= 0.12*app->view.target_span; break;
@@ -368,7 +381,7 @@ void input_update_gamepad(App *app, double dt){
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_select_sample_delta(app, 1);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_SOUTH) && app_load_selected_sample(app)) app->sample_selector_open=false;
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_EAST)) app->sample_selector_open=false;
-        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_BACK)) app->transport.metronome_enabled=!app->transport.metronome_enabled;
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_BACK)) toggle_metronome(app);
         return;
     }
 
@@ -421,7 +434,7 @@ void input_update_gamepad(App *app, double dt){
             return;
         }
 
-        if(back_pressed) app->transport.metronome_enabled=!app->transport.metronome_enabled;
+        if(back_pressed) toggle_metronome(app);
         if(left_shoulder_pressed) app_timeline_cycle_focus(app, -1);
         if(right_shoulder_pressed) app_timeline_cycle_focus(app, 1);
 
@@ -497,7 +510,7 @@ void input_update_gamepad(App *app, double dt){
         else if(east_pressed) app_cancel_tempo_lock_mode(app);
         else if(north_pressed) app_cycle_tempo_lock_meter(app, 1);
         else if(west_pressed) app_cycle_tempo_lock_meter(app, -1);
-        if(back_pressed) app->transport.metronome_enabled=!app->transport.metronome_enabled;
+        if(back_pressed) toggle_metronome(app);
 
         update_tempo_bpm_dpad(app, dt);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_cycle_tempo_lock_target_bars(app, 1);
@@ -536,7 +549,7 @@ void input_update_gamepad(App *app, double dt){
     }
 
     if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) app->sample_selector_open=true;
-    if(back_pressed) app->transport.metronome_enabled=!app->transport.metronome_enabled;
+    if(back_pressed) toggle_metronome(app);
     if(left_shoulder_pressed) {
         gamepad_edit_target=0;
         app_focus_loop_start(app);
