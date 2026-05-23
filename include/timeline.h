@@ -49,7 +49,7 @@ typedef struct {
 } TimelineInstanceRef;
 
 typedef struct {
-    char name[32];
+    int palette_index;
     float gain;
     bool muted;
     TimelineInstance instances[APP_MAX_TIMELINE_INSTANCES_PER_LANE];
@@ -59,6 +59,7 @@ typedef struct {
 typedef enum {
     TIMELINE_FOCUS_TRANSPORT,
     TIMELINE_FOCUS_RULER,
+    TIMELINE_FOCUS_LANE_INDEX,
     TIMELINE_FOCUS_PLAY_RANGE,
     TIMELINE_FOCUS_TRACK_AREA,
     TIMELINE_FOCUS_ROSTER,

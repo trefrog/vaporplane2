@@ -77,6 +77,56 @@ static const SDL_Color roster_palette[] = {
     { 235, 115, 190, 255 },
 };
 
+typedef struct {
+    SDL_Color deep;
+    SDL_Color pastel;
+} LanePalette;
+
+static const LanePalette lane_palettes[] = {
+    { {  78,  22,  38, 255 }, { 255, 148, 166, 255 } },
+    { {  16,  68,  76, 255 }, { 130, 238, 234, 255 } },
+    { {  86,  62,  16, 255 }, { 255, 216, 132, 255 } },
+    { {  28,  76,  42, 255 }, { 156, 236, 160, 255 } },
+    { {  58,  38,  92, 255 }, { 196, 166, 255, 255 } },
+    { {  88,  45,  20, 255 }, { 255, 172, 116, 255 } },
+    { {  30,  55, 100, 255 }, { 146, 190, 255, 255 } },
+    { {  86,  30,  72, 255 }, { 250, 144, 216, 255 } },
+};
+
+static int lane_palette_count(void) {
+    return (int)(sizeof(lane_palettes) / sizeof(lane_palettes[0]));
+}
+
+static const LanePalette *lane_palette_for_index(int palette_index) {
+    int count = lane_palette_count();
+    if (count <= 0) return NULL;
+    if (palette_index < 0) palette_index = 0;
+    return &lane_palettes[palette_index % count];
+}
+
+static SDL_Color color_mix(SDL_Color a, SDL_Color b, float t) {
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    SDL_Color out;
+    out.r = (Uint8)lrintf((float)a.r + ((float)b.r - (float)a.r) * t);
+    out.g = (Uint8)lrintf((float)a.g + ((float)b.g - (float)a.g) * t);
+    out.b = (Uint8)lrintf((float)a.b + ((float)b.b - (float)a.b) * t);
+    out.a = (Uint8)lrintf((float)a.a + ((float)b.a - (float)a.a) * t);
+    return out;
+}
+
+static SDL_Color color_muted(SDL_Color color) {
+    Uint8 grey = (Uint8)lrintf((float)color.r * 0.30f + (float)color.g * 0.59f + (float)color.b * 0.11f);
+    SDL_Color flat = { grey, grey, grey, color.a };
+    SDL_Color out = color_mix(color, flat, 0.72f);
+    out = color_mix(out, (SDL_Color){ 22, 23, 30, color.a }, 0.36f);
+    return out;
+}
+
+static void set_draw_color(SDL_Renderer *renderer, SDL_Color color) {
+    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+}
+
 static void roster_clip_destroy(RosterClip *clip) {
     SDL_free(clip->samples);
     SDL_memset(clip, 0, sizeof(*clip));
@@ -172,10 +222,16 @@ static bool timeline_has_instances(const MasterTimeline *timeline) {
     return timeline_total_instance_count(timeline) > 0;
 }
 
+static bool app_uses_timeline_transport(const App *app) {
+    return app->view_mode == APP_VIEW_TIMELINE || app->view_mode == APP_VIEW_LANE_INSPECTOR;
+}
+
+static void reset_lane_analyzer_visual(App *app, int lane_index);
+
 static void timeline_init_lanes(MasterTimeline *timeline) {
     for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
         TimelineLane *lane = &timeline->lanes[lane_index];
-        if (!lane->name[0]) SDL_snprintf(lane->name, sizeof(lane->name), "Lane %d", lane_index + 1);
+        lane->palette_index = lane_index % lane_palette_count();
         if (lane->gain <= 0.0f) lane->gain = 1.0f;
         if (lane->instance_count < 0) lane->instance_count = 0;
         if (lane->instance_count > APP_MAX_TIMELINE_INSTANCES_PER_LANE) {
@@ -199,6 +255,7 @@ static const char *timeline_focus_label(TimelineFocusZone zone) {
     switch (zone) {
         case TIMELINE_FOCUS_TRANSPORT: return "TRANSPORT";
         case TIMELINE_FOCUS_RULER: return "RULER";
+        case TIMELINE_FOCUS_LANE_INDEX: return "LANE INDEX";
         case TIMELINE_FOCUS_PLAY_RANGE: return "PLAY RANGE";
         case TIMELINE_FOCUS_TRACK_AREA: return "TRACK AREA";
         case TIMELINE_FOCUS_ROSTER: return "ROSTER";
@@ -467,7 +524,7 @@ static TempoLockParams default_tempo_params(const App *app) {
 }
 
 static void sync_transport_from_app(App *app) {
-    if (app->view_mode == APP_VIEW_TIMELINE) {
+    if (app_uses_timeline_transport(app)) {
         sync_transport_to_timeline(app);
     } else if (app->tempo_lock_mode) {
         app->transport.bpm = app->tempo_lock_draft.bpm;
@@ -522,7 +579,7 @@ static void copy_tempo_params_to_clip(AudioClip *clip, const TempoLockParams *pa
 }
 
 BpmSource app_bpm_source(const App *app) {
-    if (app->view_mode == APP_VIEW_TIMELINE) return BPM_SOURCE_MASTER_TIMELINE;
+    if (app_uses_timeline_transport(app)) return BPM_SOURCE_MASTER_TIMELINE;
     if (app->tempo_lock_mode) return BPM_SOURCE_TEMPO_LOCKED;
     if (app->transport_bpm_manual) return BPM_SOURCE_TRANSPORT_MANUAL;
     if (app->clip.clip_tempo_locked) return BPM_SOURCE_TEMPO_LOCKED;
@@ -735,6 +792,7 @@ void app_toggle_view_mode(App *app) {
         app->timeline_context_menu_roster = false;
         sync_transport_from_app(app);
     } else {
+        audio_engine_set_active_lane_analyzer(&app->audio, -1);
         audio_engine_stop_timeline(&app->audio, true);
         audio_engine_set_playback_mode(&app->audio, AUDIO_PLAYBACK_WAVEFORM);
         app->view_mode = APP_VIEW_WAVEFORM;
@@ -750,7 +808,7 @@ void app_toggle_controls_legend(App *app) {
 }
 
 void app_toggle_timeline_playback(App *app) {
-    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    if (!app_uses_timeline_transport(app)) return;
     if (!app->audio.stream) {
         app->timeline.playing = false;
         app->transport.playing = false;
@@ -776,7 +834,7 @@ void app_toggle_timeline_playback(App *app) {
 }
 
 void app_rewind_timeline(App *app) {
-    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    if (!app_uses_timeline_transport(app)) return;
     audio_engine_stop_timeline(&app->audio, true);
     audio_engine_stop_preview(&app->audio);
     int64_t range_start = 0;
@@ -787,7 +845,7 @@ void app_rewind_timeline(App *app) {
 }
 
 void app_timeline_jump_to_play_range_start(App *app) {
-    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    if (!app_uses_timeline_transport(app)) return;
     sync_timeline_play_range(app);
     int64_t range_start = 0;
     timeline_effective_play_range(&app->timeline, &range_start, NULL);
@@ -798,7 +856,7 @@ void app_timeline_jump_to_play_range_start(App *app) {
 }
 
 void app_timeline_jump_playhead_to_cursor(App *app) {
-    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    if (!app_uses_timeline_transport(app)) return;
     sync_timeline_play_range(app);
     audio_engine_set_timeline_playhead(&app->audio, app->timeline.timeline_cursor_tick);
     sync_transport_from_app(app);
@@ -806,7 +864,7 @@ void app_timeline_jump_playhead_to_cursor(App *app) {
 }
 
 void app_timeline_toggle_play_range_loop(App *app) {
-    if (app->view_mode != APP_VIEW_TIMELINE) return;
+    if (!app_uses_timeline_transport(app)) return;
     if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
     app->timeline.play_range_loop_enabled = !app->timeline.play_range_loop_enabled;
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
@@ -1088,6 +1146,9 @@ void app_timeline_activate_focus(App *app) {
             break;
         case TIMELINE_FOCUS_RULER:
             app_timeline_jump_playhead_to_cursor(app);
+            break;
+        case TIMELINE_FOCUS_LANE_INDEX:
+            app_open_lane_inspector(app, app->selected_timeline_lane);
             break;
         case TIMELINE_FOCUS_PLAY_RANGE:
             app->timeline_play_range_adjusting = true;
@@ -1401,6 +1462,40 @@ void app_zoom_timeline_view(App *app, double scale) {
     clamp_timeline_view(app);
 }
 
+void app_open_lane_inspector(App *app, int lane_index) {
+    if (!timeline_lane_index_valid(lane_index)) lane_index = clamp_int(lane_index, 0, TIMELINE_MAX_LANES - 1);
+    if (app->timeline_edit_mode != TIMELINE_EDIT_NONE || app->timeline_play_range_adjusting) {
+        app_set_status(app, "Finish current edit first");
+        return;
+    }
+    app->selected_timeline_lane = lane_index;
+    app->inspected_timeline_lane = lane_index;
+    app->timeline_context_menu_open = false;
+    app->timeline_context_menu_roster = false;
+    app->view_mode = APP_VIEW_LANE_INSPECTOR;
+    reset_lane_analyzer_visual(app, lane_index);
+    audio_engine_set_active_lane_analyzer(&app->audio, lane_index);
+    sync_transport_from_app(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Lane %d inspector", lane_index + 1);
+}
+
+void app_close_lane_inspector(App *app) {
+    if (app->view_mode != APP_VIEW_LANE_INSPECTOR) return;
+    audio_engine_set_active_lane_analyzer(&app->audio, -1);
+    app->view_mode = APP_VIEW_TIMELINE;
+    sync_transport_from_app(app);
+    app_set_status(app, "Timeline");
+}
+
+void app_toggle_inspected_lane_mute(App *app) {
+    int lane_index = clamp_int(app->inspected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    TimelineLane *lane = &app->timeline.lanes[lane_index];
+    lane->muted = !lane->muted;
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Lane %d %s", lane_index + 1, lane->muted ? "muted" : "unmuted");
+}
+
 void app_enter_tempo_lock_mode(App *app) {
     if (app->tempo_lock_mode) {
         app_cancel_tempo_lock_mode(app);
@@ -1604,7 +1699,7 @@ void app_select_sample_delta(App *app, int delta) {
 static void app_render_controls_legend(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
-    SDL_FRect panel = { 36.0f, 88.0f, 700.0f, 430.0f };
+    SDL_FRect panel = { 36.0f, 88.0f, 700.0f, 466.0f };
     if (panel.w > (float)w - 72.0f) panel.w = (float)w - 72.0f;
     if (panel.h > (float)h - 112.0f) panel.h = (float)h - 112.0f;
 
@@ -1626,6 +1721,8 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: C/Start opens focus menu   South exports/removes   East cancels"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline stick: Left/Right pan   Up/Down zoom   L2 turbo"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Ruler: Left/Right cursor by beat   Shift+Left/Right pans"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Lane Index: Up/Down lane   South opens Lane Inspector"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Lane Inspector: South mute   East timeline   R2 transport"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Play Range: Enter/South adjust   1/2 or West/North choose handle"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Track: L/R cursor   U/D lane cursor   South select/move   [/] velocity"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad track: L2+stick X glide   L2+D-pad L/R bars   L2+D-pad U/D velocity"); y += 16.0f;
@@ -1656,9 +1753,11 @@ typedef enum {
 
 static void render_timeline_block(App *app,
                                   SDL_FRect block,
-                                  SDL_Color color,
+                                  SDL_Color clip_color,
+                                  SDL_Color lane_color,
                                   const char *label,
-                                  TimelineBlockStyle style) {
+                                  TimelineBlockStyle style,
+                                  bool muted) {
     SDL_Renderer *renderer = app->renderer;
     SDL_FRect draw = block;
     if (style == TIMELINE_BLOCK_GHOST_VALID || style == TIMELINE_BLOCK_GHOST_INVALID) {
@@ -1668,45 +1767,53 @@ static void render_timeline_block(App *app,
         draw.y -= 5.0f;
     }
 
+    SDL_Color fill = muted ? color_muted(clip_color) : clip_color;
+    SDL_Color border = muted ? color_muted(lane_color) : lane_color;
+    SDL_Color cast = border;
     switch (style) {
         case TIMELINE_BLOCK_SELECTED:
-            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 232);
-            SDL_RenderFillRect(renderer, &draw);
-            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-            SDL_RenderRect(renderer, &draw);
+            fill.a = muted ? 126 : 232;
+            border = (SDL_Color){ 255, 255, 255, 255 };
             break;
         case TIMELINE_BLOCK_ORIGIN:
-            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 54);
-            SDL_RenderFillRect(renderer, &draw);
-            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 112);
-            SDL_RenderRect(renderer, &draw);
+            fill.a = muted ? 34 : 54;
+            border.a = muted ? 80 : 112;
             break;
         case TIMELINE_BLOCK_GHOST_VALID:
-            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 138);
-            SDL_RenderFillRect(renderer, &draw);
-            SDL_SetRenderDrawColor(renderer, 245, 245, 255, 255);
-            SDL_RenderRect(renderer, &draw);
+            fill.a = muted ? 88 : 138;
+            border = (SDL_Color){ 245, 245, 255, 255 };
             break;
         case TIMELINE_BLOCK_GHOST_INVALID:
-            SDL_SetRenderDrawColor(renderer, 255, 72, 88, 132);
-            SDL_RenderFillRect(renderer, &draw);
-            SDL_SetRenderDrawColor(renderer, 255, 80, 96, 255);
-            SDL_RenderRect(renderer, &draw);
+            fill = (SDL_Color){ 255, 72, 88, 132 };
+            border = (SDL_Color){ 255, 80, 96, 255 };
             break;
         case TIMELINE_BLOCK_NORMAL:
         default:
-            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 218);
-            SDL_RenderFillRect(renderer, &draw);
-            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 220);
-            SDL_RenderRect(renderer, &draw);
+            fill.a = muted ? 92 : 218;
+            border.a = muted ? 118 : 230;
             break;
     }
 
+    set_draw_color(renderer, fill);
+    SDL_RenderFillRect(renderer, &draw);
+    if (style != TIMELINE_BLOCK_GHOST_INVALID) {
+        cast.a = muted ? 22 : 42;
+        set_draw_color(renderer, cast);
+        SDL_RenderFillRect(renderer, &draw);
+    }
+    set_draw_color(renderer, border);
+    SDL_RenderRect(renderer, &draw);
+    if (style == TIMELINE_BLOCK_SELECTED) {
+        SDL_FRect inner = { draw.x + 2.0f, draw.y + 2.0f, draw.w - 4.0f, draw.h - 4.0f };
+        if (inner.w > 0.0f && inner.h > 0.0f) SDL_RenderRect(renderer, &inner);
+    }
+
     if (label && label[0]) {
-        SDL_SetRenderDrawColor(renderer, style == TIMELINE_BLOCK_ORIGIN ? 180 : 8,
-                               style == TIMELINE_BLOCK_ORIGIN ? 190 : 8,
-                               style == TIMELINE_BLOCK_ORIGIN ? 205 : 12,
-                               255);
+        if (muted) SDL_SetRenderDrawColor(renderer, 168, 172, 180, 255);
+        else SDL_SetRenderDrawColor(renderer, style == TIMELINE_BLOCK_ORIGIN ? 180 : 8,
+                                    style == TIMELINE_BLOCK_ORIGIN ? 190 : 8,
+                                    style == TIMELINE_BLOCK_ORIGIN ? 205 : 12,
+                                    255);
         SDL_RenderDebugText(renderer, draw.x + 8.0f, draw.y + 10.0f, label);
     }
 }
@@ -1779,6 +1886,7 @@ static void app_render_timeline(App *app) {
     SDL_FRect ruler_rect = { timeline_x, timeline_y - 58.0f, timeline_w, 42.0f };
     SDL_FRect play_range_rect = { timeline_x, timeline_y - 12.0f, timeline_w, 18.0f };
     SDL_FRect track_rect = { timeline_x, timeline_y + 8.0f, timeline_w, track_h };
+    SDL_FRect lane_index_rect = { timeline_x - 34.0f, track_rect.y, 28.0f, track_h };
 
     SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
     SDL_RenderDebugText(app->renderer, 24, 132, "MASTER TIMELINE");
@@ -1834,20 +1942,45 @@ static void app_render_timeline(App *app) {
     SDL_SetRenderDrawColor(app->renderer, 24, 24, 36, 255);
     SDL_RenderFillRect(app->renderer, &track_rect);
     for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        TimelineLane *lane = &app->timeline.lanes[lane_index];
+        const LanePalette *palette = lane_palette_for_index(lane->palette_index);
+        SDL_Color deep = palette ? palette->deep : (SDL_Color){ 48, 52, 70, 255 };
+        SDL_Color pastel = palette ? palette->pastel : (SDL_Color){ 180, 188, 205, 255 };
+        if (lane->muted) {
+            deep = color_muted(deep);
+            pastel = color_muted(pastel);
+        }
         float y = track_rect.y + (float)lane_index * lane_h;
         SDL_FRect lane_rect = { track_rect.x, y, track_rect.w, lane_h };
-        if (lane_index == app->selected_timeline_lane) {
-            SDL_SetRenderDrawColor(app->renderer, 55, 50, 70, 160);
-        } else if (lane_index % 2 == 0) {
-            SDL_SetRenderDrawColor(app->renderer, 29, 29, 43, 150);
-        } else {
-            SDL_SetRenderDrawColor(app->renderer, 22, 22, 34, 150);
-        }
+        SDL_Color base = color_mix(deep, (SDL_Color){ 18, 18, 28, 255 }, lane_index == app->selected_timeline_lane ? 0.38f : 0.68f);
+        base.a = lane->muted ? 105 : (lane_index == app->selected_timeline_lane ? 174 : 128);
+        set_draw_color(app->renderer, base);
         SDL_RenderFillRect(app->renderer, &lane_rect);
-        SDL_SetRenderDrawColor(app->renderer, 74, 76, 96, 140);
+        if (lane_index == app->selected_timeline_lane) {
+            SDL_Color selected_frame = pastel;
+            selected_frame.a = lane->muted ? 118 : 190;
+            set_draw_color(app->renderer, selected_frame);
+            SDL_RenderRect(app->renderer, &lane_rect);
+        }
+        SDL_Color divider = color_mix(pastel, (SDL_Color){ 60, 64, 82, 255 }, 0.58f);
+        divider.a = lane->muted ? 78 : 132;
+        set_draw_color(app->renderer, divider);
         SDL_RenderLine(app->renderer, track_rect.x, y, track_rect.x + track_rect.w, y);
-        SDL_SetRenderDrawColor(app->renderer, 170, 178, 196, 220);
-        SDL_RenderDebugTextFormat(app->renderer, track_rect.x - 18.0f, y + 5.0f, "%d", lane_index + 1);
+        SDL_FRect number_rect = { lane_index_rect.x + 3.0f, y + 4.0f, lane_index_rect.w - 6.0f, lane_h - 8.0f };
+        if (lane_index == app->selected_timeline_lane) {
+            SDL_Color number_bg = deep;
+            number_bg.a = app->timeline_focus_zone == TIMELINE_FOCUS_LANE_INDEX ? 212 : 128;
+            set_draw_color(app->renderer, number_bg);
+            SDL_RenderFillRect(app->renderer, &number_rect);
+            SDL_Color number_border = pastel;
+            number_border.a = 255;
+            set_draw_color(app->renderer, number_border);
+            SDL_RenderRect(app->renderer, &number_rect);
+        }
+        SDL_Color number_color = lane->muted ? color_muted(pastel) : pastel;
+        number_color.a = lane->muted ? 160 : 255;
+        set_draw_color(app->renderer, number_color);
+        SDL_RenderDebugTextFormat(app->renderer, lane_index_rect.x + 10.0f, y + 5.0f, "%d", lane_index + 1);
     }
     SDL_SetRenderDrawColor(app->renderer, 85, 90, 112, 255);
     SDL_RenderRect(app->renderer, &track_rect);
@@ -1918,14 +2051,19 @@ static void app_render_timeline(App *app) {
         SDL_RenderDebugText(app->renderer, cursor_x + 5.0f, timeline_y + track_h + 22.0f, "cursor");
         if (app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA) {
             int lane_index = clamp_int(app->selected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+            const LanePalette *palette = lane_palette_for_index(app->timeline.lanes[lane_index].palette_index);
+            SDL_Color lane_accent = palette ? palette->pastel : (SDL_Color){ 255, 220, 120, 255 };
+            if (app->timeline.lanes[lane_index].muted) lane_accent = color_muted(lane_accent);
             float lane_y = track_rect.y + (float)lane_index * lane_h;
             SDL_FRect lane_cursor = { track_rect.x, lane_y, track_rect.w, lane_h };
-            SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+            set_draw_color(app->renderer, lane_accent);
             SDL_RenderRect(app->renderer, &lane_cursor);
             SDL_FRect cursor_tab = { cursor_x - 5.0f, lane_y + 2.0f, 10.0f, lane_h - 4.0f };
-            SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 92);
+            lane_accent.a = 92;
+            set_draw_color(app->renderer, lane_accent);
             SDL_RenderFillRect(app->renderer, &cursor_tab);
-            SDL_SetRenderDrawColor(app->renderer, 255, 245, 170, 255);
+            lane_accent.a = 255;
+            set_draw_color(app->renderer, lane_accent);
             SDL_RenderRect(app->renderer, &cursor_tab);
         }
     }
@@ -1939,6 +2077,8 @@ static void app_render_timeline(App *app) {
 
     for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
         TimelineLane *lane = &app->timeline.lanes[lane_index];
+        const LanePalette *palette = lane_palette_for_index(lane->palette_index);
+        SDL_Color lane_color = palette ? palette->pastel : (SDL_Color){ 180, 188, 205, 255 };
         for (int i = 0; i < lane->instance_count; ++i) {
             TimelineInstanceRef ref = { lane_index, i };
             TimelineInstance *instance = &lane->instances[i];
@@ -1963,7 +2103,7 @@ static void app_render_timeline(App *app) {
             }
             char label[APP_ROSTER_CLIP_NAME_MAX + 16];
             SDL_snprintf(label, sizeof(label), "%s v%d", clip->name, instance->midi_velocity);
-            render_timeline_block(app, block, clip->color, label, style);
+            render_timeline_block(app, block, clip->color, lane_color, label, style, lane->muted);
         }
     }
 
@@ -1993,11 +2133,16 @@ static void app_render_timeline(App *app) {
             } else {
                 SDL_strlcpy(ghost_label, "overlap", sizeof(ghost_label));
             }
+            TimelineLane *ghost_timeline_lane = &app->timeline.lanes[ghost_lane];
+            const LanePalette *ghost_palette = lane_palette_for_index(ghost_timeline_lane->palette_index);
+            SDL_Color ghost_lane_color = ghost_palette ? ghost_palette->pastel : (SDL_Color){ 180, 188, 205, 255 };
             render_timeline_block(app,
                                   ghost,
                                   clip->color,
+                                  ghost_lane_color,
                                   ghost_label,
-                                  app->timeline_edit_ghost_valid ? TIMELINE_BLOCK_GHOST_VALID : TIMELINE_BLOCK_GHOST_INVALID);
+                                  app->timeline_edit_ghost_valid ? TIMELINE_BLOCK_GHOST_VALID : TIMELINE_BLOCK_GHOST_INVALID,
+                                  ghost_timeline_lane->muted);
         }
     }
 
@@ -2008,6 +2153,7 @@ static void app_render_timeline(App *app) {
 
     render_focus_outline(app, transport_rect, TIMELINE_FOCUS_TRANSPORT);
     render_focus_outline(app, ruler_rect, TIMELINE_FOCUS_RULER);
+    render_focus_outline(app, lane_index_rect, TIMELINE_FOCUS_LANE_INDEX);
     render_focus_outline(app, play_range_rect, TIMELINE_FOCUS_PLAY_RANGE);
     render_focus_outline(app, track_rect, TIMELINE_FOCUS_TRACK_AREA);
 
@@ -2080,6 +2226,326 @@ static void app_render_timeline(App *app) {
     }
 }
 
+static void render_debug_text_scaled(SDL_Renderer *renderer, float x, float y, float scale, const char *text) {
+    if (!text || scale <= 0.0f) return;
+    float old_x = 1.0f, old_y = 1.0f;
+    SDL_GetRenderScale(renderer, &old_x, &old_y);
+    SDL_SetRenderScale(renderer, scale, scale);
+    SDL_RenderDebugText(renderer, x / scale, y / scale, text);
+    SDL_SetRenderScale(renderer, old_x, old_y);
+}
+
+static void fft_1024(float real[LANE_ANALYZER_WINDOW_SIZE], float imag[LANE_ANALYZER_WINDOW_SIZE]) {
+    int j = 0;
+    for (int i = 1; i < LANE_ANALYZER_WINDOW_SIZE; ++i) {
+        int bit = LANE_ANALYZER_WINDOW_SIZE >> 1;
+        while (j & bit) {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j ^= bit;
+        if (i < j) {
+            float tr = real[i];
+            real[i] = real[j];
+            real[j] = tr;
+            float ti = imag[i];
+            imag[i] = imag[j];
+            imag[j] = ti;
+        }
+    }
+
+    for (int len = 2; len <= LANE_ANALYZER_WINDOW_SIZE; len <<= 1) {
+        float angle = -6.28318530717958647692f / (float)len;
+        float wlen_r = cosf(angle);
+        float wlen_i = sinf(angle);
+        for (int i = 0; i < LANE_ANALYZER_WINDOW_SIZE; i += len) {
+            float wr = 1.0f;
+            float wi = 0.0f;
+            int half = len >> 1;
+            for (int k = 0; k < half; ++k) {
+                int even = i + k;
+                int odd = even + half;
+                float ur = real[even];
+                float ui = imag[even];
+                float vr = real[odd] * wr - imag[odd] * wi;
+                float vi = real[odd] * wi + imag[odd] * wr;
+                real[even] = ur + vr;
+                imag[even] = ui + vi;
+                real[odd] = ur - vr;
+                imag[odd] = ui - vi;
+
+                float next_wr = wr * wlen_r - wi * wlen_i;
+                wi = wr * wlen_i + wi * wlen_r;
+                wr = next_wr;
+            }
+        }
+    }
+}
+
+static void reset_lane_analyzer_visual(App *app, int lane_index) {
+    app->lane_analyzer_visual_lane = lane_index;
+    SDL_memset(app->lane_analyzer_bars, 0, sizeof(app->lane_analyzer_bars));
+    SDL_memset(app->lane_analyzer_peaks, 0, sizeof(app->lane_analyzer_peaks));
+}
+
+static void update_lane_analyzer_visual(App *app, int lane_index) {
+    if (app->lane_analyzer_visual_lane != lane_index) reset_lane_analyzer_visual(app, lane_index);
+
+    float samples[LANE_ANALYZER_WINDOW_SIZE];
+    int sample_rate = 0;
+    bool active = false;
+    audio_engine_get_lane_analyzer_snapshot(&app->audio,
+                                            lane_index,
+                                            samples,
+                                            LANE_ANALYZER_WINDOW_SIZE,
+                                            &sample_rate,
+                                            &active);
+
+    float target[LANE_ANALYZER_BUCKETS] = {0};
+    if (active && sample_rate > 0) {
+        float mean = 0.0f;
+        for (int i = 0; i < LANE_ANALYZER_WINDOW_SIZE; ++i) mean += samples[i];
+        mean /= (float)LANE_ANALYZER_WINDOW_SIZE;
+
+        float real[LANE_ANALYZER_WINDOW_SIZE];
+        float imag[LANE_ANALYZER_WINDOW_SIZE];
+        for (int i = 0; i < LANE_ANALYZER_WINDOW_SIZE; ++i) {
+            float window = 0.5f - 0.5f * cosf(6.28318530717958647692f * (float)i / (float)(LANE_ANALYZER_WINDOW_SIZE - 1));
+            real[i] = (samples[i] - mean) * window;
+            imag[i] = 0.0f;
+        }
+        fft_1024(real, imag);
+
+        float nyquist = (float)sample_rate * 0.5f;
+        float min_hz = 38.0f;
+        float max_hz = nyquist < 16000.0f ? nyquist : 16000.0f;
+        if (max_hz <= min_hz) max_hz = min_hz + 1.0f;
+        float log_min = logf(min_hz);
+        float log_span = logf(max_hz) - log_min;
+
+        for (int bar = 0; bar < LANE_ANALYZER_BUCKETS; ++bar) {
+            float f0 = (float)bar / (float)LANE_ANALYZER_BUCKETS;
+            float f1 = (float)(bar + 1) / (float)LANE_ANALYZER_BUCKETS;
+            float hz0 = expf(log_min + log_span * f0);
+            float hz1 = expf(log_min + log_span * f1);
+            int bin0 = (int)floorf(hz0 * (float)LANE_ANALYZER_WINDOW_SIZE / (float)sample_rate);
+            int bin1 = (int)ceilf(hz1 * (float)LANE_ANALYZER_WINDOW_SIZE / (float)sample_rate);
+            if (bin0 < 1) bin0 = 1;
+            if (bin1 <= bin0) bin1 = bin0 + 1;
+            if (bin1 > LANE_ANALYZER_WINDOW_SIZE / 2) bin1 = LANE_ANALYZER_WINDOW_SIZE / 2;
+
+            float sum = 0.0f;
+            float max_mag = 0.0f;
+            int count = 0;
+            for (int bin = bin0; bin < bin1; ++bin) {
+                float mag = sqrtf(real[bin] * real[bin] + imag[bin] * imag[bin]);
+                sum += mag;
+                if (mag > max_mag) max_mag = mag;
+                count++;
+            }
+            float avg = count > 0 ? sum / (float)count : 0.0f;
+            float energy = avg * 0.62f + max_mag * 0.38f;
+            float lift = 0.78f + 0.58f * sqrtf((float)bar / (float)(LANE_ANALYZER_BUCKETS - 1));
+            float value = log10f(1.0f + energy * 0.55f * lift) / log10f(18.0f);
+            if (value < 0.0f) value = 0.0f;
+            if (value > 1.0f) value = 1.0f;
+            target[bar] = value;
+        }
+    }
+
+    for (int i = 0; i < LANE_ANALYZER_BUCKETS; ++i) {
+        float current = app->lane_analyzer_bars[i];
+        float amount = target[i] > current ? 0.48f : 0.12f;
+        current += (target[i] - current) * amount;
+        if (current < 0.002f) current = 0.0f;
+        app->lane_analyzer_bars[i] = current;
+
+        if (current > app->lane_analyzer_peaks[i]) {
+            app->lane_analyzer_peaks[i] = current;
+        } else {
+            app->lane_analyzer_peaks[i] -= 0.010f;
+            if (app->lane_analyzer_peaks[i] < current) app->lane_analyzer_peaks[i] = current;
+            if (app->lane_analyzer_peaks[i] < 0.0f) app->lane_analyzer_peaks[i] = 0.0f;
+        }
+    }
+}
+
+static void render_lane_inspector_analyzer(App *app,
+                                           SDL_FRect rect,
+                                           const float bars[LANE_ANALYZER_BUCKETS],
+                                           const float peaks[LANE_ANALYZER_BUCKETS],
+                                           SDL_Color deep,
+                                           SDL_Color pastel,
+                                           bool muted) {
+    SDL_Color bg = color_mix(deep, (SDL_Color){ 8, 9, 14, 255 }, muted ? 0.78f : 0.60f);
+    bg.a = 245;
+    set_draw_color(app->renderer, bg);
+    SDL_RenderFillRect(app->renderer, &rect);
+    SDL_Color border = muted ? color_muted(pastel) : pastel;
+    border.a = muted ? 128 : 230;
+    set_draw_color(app->renderer, border);
+    SDL_RenderRect(app->renderer, &rect);
+
+    SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, muted ? 20 : 30);
+    for (int i = 1; i < 4; ++i) {
+        float y = rect.y + rect.h * (float)i / 4.0f;
+        SDL_RenderLine(app->renderer, rect.x, y, rect.x + rect.w, y);
+    }
+
+    float pad = 14.0f;
+    float gap = rect.w > 620.0f ? 2.0f : 1.0f;
+    float usable_w = rect.w - pad * 2.0f;
+    float usable_h = rect.h - pad * 2.0f;
+    float bar_w = (usable_w - gap * (float)(LANE_ANALYZER_BUCKETS - 1)) / (float)LANE_ANALYZER_BUCKETS;
+    if (bar_w < 2.0f) bar_w = 2.0f;
+    SDL_Color fill = muted ? color_muted(pastel) : pastel;
+    fill.a = muted ? 112 : 222;
+    for (int i = 0; i < LANE_ANALYZER_BUCKETS; ++i) {
+        float value = bars ? bars[i] : 0.0f;
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        float h = usable_h * value;
+        SDL_FRect bar = {
+            rect.x + pad + (float)i * (bar_w + gap),
+            rect.y + rect.h - pad - h,
+            bar_w,
+            h
+        };
+        if (bar.h < 1.0f) bar.h = 1.0f;
+        SDL_Color body = fill;
+        body.a = (Uint8)(muted ? 92 + (int)(value * 48.0f) : 150 + (int)(value * 90.0f));
+        set_draw_color(app->renderer, body);
+        SDL_RenderFillRect(app->renderer, &bar);
+
+        float peak_value = peaks ? peaks[i] : value;
+        if (peak_value < value) peak_value = value;
+        if (peak_value > 1.0f) peak_value = 1.0f;
+        float cap_y = rect.y + rect.h - pad - usable_h * peak_value;
+        SDL_FRect cap = { bar.x, cap_y, bar.w, 2.0f };
+        SDL_Color cap_color = muted ? color_muted(pastel) : color_mix(pastel, (SDL_Color){ 255, 248, 232, 255 }, 0.34f);
+        cap_color.a = muted ? 120 : 245;
+        set_draw_color(app->renderer, cap_color);
+        SDL_RenderFillRect(app->renderer, &cap);
+    }
+}
+
+static void render_lane_inspector_peak(App *app,
+                                       SDL_FRect rect,
+                                       const LaneMonitorState *monitor,
+                                       SDL_Color pastel,
+                                       bool muted) {
+    SDL_SetRenderDrawColor(app->renderer, 13, 14, 21, 238);
+    SDL_RenderFillRect(app->renderer, &rect);
+    SDL_SetRenderDrawColor(app->renderer, 82, 88, 108, 255);
+    SDL_RenderRect(app->renderer, &rect);
+
+    float peak_l = monitor ? fminf(fabsf(monitor->peak_l), 1.25f) / 1.25f : 0.0f;
+    float peak_r = monitor ? fminf(fabsf(monitor->peak_r), 1.25f) / 1.25f : 0.0f;
+    SDL_Color fill = muted ? color_muted(pastel) : pastel;
+    fill.a = muted ? 120 : 235;
+    float pad = 5.0f;
+    float bar_w = (rect.w - pad * 3.0f) * 0.5f;
+    if (bar_w < 3.0f) bar_w = 3.0f;
+    float usable_h = rect.h - pad * 2.0f;
+    SDL_FRect bars[2] = {
+        { rect.x + pad, rect.y + rect.h - pad - usable_h * peak_l, bar_w, usable_h * peak_l },
+        { rect.x + pad * 2.0f + bar_w, rect.y + rect.h - pad - usable_h * peak_r, bar_w, usable_h * peak_r }
+    };
+    set_draw_color(app->renderer, fill);
+    for (int i = 0; i < 2; ++i) {
+        if (bars[i].h < 1.0f) bars[i].h = 1.0f;
+        SDL_RenderFillRect(app->renderer, &bars[i]);
+    }
+    SDL_SetRenderDrawColor(app->renderer, 255, 92, 94, 190);
+    float clip_y = rect.y + pad + usable_h * 0.20f;
+    SDL_RenderLine(app->renderer, rect.x + 3.0f, clip_y, rect.x + rect.w - 3.0f, clip_y);
+}
+
+static void app_render_lane_inspector(App *app) {
+    int w = 0, h = 0;
+    SDL_GetRenderOutputSize(app->renderer, &w, &h);
+    SDL_SetRenderDrawColor(app->renderer, 8, 7, 13, 255);
+    SDL_RenderClear(app->renderer);
+
+    int lane_index = clamp_int(app->inspected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+    TimelineLane *lane = &app->timeline.lanes[lane_index];
+    const LanePalette *palette = lane_palette_for_index(lane->palette_index);
+    SDL_Color deep = palette ? palette->deep : (SDL_Color){ 48, 52, 70, 255 };
+    SDL_Color pastel = palette ? palette->pastel : (SDL_Color){ 180, 188, 205, 255 };
+    bool muted = lane->muted;
+    SDL_Color visible_deep = muted ? color_muted(deep) : deep;
+    SDL_Color visible_pastel = muted ? color_muted(pastel) : pastel;
+
+    LaneMonitorState monitor;
+    audio_engine_get_lane_monitor(&app->audio, lane_index, &monitor);
+    update_lane_analyzer_visual(app, lane_index);
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_FRect panel = { 42.0f, 92.0f, (float)w - 84.0f, (float)h - 140.0f };
+    if (panel.w < 360.0f) panel.w = 360.0f;
+    if (panel.h < 360.0f) panel.h = 360.0f;
+    SDL_Color panel_bg = color_mix(visible_deep, (SDL_Color){ 10, 11, 17, 255 }, 0.70f);
+    panel_bg.a = 238;
+    set_draw_color(app->renderer, panel_bg);
+    SDL_RenderFillRect(app->renderer, &panel);
+    SDL_Color panel_border = visible_pastel;
+    panel_border.a = 245;
+    set_draw_color(app->renderer, panel_border);
+    SDL_RenderRect(app->renderer, &panel);
+
+    char title[32];
+    SDL_snprintf(title, sizeof(title), "LANE %d", lane_index + 1);
+    set_draw_color(app->renderer, visible_pastel);
+    render_debug_text_scaled(app->renderer, panel.x + 24.0f, panel.y + 20.0f, 3.0f, title);
+
+    SDL_FRect swatch = { panel.x + 26.0f, panel.y + 74.0f, 118.0f, 16.0f };
+    set_draw_color(app->renderer, visible_deep);
+    SDL_RenderFillRect(app->renderer, &swatch);
+    SDL_FRect swatch_pastel = { swatch.x + swatch.w + 8.0f, swatch.y, 118.0f, swatch.h };
+    set_draw_color(app->renderer, visible_pastel);
+    SDL_RenderFillRect(app->renderer, &swatch_pastel);
+
+    SDL_FRect mute_button = { panel.x + panel.w - 174.0f, panel.y + 26.0f, 132.0f, 42.0f };
+    SDL_Color mute_fill = muted ? (SDL_Color){ 122, 36, 44, 236 } : color_mix(visible_deep, (SDL_Color){ 18, 20, 28, 255 }, 0.36f);
+    set_draw_color(app->renderer, mute_fill);
+    SDL_RenderFillRect(app->renderer, &mute_button);
+    set_draw_color(app->renderer, muted ? (SDL_Color){ 255, 128, 132, 255 } : visible_pastel);
+    SDL_RenderRect(app->renderer, &mute_button);
+    SDL_SetRenderDrawColor(app->renderer, 236, 242, 245, 255);
+    SDL_RenderDebugTextFormat(app->renderer, mute_button.x + 16.0f, mute_button.y + 14.0f, "MUTE %s", muted ? "ON" : "OFF");
+
+    float analyzer_x = panel.x + 28.0f;
+    float analyzer_y = panel.y + 126.0f;
+    float right_margin = 102.0f;
+    SDL_FRect analyzer = {
+        analyzer_x,
+        analyzer_y,
+        panel.w - 56.0f - right_margin,
+        panel.h - 164.0f
+    };
+    if (analyzer.w < 220.0f) analyzer.w = 220.0f;
+    if (analyzer.h < 160.0f) analyzer.h = 160.0f;
+    SDL_FRect peak = { analyzer.x + analyzer.w + 12.0f, analyzer.y, 28.0f, analyzer.h };
+    SDL_FRect clip = { peak.x + peak.w + 10.0f, analyzer.y, 42.0f, analyzer.h };
+
+    render_lane_inspector_analyzer(app,
+                                   analyzer,
+                                   app->lane_analyzer_bars,
+                                   app->lane_analyzer_peaks,
+                                   visible_deep,
+                                   visible_pastel,
+                                   muted);
+    render_lane_inspector_peak(app, peak, &monitor, visible_pastel, muted);
+
+    SDL_Color clip_fill = monitor.clip_hold_seconds > 0.0f ? (SDL_Color){ 255, 28, 46, 245 } : (SDL_Color){ 54, 18, 24, 230 };
+    set_draw_color(app->renderer, clip_fill);
+    SDL_RenderFillRect(app->renderer, &clip);
+    SDL_SetRenderDrawColor(app->renderer, 255, 92, 106, 255);
+    SDL_RenderRect(app->renderer, &clip);
+    SDL_SetRenderDrawColor(app->renderer, 255, 220, 222, monitor.clip_hold_seconds > 0.0f ? 255 : 150);
+    SDL_RenderDebugText(app->renderer, clip.x + 6.0f, clip.y + 12.0f, "CLIP");
+}
+
 static void app_render_overlay(App *app) {
     SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
     const char *current = app->clip.file_path[0] ? app->clip.file_path : "generated";
@@ -2105,8 +2571,10 @@ static void app_render_overlay(App *app) {
     } else if (app->tempo_lock_mode) {
         SDL_RenderDebugText(app->renderer, 12, 66, "TEMPO LOCK MODE");
     }
+    const char *view_label = app->view_mode == APP_VIEW_LANE_INSPECTOR ? "lane inspector" :
+                             (app->view_mode == APP_VIEW_TIMELINE ? "timeline" : "waveform");
     SDL_RenderDebugTextFormat(app->renderer, 12, 108, "view: %s  roster: %d",
-                              app->view_mode == APP_VIEW_TIMELINE ? "timeline" : "waveform",
+                              view_label,
                               app->roster_clip_count);
 
     if (app->sample_selector_open) {
@@ -2197,6 +2665,8 @@ bool app_init(App *app){
     app->selected_roster_clip = -1;
     app->selected_roster_clip_armed = false;
     app->selected_timeline_lane = 0;
+    app->inspected_timeline_lane = 0;
+    app->lane_analyzer_visual_lane = -1;
     app->selected_timeline_instance = timeline_instance_ref_invalid();
     waveform_view_init(&app->view);
     bool audio_ok = audio_engine_init(&app->audio,&app->clip,&app->transport);
@@ -2231,14 +2701,16 @@ void app_run(App *app){
         SDL_Event e; while(SDL_PollEvent(&e)) if(!input_handle_event(app,&e)) app->running=false;
         Uint64 now=SDL_GetTicksNS(); double dt=(double)(now-prev)/1e9; prev=now; input_update_gamepad(app,dt);
         waveform_view_update(&app->view, dt);
-        if (app->view_mode == APP_VIEW_TIMELINE) {
+        if (app->view_mode == APP_VIEW_LANE_INSPECTOR) {
+            app_render_lane_inspector(app);
+        } else if (app->view_mode == APP_VIEW_TIMELINE) {
             app_render_timeline(app);
         } else {
             TempoLockParams guide_params;
             TempoLockParams *guide = app_get_active_tempo_params(app, &guide_params) ? &guide_params : NULL;
             waveform_render(app->renderer,&app->clip,&app->view,audio_engine_get_playhead_frame(&app->audio),guide);
         }
-        app_render_overlay(app);
+        if (app->view_mode != APP_VIEW_LANE_INSPECTOR) app_render_overlay(app);
         SDL_RenderPresent(app->renderer);
     }
 }

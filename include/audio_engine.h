@@ -6,6 +6,9 @@
 #include "timeline.h"
 #include "transport.h"
 
+#define LANE_ANALYZER_BUCKETS 64
+#define LANE_ANALYZER_WINDOW_SIZE 1024
+
 typedef enum {
     AUDIO_PLAYBACK_WAVEFORM,
     AUDIO_PLAYBACK_TIMELINE
@@ -20,6 +23,15 @@ typedef struct {
     float clip_flash_seconds;
     unsigned int histogram[4];
 } MasterMeterState;
+
+typedef struct {
+    float peak_l;
+    float peak_r;
+    float rms_l;
+    float rms_r;
+    unsigned int clip_count;
+    float clip_hold_seconds;
+} LaneMonitorState;
 
 typedef struct {
     SDL_AudioStream *stream;
@@ -39,6 +51,12 @@ typedef struct {
     double preview_frame;
     float master_gain;
     MasterMeterState meter;
+    LaneMonitorState lane_meters[TIMELINE_MAX_LANES];
+    float lane_analyzer_samples[LANE_ANALYZER_WINDOW_SIZE];
+    unsigned int lane_analyzer_write_index;
+    unsigned int lane_analyzer_sample_count;
+    int active_analyzer_lane;
+    bool lane_analyzer_active;
 } AudioEngine;
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport);
@@ -55,3 +73,11 @@ void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick);
 bool audio_engine_timeline_is_playing(const AudioEngine *a);
 int64_t audio_engine_get_timeline_playhead_tick(const AudioEngine *a);
 void audio_engine_get_master_meter(const AudioEngine *a, MasterMeterState *meter);
+void audio_engine_set_active_lane_analyzer(AudioEngine *a, int lane_index);
+void audio_engine_get_lane_monitor(const AudioEngine *a, int lane_index, LaneMonitorState *meter);
+void audio_engine_get_lane_analyzer_snapshot(const AudioEngine *a,
+                                             int lane_index,
+                                             float *samples,
+                                             int sample_count,
+                                             int *sample_rate,
+                                             bool *active);

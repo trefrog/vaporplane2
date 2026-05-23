@@ -25,7 +25,8 @@ typedef enum {
 
 typedef enum {
     APP_VIEW_WAVEFORM,
-    APP_VIEW_TIMELINE
+    APP_VIEW_TIMELINE,
+    APP_VIEW_LANE_INSPECTOR
 } AppViewMode;
 
 typedef enum {
@@ -87,6 +88,10 @@ typedef struct App {
     int selected_roster_clip;
     bool selected_roster_clip_armed;
     int selected_timeline_lane;
+    int inspected_timeline_lane;
+    int lane_analyzer_visual_lane;
+    float lane_analyzer_bars[LANE_ANALYZER_BUCKETS];
+    float lane_analyzer_peaks[LANE_ANALYZER_BUCKETS];
     TimelineInstanceRef selected_timeline_instance;
 } App;
 
@@ -139,6 +144,9 @@ void app_timeline_nudge_edit_lane(App *app, int direction);
 void app_timeline_adjust_selected_instance_velocity(App *app, int delta);
 void app_pan_timeline_view(App *app, double fraction);
 void app_zoom_timeline_view(App *app, double scale);
+void app_open_lane_inspector(App *app, int lane_index);
+void app_close_lane_inspector(App *app);
+void app_toggle_inspected_lane_mute(App *app);
 BpmSource app_bpm_source(const App *app);
 const char *app_bpm_source_label(const App *app);
 bool app_get_active_tempo_params(const App *app, TempoLockParams *params);

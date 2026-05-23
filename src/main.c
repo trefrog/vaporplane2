@@ -11,9 +11,7 @@ int main(void) {
         return 1;
     }
 
-    fprintf(stderr, "app_init ok\n");
     app_run(&app);
-    fprintf(stderr, "app_run returned\n");
 
     app_shutdown(&app);
     return 0;

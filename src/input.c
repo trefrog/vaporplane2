@@ -256,15 +256,29 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
         case SDLK_UP:
             if(app->timeline_edit_mode != TIMELINE_EDIT_NONE) app_timeline_nudge_edit_lane(app, -1);
             else if(app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) app_timeline_select_roster_delta(app, -1);
-            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA && !(mod & SDL_KMOD_SHIFT)) app_timeline_select_lane_delta(app, -1);
+            else if((app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA ||
+                     app->timeline_focus_zone == TIMELINE_FOCUS_LANE_INDEX) && !(mod & SDL_KMOD_SHIFT)) app_timeline_select_lane_delta(app, -1);
             else app_zoom_timeline_view(app, 0.8);
             return true;
         case SDLK_DOWN:
             if(app->timeline_edit_mode != TIMELINE_EDIT_NONE) app_timeline_nudge_edit_lane(app, 1);
             else if(app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) app_timeline_select_roster_delta(app, 1);
-            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA && !(mod & SDL_KMOD_SHIFT)) app_timeline_select_lane_delta(app, 1);
+            else if((app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA ||
+                     app->timeline_focus_zone == TIMELINE_FOCUS_LANE_INDEX) && !(mod & SDL_KMOD_SHIFT)) app_timeline_select_lane_delta(app, 1);
             else app_zoom_timeline_view(app, 1.25);
             return true;
+        default: return true;
+    }
+}
+
+static bool handle_lane_inspector_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
+    (void)mod;
+    switch(key) {
+        case SDLK_ESCAPE: app_close_lane_inspector(app); return true;
+        case SDLK_RETURN: app_toggle_inspected_lane_mute(app); return true;
+        case SDLK_SPACE: app_toggle_timeline_playback(app); return true;
+        case SDLK_HOME: app_rewind_timeline(app); return true;
+        case SDLK_M: toggle_metronome(app); return true;
         default: return true;
     }
 }
@@ -321,9 +335,11 @@ bool input_handle_event(App *app, const SDL_Event *e){
     }
     if(e->key.key==SDLK_TAB) {
         if(app->view_mode == APP_VIEW_TIMELINE) app_timeline_cycle_focus(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1);
+        else if(app->view_mode == APP_VIEW_LANE_INSPECTOR) return true;
         else app->sample_selector_open = !app->sample_selector_open;
         return true;
     }
+    if(app->view_mode == APP_VIEW_LANE_INSPECTOR) return handle_lane_inspector_key(app, e->key.key, mod);
     if(app->view_mode == APP_VIEW_TIMELINE) return handle_timeline_key(app, e->key.key, mod);
     if(app->tempo_lock_mode) return handle_tempo_lock_key(app, e->key.key, mod);
     if(e->key.key==SDLK_U || (e->key.key==SDLK_T && (mod & SDL_KMOD_CTRL))) {
@@ -411,6 +427,26 @@ void input_update_gamepad(App *app, double dt){
         return;
     }
 
+    if(app->view_mode == APP_VIEW_LANE_INSPECTOR) {
+        if(r2_shift) {
+            if(south_pressed) app_toggle_timeline_playback(app);
+            if(east_pressed) app_rewind_timeline(app);
+            if(west_pressed) app_timeline_jump_to_play_range_start(app);
+            if(north_pressed) app_timeline_toggle_play_range_loop(app);
+            if(south_pressed || east_pressed || west_pressed || north_pressed) return;
+        }
+        if(back_pressed) toggle_metronome(app);
+        if(east_pressed) {
+            app_close_lane_inspector(app);
+            return;
+        }
+        if(south_pressed) {
+            app_toggle_inspected_lane_mute(app);
+            return;
+        }
+        return;
+    }
+
     if(app->view_mode == APP_VIEW_TIMELINE) {
         if(r2_shift) {
             if(south_pressed) app_toggle_timeline_playback(app);
@@ -481,6 +517,12 @@ void input_update_gamepad(App *app, double dt){
             }
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_select_roster_delta(app, -1);
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_select_roster_delta(app, 1);
+            return;
+        }
+
+        if(app->timeline_focus_zone == TIMELINE_FOCUS_LANE_INDEX) {
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_select_lane_delta(app, -1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_select_lane_delta(app, 1);
             return;
         }
 

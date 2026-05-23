@@ -7,6 +7,7 @@
 #define WAVEFORM_LOOP_CROSSFADE_FRAMES 512
 #define TIMELINE_DECLICK_FRAMES 512
 #define MASTER_METER_CLIP_FLASH_SECONDS 0.35f
+#define LANE_MONITOR_CLIP_HOLD_SECONDS 0.60f
 
 static int timeline_total_instance_count(const MasterTimeline *timeline) {
     if(!timeline) return 0;
@@ -217,11 +218,54 @@ static void set_timeline_tick_unlocked(AudioEngine *a, int64_t tick) {
     sync_transport_to_timeline(a);
 }
 
+static bool audio_lane_index_valid(int lane_index) {
+    return lane_index >= 0 && lane_index < TIMELINE_MAX_LANES;
+}
+
+static void write_lane_analyzer_sample(AudioEngine *a, int lane_index, float left, float right) {
+    if(!a->lane_analyzer_active || a->active_analyzer_lane != lane_index) return;
+    float mono = (left + right) * 0.5f;
+    if(mono > 1.5f) mono = 1.5f;
+    if(mono < -1.5f) mono = -1.5f;
+    a->lane_analyzer_samples[a->lane_analyzer_write_index] = mono;
+    a->lane_analyzer_write_index = (a->lane_analyzer_write_index + 1u) % (unsigned int)LANE_ANALYZER_WINDOW_SIZE;
+    if(a->lane_analyzer_sample_count < (unsigned int)LANE_ANALYZER_WINDOW_SIZE) a->lane_analyzer_sample_count++;
+}
+
+static void update_lane_monitor(AudioEngine *a, int lane_index, float left, float right) {
+    if(!audio_lane_index_valid(lane_index)) return;
+    LaneMonitorState *meter = &a->lane_meters[lane_index];
+    float abs_l = fabsf(left);
+    float abs_r = fabsf(right);
+    meter->peak_l = fmaxf(meter->peak_l * 0.995f, abs_l);
+    meter->peak_r = fmaxf(meter->peak_r * 0.995f, abs_r);
+    meter->rms_l = sqrtf(meter->rms_l * meter->rms_l * 0.995f + left * left * 0.005f);
+    meter->rms_r = sqrtf(meter->rms_r * meter->rms_r * 0.995f + right * right * 0.005f);
+
+    float peak = fmaxf(abs_l, abs_r);
+    if(peak > 1.0f) {
+        meter->clip_count++;
+        meter->clip_hold_seconds = LANE_MONITOR_CLIP_HOLD_SECONDS;
+    } else if(meter->clip_hold_seconds > 0.0f && a->spec.freq > 0) {
+        meter->clip_hold_seconds -= 1.0f / (float)a->spec.freq;
+        if(meter->clip_hold_seconds < 0.0f) meter->clip_hold_seconds = 0.0f;
+    }
+
+    write_lane_analyzer_sample(a, lane_index, left, right);
+}
+
+static void decay_lane_monitors(AudioEngine *a) {
+    for(int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        update_lane_monitor(a, lane_index, 0.0f, 0.0f);
+    }
+}
+
 static void mix_timeline(AudioEngine *a, float *left, float *right) {
     MasterTimeline *timeline = a->timeline;
     if(!timeline || !a->roster || !a->roster_clip_count || !timeline->playing ||
        timeline->length_ticks <= 0 || timeline_total_instance_count(timeline) <= 0 ||
        timeline->ticks_per_beat <= 0 || timeline->timeline_bpm <= 0.0) {
+        decay_lane_monitors(a);
         a->metronome_beat_valid = false;
         return;
     }
@@ -255,35 +299,37 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
     float lane_right[TIMELINE_MAX_LANES] = {0};
     for(int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
         const TimelineLane *lane = &timeline->lanes[lane_index];
-        if(lane->muted) continue;
-        float lane_gain = lane->gain > 0.0f ? lane->gain : 1.0f;
-        for(int i = 0; i < lane->instance_count; ++i) {
-            const TimelineInstance *instance = &lane->instances[i];
-            if(instance->roster_clip_index < 0 || instance->roster_clip_index >= roster_count) continue;
-            if(instance->duration_ticks <= 0) continue;
-            double instance_start = (double)instance->start_tick;
-            double instance_end = (double)(instance->start_tick + instance->duration_ticks);
-            if(a->timeline_playhead_tick < instance_start || a->timeline_playhead_tick >= instance_end) continue;
+        if(!lane->muted) {
+            float lane_gain = lane->gain > 0.0f ? lane->gain : 1.0f;
+            for(int i = 0; i < lane->instance_count; ++i) {
+                const TimelineInstance *instance = &lane->instances[i];
+                if(instance->roster_clip_index < 0 || instance->roster_clip_index >= roster_count) continue;
+                if(instance->duration_ticks <= 0) continue;
+                double instance_start = (double)instance->start_tick;
+                double instance_end = (double)(instance->start_tick + instance->duration_ticks);
+                if(a->timeline_playhead_tick < instance_start || a->timeline_playhead_tick >= instance_end) continue;
 
-            const RosterClip *clip = &a->roster[instance->roster_clip_index];
-            if(!clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0) continue;
-            double elapsed_ticks = a->timeline_playhead_tick - instance_start;
-            double elapsed_seconds = elapsed_ticks / ticks_per_second;
-            double source_frame = elapsed_seconds * (double)clip->sample_rate;
-            if(source_frame >= (double)clip->frame_count) continue;
-            double source_duration_seconds = (double)clip->frame_count / (double)clip->sample_rate;
-            double instance_duration_seconds = (double)instance->duration_ticks / ticks_per_second;
-            double gain = timeline_declik_gain(elapsed_seconds, source_duration_seconds, instance_duration_seconds, a->spec.freq);
-            double range_elapsed_seconds = (a->timeline_playhead_tick - (double)range_start_tick) / ticks_per_second;
-            double range_duration_seconds = ((double)range_end_tick - (double)range_start_tick) / ticks_per_second;
-            double range_gain = timeline_declik_gain(range_elapsed_seconds, range_duration_seconds, range_duration_seconds, a->spec.freq);
-            if(range_gain < gain) gain = range_gain;
-            if(gain <= 0.0) continue;
+                const RosterClip *clip = &a->roster[instance->roster_clip_index];
+                if(!clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0) continue;
+                double elapsed_ticks = a->timeline_playhead_tick - instance_start;
+                double elapsed_seconds = elapsed_ticks / ticks_per_second;
+                double source_frame = elapsed_seconds * (double)clip->sample_rate;
+                if(source_frame >= (double)clip->frame_count) continue;
+                double source_duration_seconds = (double)clip->frame_count / (double)clip->sample_rate;
+                double instance_duration_seconds = (double)instance->duration_ticks / ticks_per_second;
+                double gain = timeline_declik_gain(elapsed_seconds, source_duration_seconds, instance_duration_seconds, a->spec.freq);
+                double range_elapsed_seconds = (a->timeline_playhead_tick - (double)range_start_tick) / ticks_per_second;
+                double range_duration_seconds = ((double)range_end_tick - (double)range_start_tick) / ticks_per_second;
+                double range_gain = timeline_declik_gain(range_elapsed_seconds, range_duration_seconds, range_duration_seconds, a->spec.freq);
+                if(range_gain < gain) gain = range_gain;
+                if(gain <= 0.0) continue;
 
-            float instance_gain = velocity_to_gain(instance->midi_velocity) * lane_gain * (float)gain;
-            lane_left[lane_index] += roster_sample_at(clip, source_frame, 0) * instance_gain;
-            lane_right[lane_index] += roster_sample_at(clip, source_frame, 1) * instance_gain;
+                float instance_gain = velocity_to_gain(instance->midi_velocity) * lane_gain * (float)gain;
+                lane_left[lane_index] += roster_sample_at(clip, source_frame, 0) * instance_gain;
+                lane_right[lane_index] += roster_sample_at(clip, source_frame, 1) * instance_gain;
+            }
         }
+        update_lane_monitor(a, lane_index, lane_left[lane_index], lane_right[lane_index]);
         *left += lane_left[lane_index];
         *right += lane_right[lane_index];
     }
@@ -397,7 +443,7 @@ static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int addi
 }
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport){
-    memset(a,0,sizeof(*a)); a->clip=clip;a->transport=transport;a->master_gain=0.9f; a->playhead_frame=0; a->playback_mode=AUDIO_PLAYBACK_WAVEFORM;
+    memset(a,0,sizeof(*a)); a->clip=clip;a->transport=transport;a->master_gain=0.9f; a->playhead_frame=0; a->playback_mode=AUDIO_PLAYBACK_WAVEFORM; a->active_analyzer_lane=-1; a->lane_analyzer_active=false;
     a->spec.format=SDL_AUDIO_F32; a->spec.channels=2; a->spec.freq=48000;
     a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &a->spec, feed_audio, a);
     if(!a->stream){ fprintf(stderr,"SDL_OpenAudioDeviceStream failed: %s\n",SDL_GetError()); return false; }
@@ -552,5 +598,65 @@ void audio_engine_get_master_meter(const AudioEngine *a, MasterMeterState *meter
     AudioEngine *mutable_audio = (AudioEngine *)a;
     if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
     *meter = a->meter;
+    if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
+}
+
+void audio_engine_set_active_lane_analyzer(AudioEngine *a, int lane_index) {
+    if(!a) return;
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    if(audio_lane_index_valid(lane_index)) {
+        a->active_analyzer_lane = lane_index;
+        a->lane_analyzer_active = true;
+        SDL_memset(a->lane_analyzer_samples, 0, sizeof(a->lane_analyzer_samples));
+        a->lane_analyzer_write_index = 0;
+        a->lane_analyzer_sample_count = 0;
+    } else {
+        a->active_analyzer_lane = -1;
+        a->lane_analyzer_active = false;
+        SDL_memset(a->lane_analyzer_samples, 0, sizeof(a->lane_analyzer_samples));
+        a->lane_analyzer_write_index = 0;
+        a->lane_analyzer_sample_count = 0;
+    }
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+}
+
+void audio_engine_get_lane_monitor(const AudioEngine *a, int lane_index, LaneMonitorState *meter) {
+    if(!meter) return;
+    SDL_memset(meter, 0, sizeof(*meter));
+    if(!a || !audio_lane_index_valid(lane_index)) return;
+    AudioEngine *mutable_audio = (AudioEngine *)a;
+    if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
+    *meter = a->lane_meters[lane_index];
+    if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
+}
+
+void audio_engine_get_lane_analyzer_snapshot(const AudioEngine *a,
+                                             int lane_index,
+                                             float *samples,
+                                             int sample_count,
+                                             int *sample_rate,
+                                             bool *active) {
+    if(sample_rate) *sample_rate = a ? a->spec.freq : 0;
+    if(active) *active = false;
+    if(samples && sample_count > 0) SDL_memset(samples, 0, (size_t)sample_count * sizeof(float));
+    if(!a || !samples || sample_count <= 0 || !audio_lane_index_valid(lane_index)) return;
+
+    AudioEngine *mutable_audio = (AudioEngine *)a;
+    if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
+    bool is_active = a->lane_analyzer_active && a->active_analyzer_lane == lane_index;
+    if(active) *active = is_active;
+    if(is_active) {
+        unsigned int available = a->lane_analyzer_sample_count;
+        if(available > (unsigned int)LANE_ANALYZER_WINDOW_SIZE) available = (unsigned int)LANE_ANALYZER_WINDOW_SIZE;
+        int copy_count = sample_count < (int)available ? sample_count : (int)available;
+        int pad_count = sample_count - copy_count;
+        if(pad_count > 0) SDL_memset(samples, 0, (size_t)pad_count * sizeof(float));
+        unsigned int start = (a->lane_analyzer_write_index + (unsigned int)LANE_ANALYZER_WINDOW_SIZE - (unsigned int)copy_count) %
+                             (unsigned int)LANE_ANALYZER_WINDOW_SIZE;
+        for(int i = 0; i < copy_count; ++i) {
+            unsigned int src = (start + (unsigned int)i) % (unsigned int)LANE_ANALYZER_WINDOW_SIZE;
+            samples[pad_count + i] = a->lane_analyzer_samples[src];
+        }
+    }
     if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
 }

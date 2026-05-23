@@ -19,6 +19,7 @@
 - Timeline view has focus zones, a tick cursor, beat/bar grid, play range handles, and range playback.
 - Timeline sequencing uses 8 lanes with same-lane overlap blocking and cross-lane overlap allowed.
 - Timeline playback applies per-instance velocity and shows a compact master output meter/clipping indicator.
+- First-pass Lane Inspector opens from the lane row number and shows lane identity, mute, post-lane analyzer, peak meter, and clip LED.
 - Timeline playback starts from the play range and stops/rewinds or loops at the range end.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
 
@@ -64,11 +65,13 @@ cmake --build build
 - Timeline instances use musical ticks internally: `roster_clip_index`, `start_tick`, `duration_ticks`, MIDI-friendly note/channel, and velocity.
 - Same-lane instance overlap is blocked; different-lane overlap is allowed and mixed together.
 - Instance velocity is `1..127`, defaults to `100`, and uses a simple perceptual gain curve: `(velocity / 127)^1.5`.
-- Lane gain/mute exist only as internal structure for now; there is no lane mixer UI.
+- Lanes are abstract numbered rows `1..8` with fixed palette identities; there are no lane names or roles.
+- Lane mute is exposed only through the one-lane Lane Inspector; there is no solo and no lane mixer UI.
 - The master output monitor shows peak level and a `CLIP` flash/count when output exceeds the safe range.
+- The Lane Inspector analyzer is an isolated 64-bar post-lane spectrum view fed by a fixed 1024-sample active-lane snapshot.
 - Captures fail cleanly with status text for a full roster, very short loops, oversized clips, or memory allocation failure.
 - Timeline playback is separate from waveform loop playback: switching to timeline view stops waveform playback and waits silently.
-- Timeline focus zones are `TRANSPORT`, `RULER`, `PLAY RANGE`, `TRACK AREA`, and `ROSTER`.
+- Timeline focus zones are `TRANSPORT`, `RULER`, `LANE INDEX`, `PLAY RANGE`, `TRACK AREA`, and `ROSTER`.
 - `Tab` / `Shift+Tab` cycle timeline focus. Gamepad bumpers cycle focus in timeline view.
 - Timeline cursor movement snaps to one beat by default and clamps to the timeline length.
 - Timeline beat/bar grid is drawn from timeline ticks, BPM, and meter; bar lines are stronger than beat lines.
@@ -94,6 +97,7 @@ cmake --build build
 - In the instance context menu, South removes the selected instance and East/Start cancels.
 - In timeline view, left stick pans horizontally and zooms vertically across focus zones; hold L2 for 3x faster viewport movement.
 - In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; `Shift+Left/Right` pans.
+- In `LANE INDEX`: `Up/Down` chooses lane `1..8`, and `Enter`/South opens the Lane Inspector for that lane.
 - In `PLAY RANGE`: `Enter` enters adjustment, `1` selects start handle, `2` selects end handle, `Left/Right` nudges the selected handle, `R` resets to full timeline.
 - In `TRACK AREA`: `Up/Down` moves the lane cursor, and `Enter`/South selects the instance under the cursor in that lane; pressing it again enters `MOVE INSTANCE`.
 - In `TRACK AREA`, gamepad `L2 + left stick X` glides the cursor horizontally with hold acceleration.
@@ -116,6 +120,17 @@ cmake --build build
 - Gamepad `R2 + North`: toggle play range loop.
 - Gamepad `R2 + Start`: toggle waveform/timeline view.
 - In `ROSTER`, gamepad right-stick click previews the selected roster clip without changing placement state.
+
+## Lane Inspector
+- Opens from timeline `LANE INDEX` focus with `Enter` or South.
+- Shows only `LANE N`, lane palette styling, mute, a post-lane analyzer, a compact peak meter, and a red `CLIP` column.
+- The analyzer uses a small UI-thread FFT; the audio callback only writes fixed-size post-lane samples for the active inspected lane.
+- The view is visually exclusive: global sample/BPM/status/debug overlay text is hidden while the inspector is open.
+- `Return` or South toggles mute for the inspected lane.
+- `Escape` or East returns to the timeline.
+- Gamepad `R2 + South/East/West/North` keeps timeline transport behavior while the inspector is open.
+- Muted lanes do not contribute to the master output and render dim/desaturated in the timeline.
+- The inspector is intentionally a lane magnifier, not a mixer screen: no names, roles, solo, sends, routing, inserts, pan, EQ, effects, automation, compression, or faders.
 
 ## Tempo Lock Mode
 - Normal mode cuts/auditions loops; Tempo Lock mode calibrates the selected loop against musical time.
@@ -151,6 +166,8 @@ cmake --build build
 - Right stick click: open sample selector in waveform view
 - In selector: d-pad up/down choose, south loads, east closes
 - In timeline view: left stick pans/zooms, L2 accelerates viewport movement, bumpers cycle focus, South activates focus, East cancels, R2+face buttons control transport
+- In timeline lane-index focus: d-pad up/down chooses a lane, South opens Lane Inspector
+- In Lane Inspector: South toggles mute, East returns to timeline, R2+face buttons control timeline transport
 - In timeline move/place: d-pad left/right moves by snap units and d-pad up/down chooses lane
 - In timeline track focus: L2 + left stick X glides the cursor, L2 + d-pad left/right moves by bar, and L2 + d-pad up/down adjusts selected instance velocity
 - In timeline roster focus: right stick click previews the selected roster clip
@@ -158,7 +175,7 @@ cmake --build build
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.
 - Loop playback has a very short boundary crossfade, but it still needs tuning by ear.
-- Timeline has no mouse drag/drop editing, clip stretching, tempo map, MIDI clips, SMF save/load, project persistence, routing, effects, pan, sends, or mixer UI yet.
+- Timeline has no mouse drag/drop editing, clip stretching, tempo map, MIDI clips, SMF save/load, project persistence, routing, effects, pan, sends, solo, or mixer UI.
 
 ## Next
 - Tune gamepad editing feel and add unobtrusive UX hints.
