@@ -1,6 +1,8 @@
 #include "transport.h"
 #include <math.h>
 
+static const double VAPORPLANE_PI = 3.14159265358979323846;
+
 void transport_init(Transport *t, double bpm, uint16_t ppqn, int beats_per_bar, int beat_unit){
     t->bpm=bpm;t->ppqn=ppqn;t->beats_per_bar=beats_per_bar;t->beat_unit=beat_unit;
     t->current_seconds=0;t->current_tick=0;t->playing=false;t->metronome_enabled=true;t->next_beat_tick=0;t->metronome_env=0;t->metronome_phase=0;t->metronome_downbeat=true;t->metronome_downbeat_frame=0;
@@ -23,6 +25,6 @@ void transport_trigger_metronome_beat(Transport *t, int64_t beat_index){
 float transport_next_metronome_sample(Transport *t, int sample_rate){
     if(!t->metronome_enabled) return 0.f;
     if (t->metronome_env < 0.0005f) return 0.f;
-    float freq=t->metronome_downbeat?1400.f:1000.f; t->metronome_phase += 2.0*M_PI*freq/(double)sample_rate; if(t->metronome_phase>2.0*M_PI) t->metronome_phase -= 2.0*M_PI;
+    float freq=t->metronome_downbeat?1400.f:1000.f; t->metronome_phase += 2.0*VAPORPLANE_PI*freq/(double)sample_rate; if(t->metronome_phase>2.0*VAPORPLANE_PI) t->metronome_phase -= 2.0*VAPORPLANE_PI;
     float out = sinf((float)t->metronome_phase)*t->metronome_env*0.2f; t->metronome_env*=0.995f; return out;
 }
