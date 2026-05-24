@@ -12,6 +12,12 @@
 #define APP_MIN_CAPTURE_FRAMES 64
 #define APP_MAX_CAPTURE_FRAMES (48000 * 60 * 5)
 #define APP_MAX_CAPTURE_BYTES (64u * 1024u * 1024u)
+#define TIMELINE_MAX_TEMPO_EVENTS 128
+
+typedef struct {
+    int64_t tick;
+    double bpm;
+} TempoEvent;
 
 typedef struct {
     char name[APP_ROSTER_CLIP_NAME_MAX];
@@ -34,10 +40,16 @@ typedef struct {
     SDL_Color color;
 } RosterClip;
 
+typedef enum {
+    TIMELINE_INSTANCE_FREE,
+    TIMELINE_INSTANCE_TAPE
+} TimelineInstanceTiming;
+
 typedef struct {
     int roster_clip_index;
     int64_t start_tick;
     int64_t duration_ticks;
+    TimelineInstanceTiming timing;
     int midi_note;
     int midi_channel;
     int midi_velocity;
@@ -74,10 +86,13 @@ typedef enum {
 typedef struct {
     bool initialized;
     bool playing;
-    double timeline_bpm;
     int timeline_beats_per_bar;
     int timeline_beat_unit;
     int ticks_per_beat;
+    TempoEvent tempo_events[TIMELINE_MAX_TEMPO_EVENTS];
+    int tempo_event_count;
+    bool project_tempo_explicit;
+    float tape_speed;
     int64_t length_ticks;
     int64_t playhead_tick;
     int64_t timeline_cursor_tick;
@@ -89,3 +104,22 @@ typedef struct {
     double view_span_ticks;
     TimelineLane lanes[TIMELINE_MAX_LANES];
 } MasterTimeline;
+
+void timeline_tempo_map_init(MasterTimeline *timeline, double bpm, bool explicit_tempo);
+bool timeline_set_tempo_event(MasterTimeline *timeline, int64_t tick, double bpm, bool explicit_tempo);
+bool timeline_remove_tempo_event(MasterTimeline *timeline, int index);
+bool timeline_tempo_event_index_at_tick(const MasterTimeline *timeline, int64_t tick, int *index_out);
+bool timeline_has_tempo_event_strictly_between(const MasterTimeline *timeline, int64_t start_tick, int64_t end_tick);
+void timeline_shift_tempo_events(MasterTimeline *timeline, int64_t from_tick, int64_t delta_ticks);
+double timeline_bpm_at_tick(const MasterTimeline *timeline, double tick);
+double timeline_clamped_tape_speed(const MasterTimeline *timeline);
+
+/*
+ * Canonical seconds are derived from the tempo map at tape_speed == 1.0.
+ * These helpers intentionally do not include the timeline tape_speed layer.
+ */
+double timeline_tick_to_canonical_seconds(const MasterTimeline *timeline, double tick);
+double timeline_canonical_seconds_to_tick(const MasterTimeline *timeline, double seconds);
+double timeline_canonical_seconds_between_ticks(const MasterTimeline *timeline,
+                                                double start_tick,
+                                                double end_tick);

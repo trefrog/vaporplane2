@@ -172,13 +172,14 @@ static void update_timeline_metronome(AudioEngine *a, double tick, double tick_s
 static void sync_transport_to_timeline(AudioEngine *a) {
     if(!a->timeline || !a->transport) return;
     MasterTimeline *timeline = a->timeline;
-    a->transport->bpm = timeline->timeline_bpm > 0.0 ? timeline->timeline_bpm : 120.0;
+    double tape_speed = timeline_clamped_tape_speed(timeline);
+    double canonical_bpm = timeline_bpm_at_tick(timeline, (double)timeline->playhead_tick);
+    a->transport->bpm = canonical_bpm * tape_speed;
     a->transport->beats_per_bar = timeline->timeline_beats_per_bar > 0 ? timeline->timeline_beats_per_bar : 4;
     a->transport->beat_unit = timeline->timeline_beat_unit > 0 ? timeline->timeline_beat_unit : 4;
     a->transport->playing = timeline->playing;
     a->transport->current_tick = timeline->playhead_tick > 0 ? (uint64_t)timeline->playhead_tick : 0;
-    a->transport->current_seconds = timeline->ticks_per_beat > 0 && a->transport->bpm > 0.0 ?
-        ((double)a->transport->current_tick / (double)timeline->ticks_per_beat) * 60.0 / a->transport->bpm : 0.0;
+    a->transport->current_seconds = timeline_tick_to_canonical_seconds(timeline, (double)a->transport->current_tick) / tape_speed;
 }
 
 static void timeline_effective_play_range(const MasterTimeline *timeline, int64_t *start, int64_t *end) {
@@ -264,7 +265,7 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
     MasterTimeline *timeline = a->timeline;
     if(!timeline || !a->roster || !a->roster_clip_count || !timeline->playing ||
        timeline->length_ticks <= 0 || timeline_total_instance_count(timeline) <= 0 ||
-       timeline->ticks_per_beat <= 0 || timeline->timeline_bpm <= 0.0) {
+       timeline->ticks_per_beat <= 0) {
         decay_lane_monitors(a);
         a->metronome_beat_valid = false;
         return;
@@ -287,7 +288,9 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
         a->metronome_beat_valid = false;
     }
 
-    double ticks_per_second = timeline->timeline_bpm * (double)timeline->ticks_per_beat / 60.0;
+    double tape_speed = timeline_clamped_tape_speed(timeline);
+    double canonical_bpm = timeline_bpm_at_tick(timeline, a->timeline_playhead_tick);
+    double ticks_per_second = canonical_bpm * tape_speed * (double)timeline->ticks_per_beat / 60.0;
     double tick_step = ticks_per_second / (double)a->spec.freq;
     if(tick_step <= 0.0) return;
 
@@ -311,15 +314,26 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
 
                 const RosterClip *clip = &a->roster[instance->roster_clip_index];
                 if(!clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0) continue;
-                double elapsed_ticks = a->timeline_playhead_tick - instance_start;
-                double elapsed_seconds = elapsed_ticks / ticks_per_second;
-                double source_frame = elapsed_seconds * (double)clip->sample_rate;
+                double canonical_elapsed_seconds = timeline_canonical_seconds_between_ticks(timeline, instance_start, a->timeline_playhead_tick);
+                double canonical_instance_seconds = timeline_canonical_seconds_between_ticks(timeline, instance_start, instance_end);
+                if(canonical_instance_seconds <= 0.0) continue;
+                double source_frame = 0.0;
+                if(instance->timing == TIMELINE_INSTANCE_TAPE) {
+                    double progress = canonical_elapsed_seconds / canonical_instance_seconds;
+                    if(progress < 0.0 || progress >= 1.0) continue;
+                    source_frame = progress * (double)clip->frame_count;
+                } else {
+                    source_frame = canonical_elapsed_seconds * (double)clip->sample_rate;
+                }
                 if(source_frame >= (double)clip->frame_count) continue;
-                double source_duration_seconds = (double)clip->frame_count / (double)clip->sample_rate;
-                double instance_duration_seconds = (double)instance->duration_ticks / ticks_per_second;
+                double elapsed_seconds = canonical_elapsed_seconds / tape_speed;
+                double instance_duration_seconds = canonical_instance_seconds / tape_speed;
+                double source_duration_seconds = instance->timing == TIMELINE_INSTANCE_TAPE ?
+                    instance_duration_seconds :
+                    ((double)clip->frame_count / (double)clip->sample_rate) / tape_speed;
                 double gain = timeline_declik_gain(elapsed_seconds, source_duration_seconds, instance_duration_seconds, a->spec.freq);
-                double range_elapsed_seconds = (a->timeline_playhead_tick - (double)range_start_tick) / ticks_per_second;
-                double range_duration_seconds = ((double)range_end_tick - (double)range_start_tick) / ticks_per_second;
+                double range_elapsed_seconds = timeline_canonical_seconds_between_ticks(timeline, (double)range_start_tick, a->timeline_playhead_tick) / tape_speed;
+                double range_duration_seconds = timeline_canonical_seconds_between_ticks(timeline, (double)range_start_tick, (double)range_end_tick) / tape_speed;
                 double range_gain = timeline_declik_gain(range_elapsed_seconds, range_duration_seconds, range_duration_seconds, a->spec.freq);
                 if(range_gain < gain) gain = range_gain;
                 if(gain <= 0.0) continue;
@@ -510,9 +524,9 @@ void audio_engine_start_timeline(AudioEngine *a) {
         a->timeline->playing = true;
         sync_transport_to_timeline(a);
         if(a->transport) {
+            double tape_speed = timeline_clamped_tape_speed(a->timeline);
             a->transport->current_tick = range_start > 0 ? (uint64_t)range_start : 0;
-            a->transport->current_seconds = a->timeline->ticks_per_beat > 0 && a->transport->bpm > 0.0 ?
-                ((double)a->transport->current_tick / (double)a->timeline->ticks_per_beat) * 60.0 / a->transport->bpm : 0.0;
+            a->transport->current_seconds = timeline_tick_to_canonical_seconds(a->timeline, (double)a->transport->current_tick) / tape_speed;
             a->transport->playing = true;
         }
         a->metronome_beat_valid = false;

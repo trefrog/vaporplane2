@@ -46,6 +46,10 @@ typedef enum {
 typedef enum {
     TIMELINE_CONTEXT_ITEM_INSERT_BAR,
     TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE,
+    TIMELINE_CONTEXT_ITEM_TEMPO_MARKERS,
+    TIMELINE_CONTEXT_ITEM_PLACE_WITH_PULSE,
+    TIMELINE_CONTEXT_ITEM_PLACE_FREE,
+    TIMELINE_CONTEXT_ITEM_BRING_BPM_HERE,
     TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER,
     TIMELINE_CONTEXT_ITEM_DELETE_ROSTER,
     TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_ROSTER,
@@ -97,9 +101,12 @@ typedef struct App {
     TimelineInstanceRef timeline_context_menu_instance;
     int timeline_context_menu_roster_index;
     int64_t timeline_context_menu_tick;
+    bool tempo_marker_panel_open;
+    int selected_tempo_marker;
     TimelineEditMode timeline_edit_mode;
     TimelineInstanceRef timeline_edit_instance;
     int timeline_edit_roster_clip_index;
+    bool timeline_edit_place_with_pulse;
     int timeline_edit_original_lane;
     int64_t timeline_edit_original_start_tick;
     int timeline_edit_ghost_lane;
@@ -155,6 +162,8 @@ void app_timeline_context_menu_move(App *app, int delta);
 void app_timeline_context_menu_apply(App *app);
 void app_timeline_insert_bar_at_cursor(App *app);
 void app_timeline_remove_selected_instance(App *app);
+void app_timeline_place_selected_roster_free(App *app);
+void app_timeline_bring_selected_roster_bpm_to_cursor(App *app);
 void app_delete_selected_roster_clip(App *app);
 void app_export_selected_roster_clip(App *app);
 void app_preview_selected_roster_clip(App *app);
@@ -170,6 +179,12 @@ void app_timeline_nudge_edit_lane(App *app, int direction);
 void app_timeline_adjust_selected_instance_velocity(App *app, int delta);
 void app_pan_timeline_view(App *app, double fraction);
 void app_zoom_timeline_view(App *app, double scale);
+void app_open_tempo_marker_panel(App *app);
+void app_close_tempo_marker_panel(App *app);
+void app_tempo_marker_panel_move(App *app, int delta);
+void app_tempo_marker_panel_jump(App *app);
+void app_tempo_marker_panel_adjust_bpm(App *app, double delta);
+void app_tempo_marker_panel_remove(App *app);
 void app_open_lane_inspector(App *app, int lane_index);
 void app_close_lane_inspector(App *app);
 void app_toggle_inspected_lane_mute(App *app);

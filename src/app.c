@@ -295,7 +295,7 @@ static void app_set_timeline_edit_status(App *app) {
                  timeline_edit_clip_name(app));
 }
 
-#define TIMELINE_CONTEXT_MAX_ITEMS 4
+#define TIMELINE_CONTEXT_MAX_ITEMS 8
 
 static void app_timeline_clear_context_menu(App *app) {
     app->timeline_context_menu_open = false;
@@ -304,6 +304,26 @@ static void app_timeline_clear_context_menu(App *app) {
     app->timeline_context_menu_instance = timeline_instance_ref_invalid();
     app->timeline_context_menu_roster_index = -1;
     app->timeline_context_menu_tick = 0;
+}
+
+static bool selected_roster_clip_valid(const App *app) {
+    return app && app->selected_roster_clip >= 0 && app->selected_roster_clip < app->roster_clip_count;
+}
+
+static bool app_tempo_map_edit_allowed(App *app) {
+    if (audio_engine_timeline_is_playing(&app->audio)) {
+        app_set_status(app, "Stop timeline before tempo edit");
+        return false;
+    }
+    return true;
+}
+
+static int timeline_tempo_event_new_slot_count(const MasterTimeline *timeline, int64_t a, int64_t b) {
+    int needed = 0;
+    if (!timeline) return 0;
+    if (!timeline_tempo_event_index_at_tick(timeline, a, NULL)) needed++;
+    if (b != a && !timeline_tempo_event_index_at_tick(timeline, b, NULL)) needed++;
+    return needed;
 }
 
 static int timeline_bar_ticks(const MasterTimeline *timeline) {
@@ -323,14 +343,19 @@ static int timeline_context_menu_items(const App *app,
     switch (app->timeline_context_menu_scope) {
         case TIMELINE_CONTEXT_SCOPE_TIMELINE:
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_INSERT_BAR;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_TEMPO_MARKERS;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
         case TIMELINE_CONTEXT_SCOPE_INSTANCE:
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_INSERT_BAR;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_TEMPO_MARKERS;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
         case TIMELINE_CONTEXT_SCOPE_ROSTER:
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_WITH_PULSE;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_FREE;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_BRING_BPM_HERE;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_DELETE_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
@@ -361,6 +386,10 @@ static const char *timeline_context_item_label(TimelineContextMenuItem item) {
     switch (item) {
         case TIMELINE_CONTEXT_ITEM_INSERT_BAR: return "Insert bar";
         case TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE: return "Remove instance";
+        case TIMELINE_CONTEXT_ITEM_TEMPO_MARKERS: return "Tempo markers";
+        case TIMELINE_CONTEXT_ITEM_PLACE_WITH_PULSE: return "Place with pulse";
+        case TIMELINE_CONTEXT_ITEM_PLACE_FREE: return "Place free";
+        case TIMELINE_CONTEXT_ITEM_BRING_BPM_HERE: return "Bring BPM here";
         case TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER: return "Export WAV";
         case TIMELINE_CONTEXT_ITEM_DELETE_ROSTER: return "Delete roster clip";
         case TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_ROSTER: return "Delete clip and instances";
@@ -509,7 +538,9 @@ static void timeline_update_ghost_valid(App *app) {
 
 static void timeline_clamp_ghost_start(App *app) {
     if (app->timeline_edit_ghost_start_tick < 0) app->timeline_edit_ghost_start_tick = 0;
-    app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline_edit_ghost_start_tick);
+    if (app->timeline_edit_mode != TIMELINE_EDIT_PLACE_CLIP || app->timeline_edit_place_with_pulse) {
+        app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline_edit_ghost_start_tick);
+    }
 }
 
 static void timeline_enter_move_instance(App *app) {
@@ -521,6 +552,7 @@ static void timeline_enter_move_instance(App *app) {
     app->timeline_edit_mode = TIMELINE_EDIT_MOVE_INSTANCE;
     app->timeline_edit_instance = app->selected_timeline_instance;
     app->timeline_edit_roster_clip_index = instance->roster_clip_index;
+    app->timeline_edit_place_with_pulse = false;
     app->timeline_edit_original_lane = app->selected_timeline_instance.lane_index;
     app->timeline_edit_ghost_lane = app->selected_timeline_instance.lane_index;
     app->timeline_edit_original_start_tick = instance->start_tick;
@@ -530,7 +562,7 @@ static void timeline_enter_move_instance(App *app) {
     app_set_timeline_edit_status(app);
 }
 
-static void timeline_enter_place_clip(App *app) {
+static void timeline_enter_place_clip(App *app, bool with_pulse) {
     if (app->selected_roster_clip < 0 || app->selected_roster_clip >= app->roster_clip_count) {
         app_set_status(app, "roster empty");
         return;
@@ -548,10 +580,13 @@ static void timeline_enter_place_clip(App *app) {
     app->timeline_edit_mode = TIMELINE_EDIT_PLACE_CLIP;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
     app->timeline_edit_roster_clip_index = app->selected_roster_clip;
+    app->timeline_edit_place_with_pulse = with_pulse;
     app->timeline_edit_original_lane = lane_index;
     app->timeline_edit_ghost_lane = lane_index;
     app->timeline_edit_original_start_tick = 0;
-    app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick);
+    app->timeline_edit_ghost_start_tick = with_pulse ?
+        timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick) :
+        app->timeline.timeline_cursor_tick;
     app->timeline_edit_duration_ticks = duration;
     timeline_clamp_ghost_start(app);
     timeline_update_ghost_valid(app);
@@ -579,12 +614,13 @@ static void clamp_timeline_view(App *app) {
 }
 
 static void sync_transport_to_timeline(App *app) {
-    app->transport.bpm = app->timeline.timeline_bpm > 0.0 ? app->timeline.timeline_bpm : 120.0;
+    double canonical_bpm = timeline_bpm_at_tick(&app->timeline, (double)app->timeline.playhead_tick);
+    double tape_speed = timeline_clamped_tape_speed(&app->timeline);
+    app->transport.bpm = canonical_bpm * tape_speed;
     app->transport.beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
     app->transport.beat_unit = app->timeline.timeline_beat_unit > 0 ? app->timeline.timeline_beat_unit : 4;
     app->transport.current_tick = app->timeline.playhead_tick > 0 ? (uint64_t)app->timeline.playhead_tick : 0;
-    app->transport.current_seconds = app->timeline.ticks_per_beat > 0 && app->transport.bpm > 0.0 ?
-        ((double)app->transport.current_tick / (double)app->timeline.ticks_per_beat) * 60.0 / app->transport.bpm : 0.0;
+    app->transport.current_seconds = timeline_tick_to_canonical_seconds(&app->timeline, (double)app->transport.current_tick) / tape_speed;
 }
 
 static TempoLockParams default_tempo_params(const App *app) {
@@ -821,7 +857,9 @@ void app_capture_current_loop_to_roster(App *app) {
 
     if (!app->timeline.initialized) {
         app->timeline.initialized = true;
-        app->timeline.timeline_bpm = next.source_bpm;
+        if (!app->timeline.project_tempo_explicit) {
+            timeline_set_tempo_event(&app->timeline, 0, next.source_bpm, false);
+        }
         app->timeline.timeline_beats_per_bar = next.beats_per_bar;
         app->timeline.timeline_beat_unit = next.beat_unit;
         app->timeline.ticks_per_beat = app->transport.ppqn > 0 ? app->transport.ppqn : 960;
@@ -831,6 +869,7 @@ void app_capture_current_loop_to_roster(App *app) {
         lane->instances[0].roster_clip_index = roster_index;
         lane->instances[0].start_tick = 0;
         lane->instances[0].duration_ticks = beats_to_ticks(next.target_beats, app->timeline.ticks_per_beat);
+        lane->instances[0].timing = TIMELINE_INSTANCE_FREE;
         lane->instances[0].midi_note = next.midi_note;
         lane->instances[0].midi_channel = next.midi_channel;
         lane->instances[0].midi_velocity = next.midi_velocity;
@@ -1044,8 +1083,12 @@ void app_timeline_select_lane_delta(App *app, int delta) {
 
 void app_timeline_nudge_edit_ghost(App *app, int direction) {
     if (direction == 0 || app->timeline_edit_mode == TIMELINE_EDIT_NONE) return;
-    int64_t snap = timeline_snap_ticks(&app->timeline);
-    app->timeline_edit_ghost_start_tick += snap * direction;
+    int64_t step = timeline_snap_ticks(&app->timeline);
+    if (app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP && !app->timeline_edit_place_with_pulse) {
+        step = app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat / 16 : 60;
+        if (step < 1) step = 1;
+    }
+    app->timeline_edit_ghost_start_tick += step * direction;
     timeline_clamp_ghost_start(app);
     timeline_update_ghost_valid(app);
     if (!app->timeline_edit_ghost_valid) app_set_status(app, "overlap blocked");
@@ -1110,6 +1153,29 @@ static void app_timeline_confirm_edit_mode(App *app) {
         return;
     }
 
+    bool pulse_placement = app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP && app->timeline_edit_place_with_pulse;
+    int64_t pulse_start = app->timeline_edit_ghost_start_tick;
+    int64_t pulse_end = pulse_start + app->timeline_edit_duration_ticks;
+    double pulse_restore_bpm = 120.0;
+    double pulse_source_bpm = 120.0;
+    if (pulse_placement) {
+        if (!app_tempo_map_edit_allowed(app)) return;
+        if (timeline_has_tempo_event_strictly_between(&app->timeline, pulse_start, pulse_end)) {
+            app_set_status(app, "Tempo marker inside span");
+            return;
+        }
+        int needed = timeline_tempo_event_new_slot_count(&app->timeline, pulse_start, pulse_end);
+        if (app->timeline.tempo_event_count + needed > TIMELINE_MAX_TEMPO_EVENTS) {
+            app_set_status(app, "Tempo map full");
+            return;
+        }
+        if (app->timeline_edit_roster_clip_index >= 0 &&
+            app->timeline_edit_roster_clip_index < app->roster_clip_count) {
+            pulse_source_bpm = app->roster[app->timeline_edit_roster_clip_index].source_bpm;
+        }
+        pulse_restore_bpm = timeline_bpm_at_tick(&app->timeline, (double)pulse_end);
+    }
+
     if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
     if (app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE) {
         TimelineInstance *instance = timeline_instance_from_ref(&app->timeline, app->timeline_edit_instance);
@@ -1171,17 +1237,29 @@ static void app_timeline_confirm_edit_mode(App *app) {
         instance->roster_clip_index = app->timeline_edit_roster_clip_index;
         instance->start_tick = app->timeline_edit_ghost_start_tick;
         instance->duration_ticks = app->timeline_edit_duration_ticks;
+        instance->timing = TIMELINE_INSTANCE_FREE;
         instance->midi_note = clip->midi_note;
         instance->midi_channel = clip->midi_channel;
         instance->midi_velocity = clip->midi_velocity;
+        if (pulse_placement) {
+            bool tempo_ok = timeline_set_tempo_event(&app->timeline, pulse_start, pulse_source_bpm, true) &&
+                            timeline_set_tempo_event(&app->timeline, pulse_end, pulse_restore_bpm, true);
+            if (!tempo_ok) {
+                lane->instance_count--;
+                if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+                app_set_status(app, "Tempo map full");
+                return;
+            }
+        }
         app->timeline.timeline_cursor_tick = app->timeline_edit_ghost_start_tick;
         app->selected_timeline_lane = app->timeline_edit_ghost_lane;
         app->selected_timeline_instance = (TimelineInstanceRef){ app->timeline_edit_ghost_lane, index };
         recompute_timeline_length_no_lock(app);
         sync_timeline_play_range_no_lock(app);
         if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+        sync_transport_from_app(app);
         app->timeline_edit_mode = TIMELINE_EDIT_NONE;
-        app_set_status(app, "Clip placed");
+        app_set_status(app, pulse_placement ? "Placed with pulse" : "Clip placed free");
     }
 }
 
@@ -1197,6 +1275,7 @@ static void app_timeline_cancel_edit_mode(App *app) {
     app->timeline_edit_mode = TIMELINE_EDIT_NONE;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
     app->timeline_edit_roster_clip_index = -1;
+    app->timeline_edit_place_with_pulse = false;
     app->timeline_edit_ghost_lane = 0;
     app->timeline_edit_ghost_valid = false;
 }
@@ -1248,7 +1327,7 @@ void app_timeline_activate_focus(App *app) {
                     app->selected_roster_clip_armed = true;
                     SDL_snprintf(app->status_text, sizeof(app->status_text), "Selected %s", app->roster[app->selected_roster_clip].name);
                 } else {
-                    timeline_enter_place_clip(app);
+                    timeline_enter_place_clip(app, true);
                 }
             } else {
                 app_set_status(app, "roster empty");
@@ -1261,6 +1340,10 @@ void app_timeline_activate_focus(App *app) {
 }
 
 void app_timeline_cancel_focus(App *app) {
+    if (app->tempo_marker_panel_open) {
+        app_close_tempo_marker_panel(app);
+        return;
+    }
     if (app->timeline_context_menu_open) {
         app_timeline_close_context_menu(app);
         return;
@@ -1279,6 +1362,10 @@ void app_timeline_cancel_focus(App *app) {
 
 void app_timeline_open_context_menu(App *app) {
     if (app->view_mode != APP_VIEW_TIMELINE) return;
+    if (app->tempo_marker_panel_open) {
+        app_close_tempo_marker_panel(app);
+        return;
+    }
     if (app->timeline_edit_mode != TIMELINE_EDIT_NONE || app->timeline_play_range_adjusting) {
         app_set_status(app, "Finish current edit first");
         return;
@@ -1328,7 +1415,7 @@ void app_timeline_close_context_menu(App *app) {
     TimelineContextMenuScope scope = app->timeline_context_menu_scope;
     if (scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE) {
         app->timeline_context_menu_scope = TIMELINE_CONTEXT_SCOPE_ROSTER;
-        app->timeline_context_menu_selected = 1;
+        app->timeline_context_menu_selected = 4;
         app_set_status(app, "Delete cancelled");
         return;
     }
@@ -1368,6 +1455,37 @@ void app_timeline_context_menu_apply(App *app) {
             }
             app_timeline_remove_selected_instance(app);
             break;
+        case TIMELINE_CONTEXT_ITEM_TEMPO_MARKERS:
+            app_open_tempo_marker_panel(app);
+            break;
+        case TIMELINE_CONTEXT_ITEM_PLACE_WITH_PULSE:
+            if (app->timeline_context_menu_roster_index >= 0 &&
+                app->timeline_context_menu_roster_index < app->roster_clip_count) {
+                app->selected_roster_clip = app->timeline_context_menu_roster_index;
+                app->selected_roster_clip_armed = true;
+                app->timeline.timeline_cursor_tick = timeline_snap_tick_down(app, app->timeline_context_menu_tick);
+                app_timeline_clear_context_menu(app);
+                timeline_enter_place_clip(app, true);
+            }
+            break;
+        case TIMELINE_CONTEXT_ITEM_PLACE_FREE:
+            if (app->timeline_context_menu_roster_index >= 0 &&
+                app->timeline_context_menu_roster_index < app->roster_clip_count) {
+                app->selected_roster_clip = app->timeline_context_menu_roster_index;
+                app->selected_roster_clip_armed = true;
+                app->timeline.timeline_cursor_tick = app->timeline_context_menu_tick;
+                app_timeline_clear_context_menu(app);
+                timeline_enter_place_clip(app, false);
+            }
+            break;
+        case TIMELINE_CONTEXT_ITEM_BRING_BPM_HERE:
+            if (app->timeline_context_menu_roster_index >= 0 &&
+                app->timeline_context_menu_roster_index < app->roster_clip_count) {
+                app->selected_roster_clip = app->timeline_context_menu_roster_index;
+                app->timeline.timeline_cursor_tick = app->timeline_context_menu_tick;
+            }
+            app_timeline_bring_selected_roster_bpm_to_cursor(app);
+            break;
         case TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER:
             if (app->timeline_context_menu_roster_index >= 0 &&
                 app->timeline_context_menu_roster_index < app->roster_clip_count) {
@@ -1392,6 +1510,121 @@ void app_timeline_context_menu_apply(App *app) {
             app_timeline_close_context_menu(app);
             break;
     }
+}
+
+void app_timeline_place_selected_roster_free(App *app) {
+    if (!selected_roster_clip_valid(app)) {
+        app_set_status(app, "roster empty");
+        return;
+    }
+    app_timeline_clear_context_menu(app);
+    app->selected_roster_clip_armed = true;
+    timeline_enter_place_clip(app, false);
+}
+
+void app_timeline_bring_selected_roster_bpm_to_cursor(App *app) {
+    if (!selected_roster_clip_valid(app)) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Select a roster clip first");
+        return;
+    }
+    if (!app_tempo_map_edit_allowed(app)) {
+        app_timeline_clear_context_menu(app);
+        return;
+    }
+
+    RosterClip *clip = &app->roster[app->selected_roster_clip];
+    int64_t tick = app->timeline.timeline_cursor_tick;
+    if (tick < 0) tick = 0;
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    bool ok = timeline_set_tempo_event(&app->timeline, tick, clip->source_bpm, true);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    sync_transport_from_app(app);
+
+    app_timeline_clear_context_menu(app);
+    if (!ok) {
+        app_set_status(app, "Tempo map full");
+        return;
+    }
+    SDL_snprintf(app->status_text, sizeof(app->status_text),
+                 "BPM %.2f at tick %lld", clip->source_bpm, (long long)tick);
+}
+
+static void clamp_selected_tempo_marker(App *app) {
+    int count = app->timeline.tempo_event_count;
+    if (count < 1) count = 1;
+    app->selected_tempo_marker = clamp_int(app->selected_tempo_marker, 0, count - 1);
+}
+
+void app_open_tempo_marker_panel(App *app) {
+    app_timeline_clear_context_menu(app);
+    app->tempo_marker_panel_open = true;
+    clamp_selected_tempo_marker(app);
+    app_set_status(app, "Tempo markers");
+}
+
+void app_close_tempo_marker_panel(App *app) {
+    app->tempo_marker_panel_open = false;
+    app_set_status(app, "Tempo markers closed");
+}
+
+void app_tempo_marker_panel_move(App *app, int delta) {
+    if (!app->tempo_marker_panel_open || delta == 0) return;
+    int count = app->timeline.tempo_event_count;
+    if (count <= 0) return;
+    int next = app->selected_tempo_marker + delta;
+    while (next < 0) next += count;
+    next %= count;
+    app->selected_tempo_marker = next;
+}
+
+void app_tempo_marker_panel_jump(App *app) {
+    if (!app->tempo_marker_panel_open) return;
+    clamp_selected_tempo_marker(app);
+    int index = app->selected_tempo_marker;
+    if (index < 0 || index >= app->timeline.tempo_event_count) return;
+    int64_t tick = app->timeline.tempo_events[index].tick;
+    app->timeline.timeline_cursor_tick = clamp_i64(tick, 0, app->timeline.length_ticks > 0 ? app->timeline.length_ticks : tick);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Cursor to tempo marker %d", index + 1);
+}
+
+void app_tempo_marker_panel_adjust_bpm(App *app, double delta) {
+    if (!app->tempo_marker_panel_open || delta == 0.0) return;
+    if (!app_tempo_map_edit_allowed(app)) return;
+    clamp_selected_tempo_marker(app);
+    int index = app->selected_tempo_marker;
+    if (index < 0 || index >= app->timeline.tempo_event_count) return;
+    TempoEvent event = app->timeline.tempo_events[index];
+    double next_bpm = event.bpm + delta;
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    bool ok = timeline_set_tempo_event(&app->timeline, event.tick, next_bpm, true);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    sync_transport_from_app(app);
+    if (!ok) {
+        app_set_status(app, "Could not edit marker");
+        return;
+    }
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Tempo %.2f BPM", timeline_bpm_at_tick(&app->timeline, (double)event.tick));
+}
+
+void app_tempo_marker_panel_remove(App *app) {
+    if (!app->tempo_marker_panel_open) return;
+    if (!app_tempo_map_edit_allowed(app)) return;
+    clamp_selected_tempo_marker(app);
+    if (app->selected_tempo_marker <= 0) {
+        app_set_status(app, "Project BPM is protected");
+        return;
+    }
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    bool ok = timeline_remove_tempo_event(&app->timeline, app->selected_tempo_marker);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    sync_transport_from_app(app);
+    if (!ok) {
+        app_set_status(app, "Could not remove marker");
+        return;
+    }
+    clamp_selected_tempo_marker(app);
+    app_set_status(app, "Tempo marker removed");
 }
 
 void app_timeline_insert_bar_at_cursor(App *app) {
@@ -1420,6 +1653,7 @@ void app_timeline_insert_bar_at_cursor(App *app) {
             if (instance->start_tick >= insertion_tick) instance->start_tick += bar_ticks;
         }
     }
+    timeline_shift_tempo_events(&app->timeline, insertion_tick, bar_ticks);
 
     int64_t new_length_floor = old_length + bar_ticks;
     if (app->timeline.timeline_cursor_tick >= insertion_tick) app->timeline.timeline_cursor_tick += bar_ticks;
@@ -2006,6 +2240,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Tab/Shift+Tab or bumpers cycle focus zones"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space play/pause   Enter/South activate focus   East cancel"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: C/Start menu   Up/Down choose   South apply   East backs out"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Tempo Markers: South jump   L/R BPM   West/Delete remove   East close"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline stick: Left/Right pan   Up/Down zoom   L2 turbo"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Ruler: Left/Right cursor by beat   Shift+Left/Right pans"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Index: Up/Down lane   South opens Lane Inspector"); y += 16.0f;
@@ -2014,7 +2249,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Track: L/R cursor   U/D lane cursor   South select/move   [/] velocity"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad track: L2+stick X glide   L2+D-pad L/R bars   L2+D-pad U/D velocity"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Move/Place: D-pad L/R ticks   D-pad U/D lane   same-lane overlap blocked"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Roster: South arms/places   C/Start menu   Right stick previews"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Roster: South pulse-place   West free-place   North bring BPM   Right stick previews"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline R2: South play   East stop all   West jump start   North loop"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad waveform: South/Start play   Back metronome"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
@@ -2152,6 +2387,77 @@ static void render_master_meter(App *app, SDL_FRect rect) {
     }
 }
 
+static void format_timeline_position(const MasterTimeline *timeline, int64_t tick, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    int ticks_per_beat = timeline && timeline->ticks_per_beat > 0 ? timeline->ticks_per_beat : 960;
+    int beats_per_bar = timeline && timeline->timeline_beats_per_bar > 0 ? timeline->timeline_beats_per_bar : 4;
+    int64_t bar_ticks = (int64_t)ticks_per_beat * (int64_t)beats_per_bar;
+    if (bar_ticks < 1) bar_ticks = ticks_per_beat;
+    if (tick < 0) tick = 0;
+    int64_t bar = bar_ticks > 0 ? tick / bar_ticks : 0;
+    int64_t within_bar = bar_ticks > 0 ? tick % bar_ticks : tick;
+    int64_t beat = ticks_per_beat > 0 ? within_bar / ticks_per_beat : 0;
+    int64_t sub_tick = ticks_per_beat > 0 ? within_bar % ticks_per_beat : 0;
+    SDL_snprintf(out, out_size, "%lld.%lld +%lld",
+                 (long long)bar + 1,
+                 (long long)beat + 1,
+                 (long long)sub_tick);
+}
+
+static void render_tempo_marker_panel(App *app) {
+    if (!app->tempo_marker_panel_open) return;
+    int w = 0, h = 0;
+    SDL_GetRenderOutputSize(app->renderer, &w, &h);
+    SDL_FRect panel = { 36.0f, 92.0f, 430.0f, 360.0f };
+    if (panel.w > (float)w - 72.0f) panel.w = (float)w - 72.0f;
+    if (panel.h > (float)h - 116.0f) panel.h = (float)h - 116.0f;
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(app->renderer, 9, 10, 16, 238);
+    SDL_RenderFillRect(app->renderer, &panel);
+    SDL_SetRenderDrawColor(app->renderer, 112, 232, 255, 255);
+    SDL_RenderRect(app->renderer, &panel);
+    SDL_SetRenderDrawColor(app->renderer, 230, 238, 242, 255);
+    SDL_RenderDebugText(app->renderer, panel.x + 14.0f, panel.y + 12.0f, "TEMPO MARKERS");
+    SDL_SetRenderDrawColor(app->renderer, 160, 172, 188, 255);
+    SDL_RenderDebugText(app->renderer, panel.x + 14.0f, panel.y + 30.0f, "South/Enter jump   Left/Right edit   West/Delete remove");
+
+    int count = app->timeline.tempo_event_count;
+    if (count <= 0) {
+        SDL_RenderDebugText(app->renderer, panel.x + 14.0f, panel.y + 60.0f, "No tempo markers");
+        return;
+    }
+    clamp_selected_tempo_marker(app);
+    int visible = ((int)panel.h - 70) / 22;
+    if (visible > count) visible = count;
+    int first = app->selected_tempo_marker - visible / 2;
+    if (first < 0) first = 0;
+    if (first + visible > count) first = count - visible;
+    if (first < 0) first = 0;
+
+    for (int row_index = 0; row_index < visible; ++row_index) {
+        int event_index = first + row_index;
+        TempoEvent *event = &app->timeline.tempo_events[event_index];
+        float y = panel.y + 60.0f + (float)row_index * 22.0f;
+        bool selected = event_index == app->selected_tempo_marker;
+        SDL_FRect row = { panel.x + 10.0f, y - 4.0f, panel.w - 20.0f, 20.0f };
+        if (selected) {
+            SDL_SetRenderDrawColor(app->renderer, 112, 232, 255, 62);
+            SDL_RenderFillRect(app->renderer, &row);
+            SDL_SetRenderDrawColor(app->renderer, 112, 232, 255, 255);
+            SDL_RenderRect(app->renderer, &row);
+        }
+        char pos[32];
+        format_timeline_position(&app->timeline, event->tick, pos, sizeof(pos));
+        SDL_SetRenderDrawColor(app->renderer, selected ? 255 : 214, selected ? 244 : 226, selected ? 178 : 232, 255);
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 18.0f, y, "%02d  %s  %.2f BPM%s",
+                                  event_index + 1,
+                                  pos,
+                                  event->bpm,
+                                  event_index == 0 ? "  locked" : "");
+    }
+}
+
 static void app_render_timeline(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
@@ -2194,12 +2500,16 @@ static void app_render_timeline(App *app) {
         return;
     }
 
-    SDL_RenderDebugTextFormat(app->renderer, 24, 158, "timeline bpm: %.2f  meter: %d/%d  roster: %d",
-                              app->timeline.timeline_bpm,
+    double canonical_bpm = timeline_bpm_at_tick(&app->timeline, (double)app->timeline.playhead_tick);
+    double tape_speed = timeline_clamped_tape_speed(&app->timeline);
+    SDL_RenderDebugTextFormat(app->renderer, 24, 158, "tempo: %.2f canon  speed: %.2fx  audible: %.2f  roster: %d",
+                              canonical_bpm,
+                              tape_speed,
+                              canonical_bpm * tape_speed,
+                              app->roster_clip_count);
+    SDL_RenderDebugTextFormat(app->renderer, 24, 176, "meter: %d/%d  length: %lld ticks  playhead: %lld  %s",
                               app->timeline.timeline_beats_per_bar,
                               app->timeline.timeline_beat_unit,
-                              app->roster_clip_count);
-    SDL_RenderDebugTextFormat(app->renderer, 24, 176, "length: %lld ticks  playhead: %lld  %s",
                               (long long)app->timeline.length_ticks,
                               (long long)audio_engine_get_timeline_playhead_tick(&app->audio),
                               audio_engine_timeline_is_playing(&app->audio) ? "playing" : "stopped");
@@ -2293,6 +2603,23 @@ static void app_render_timeline(App *app) {
             int64_t beat_index = beat_ticks > 0 ? tick / beat_ticks + 1 : 1;
             SDL_SetRenderDrawColor(app->renderer, 150, 158, 176, 210);
             SDL_RenderDebugTextFormat(app->renderer, x + 4.0f, timeline_y - 38.0f, "%lld", (long long)beat_index);
+        }
+    }
+
+    for (int i = 0; i < app->timeline.tempo_event_count; ++i) {
+        TempoEvent *event = &app->timeline.tempo_events[i];
+        double tick = (double)event->tick;
+        if (tick < view_start || tick > view_end) continue;
+        float x = timeline_x_for_tick(tick, view_start, view_span, timeline_x, timeline_w);
+        bool selected = app->tempo_marker_panel_open && i == app->selected_tempo_marker;
+        if (selected) SDL_SetRenderDrawColor(app->renderer, 255, 245, 135, 255);
+        else if (i == 0) SDL_SetRenderDrawColor(app->renderer, 255, 208, 98, 235);
+        else SDL_SetRenderDrawColor(app->renderer, 112, 232, 255, 230);
+        SDL_RenderLine(app->renderer, x, timeline_y - 58.0f, x, timeline_y + track_h + 8.0f);
+        SDL_FRect marker = { x - 4.0f, timeline_y - 58.0f, 8.0f, 10.0f };
+        SDL_RenderFillRect(app->renderer, &marker);
+        if (selected || view_span < (double)bar_ticks * 8.0) {
+            SDL_RenderDebugTextFormat(app->renderer, x + 5.0f, timeline_y - 24.0f, "%.1f", event->bpm);
         }
     }
 
@@ -2471,11 +2798,14 @@ static void app_render_timeline(App *app) {
             SDL_SetRenderDrawColor(app->renderer, clip->color.r, clip->color.g, clip->color.b, 255);
             SDL_RenderFillRect(app->renderer, &swatch);
             SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
-            SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 34.0f, y, "%s  %.1fb %.2fbpm",
-                                      clip->name, clip->target_beats, clip->source_bpm);
+            SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 34.0f, y, "%.2f BPM", clip->source_bpm);
+            SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 112.0f, y, "%s  %.1fb",
+                                      clip->name, clip->target_beats);
         }
         render_focus_outline(app, roster_panel, TIMELINE_FOCUS_ROSTER);
     }
+
+    render_tempo_marker_panel(app);
 
     if (app->timeline_context_menu_open) {
         TimelineContextMenuItem items[TIMELINE_CONTEXT_MAX_ITEMS];
@@ -3005,7 +3335,8 @@ bool app_init(App *app){
     app->view_mode = APP_VIEW_WAVEFORM;
     app->controls_legend_open = false;
     app->timeline.ticks_per_beat = app->transport.ppqn;
-    app->timeline.timeline_bpm = 120.0;
+    app->timeline.tape_speed = 1.0f;
+    timeline_tempo_map_init(&app->timeline, 120.0, false);
     app->timeline.timeline_beats_per_bar = 4;
     app->timeline.timeline_beat_unit = 4;
     timeline_init_lanes(&app->timeline);
@@ -3020,7 +3351,10 @@ bool app_init(App *app){
     app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
     app->timeline_play_range_adjusting = false;
     app_timeline_clear_context_menu(app);
+    app->tempo_marker_panel_open = false;
+    app->selected_tempo_marker = 0;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
+    app->timeline_edit_place_with_pulse = false;
     app->timeline_edit_original_lane = 0;
     app->timeline_edit_ghost_lane = 0;
     app->selected_roster_clip = -1;

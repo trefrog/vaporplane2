@@ -206,6 +206,34 @@ static bool handle_tempo_lock_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
 }
 
 static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
+    if(app->tempo_marker_panel_open) {
+        switch(key) {
+            case SDLK_ESCAPE:
+                app_close_tempo_marker_panel(app);
+                return true;
+            case SDLK_RETURN:
+                app_tempo_marker_panel_jump(app);
+                return true;
+            case SDLK_UP:
+                app_tempo_marker_panel_move(app, -1);
+                return true;
+            case SDLK_DOWN:
+                app_tempo_marker_panel_move(app, 1);
+                return true;
+            case SDLK_LEFT:
+                app_tempo_marker_panel_adjust_bpm(app, (mod & SDL_KMOD_SHIFT) ? -1.0 : -0.5);
+                return true;
+            case SDLK_RIGHT:
+                app_tempo_marker_panel_adjust_bpm(app, (mod & SDL_KMOD_SHIFT) ? 1.0 : 0.5);
+                return true;
+            case SDLK_DELETE:
+            case SDLK_BACKSPACE:
+                app_tempo_marker_panel_remove(app);
+                return true;
+            default:
+                return true;
+        }
+    }
     if(app->timeline_context_menu_open) {
         switch(key) {
             case SDLK_ESCAPE:
@@ -229,11 +257,17 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
             if(app->timeline_play_range_adjusting) app_timeline_cancel_focus(app);
             else if(confirm_quit(app)) return false;
             return true;
-        case SDLK_RETURN: app_timeline_activate_focus(app); return true;
+        case SDLK_RETURN:
+            if(app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER && (mod & SDL_KMOD_SHIFT)) app_timeline_place_selected_roster_free(app);
+            else app_timeline_activate_focus(app);
+            return true;
         case SDLK_SPACE: app_toggle_timeline_playback(app); return true;
         case SDLK_M: toggle_metronome(app); return true;
         case SDLK_HOME: app_rewind_timeline(app); return true;
         case SDLK_C: app_timeline_open_context_menu(app); return true;
+        case SDLK_B:
+            if(app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) app_timeline_bring_selected_roster_bpm_to_cursor(app);
+            return true;
         case SDLK_LEFTBRACKET: app_timeline_adjust_selected_instance_velocity(app, -5); return true;
         case SDLK_RIGHTBRACKET: app_timeline_adjust_selected_instance_velocity(app, 5); return true;
         case SDLK_R:
@@ -481,6 +515,17 @@ void input_update_gamepad(App *app, double dt){
             if(south_pressed || east_pressed || west_pressed || north_pressed) return;
         }
 
+        if(app->tempo_marker_panel_open) {
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_tempo_marker_panel_move(app, -1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_tempo_marker_panel_move(app, 1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_tempo_marker_panel_adjust_bpm(app, l2_shift ? -1.0 : -0.5);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_tempo_marker_panel_adjust_bpm(app, l2_shift ? 1.0 : 0.5);
+            if(south_pressed) app_tempo_marker_panel_jump(app);
+            if(west_pressed) app_tempo_marker_panel_remove(app);
+            if(east_pressed || start_pressed) app_close_tempo_marker_panel(app);
+            return;
+        }
+
         if(app->timeline_context_menu_open) {
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_context_menu_move(app, -1);
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_context_menu_move(app, 1);
@@ -537,6 +582,14 @@ void input_update_gamepad(App *app, double dt){
         if(app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) {
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) {
                 app_preview_selected_roster_clip(app);
+                return;
+            }
+            if(west_pressed) {
+                app_timeline_place_selected_roster_free(app);
+                return;
+            }
+            if(north_pressed) {
+                app_timeline_bring_selected_roster_bpm_to_cursor(app);
                 return;
             }
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_select_roster_delta(app, -1);
