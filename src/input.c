@@ -7,14 +7,17 @@ static int gamepad_edit_target = 0;
 static bool previous_buttons[SDL_GAMEPAD_BUTTON_COUNT];
 static Uint64 quit_confirm_until_ns = 0;
 static int tempo_bpm_dpad_direction = 0;
+static bool tempo_bpm_dpad_coarse = false;
 static double tempo_bpm_dpad_repeat_timer = 0.0;
 static int timeline_cursor_stick_direction = 0;
 static double timeline_cursor_stick_repeat_timer = 0.0;
 static double timeline_cursor_stick_held_seconds = 0.0;
 
 static const double TEMPO_LOCK_BPM_DPAD_NUDGE = 0.1;
+static const double TEMPO_LOCK_BPM_DPAD_COARSE_NUDGE = 1.0;
 static const double TEMPO_LOCK_BPM_DPAD_REPEAT_DELAY = 0.35;
 static const double TEMPO_LOCK_BPM_DPAD_REPEAT_INTERVAL = 0.12;
+static const double TEMPO_LOCK_BPM_DPAD_COARSE_REPEAT_INTERVAL = 0.07;
 static const double TIMELINE_CURSOR_STICK_THRESHOLD = 0.28;
 static const double TIMELINE_CURSOR_STICK_MAX_HELD = 3.0;
 
@@ -108,6 +111,7 @@ static long tempo_anchor_step(App *app, double fraction) {
 
 static void reset_tempo_bpm_dpad_repeat(void) {
     tempo_bpm_dpad_direction = 0;
+    tempo_bpm_dpad_coarse = false;
     tempo_bpm_dpad_repeat_timer = 0.0;
 }
 
@@ -153,27 +157,30 @@ static void update_timeline_cursor_stick(App *app, double x_axis, double dt) {
     }
 }
 
-static void update_tempo_bpm_dpad(App *app, double dt) {
+static void update_tempo_bpm_dpad(App *app, double dt, bool coarse) {
     bool left = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
     bool right = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
     int direction = (right ? 1 : 0) - (left ? 1 : 0);
+    double nudge = coarse ? TEMPO_LOCK_BPM_DPAD_COARSE_NUDGE : TEMPO_LOCK_BPM_DPAD_NUDGE;
+    double repeat_interval = coarse ? TEMPO_LOCK_BPM_DPAD_COARSE_REPEAT_INTERVAL : TEMPO_LOCK_BPM_DPAD_REPEAT_INTERVAL;
 
     if(direction == 0) {
         reset_tempo_bpm_dpad_repeat();
         return;
     }
 
-    if(direction != tempo_bpm_dpad_direction) {
+    if(direction != tempo_bpm_dpad_direction || coarse != tempo_bpm_dpad_coarse) {
         tempo_bpm_dpad_direction = direction;
+        tempo_bpm_dpad_coarse = coarse;
         tempo_bpm_dpad_repeat_timer = TEMPO_LOCK_BPM_DPAD_REPEAT_DELAY;
-        app_adjust_tempo_lock_bpm(app, (double)direction * TEMPO_LOCK_BPM_DPAD_NUDGE);
+        app_adjust_tempo_lock_bpm(app, (double)direction * nudge);
         return;
     }
 
     tempo_bpm_dpad_repeat_timer -= dt;
     if(tempo_bpm_dpad_repeat_timer <= 0.0) {
-        app_adjust_tempo_lock_bpm(app, (double)direction * TEMPO_LOCK_BPM_DPAD_NUDGE);
-        tempo_bpm_dpad_repeat_timer = TEMPO_LOCK_BPM_DPAD_REPEAT_INTERVAL;
+        app_adjust_tempo_lock_bpm(app, (double)direction * nudge);
+        tempo_bpm_dpad_repeat_timer = repeat_interval;
     }
 }
 
@@ -205,8 +212,13 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
                 app_timeline_close_context_menu(app);
                 return true;
             case SDLK_RETURN:
-                if(app->timeline_context_menu_roster) app_export_selected_roster_clip(app);
-                else app_timeline_remove_selected_instance(app);
+                app_timeline_context_menu_apply(app);
+                return true;
+            case SDLK_UP:
+                app_timeline_context_menu_move(app, -1);
+                return true;
+            case SDLK_DOWN:
+                app_timeline_context_menu_move(app, 1);
                 return true;
             default:
                 return true;
@@ -276,6 +288,8 @@ static bool handle_lane_inspector_key(App *app, SDL_Keycode key, SDL_Keymod mod)
     switch(key) {
         case SDLK_ESCAPE: app_close_lane_inspector(app); return true;
         case SDLK_RETURN: app_toggle_inspected_lane_mute(app); return true;
+        case SDLK_LEFT: app_cycle_inspected_lane_palette(app, -1); return true;
+        case SDLK_RIGHT: app_cycle_inspected_lane_palette(app, 1); return true;
         case SDLK_SPACE: app_toggle_timeline_playback(app); return true;
         case SDLK_HOME: app_rewind_timeline(app); return true;
         case SDLK_M: toggle_metronome(app); return true;
@@ -336,7 +350,10 @@ bool input_handle_event(App *app, const SDL_Event *e){
     if(e->key.key==SDLK_TAB) {
         if(app->view_mode == APP_VIEW_TIMELINE) app_timeline_cycle_focus(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1);
         else if(app->view_mode == APP_VIEW_LANE_INSPECTOR) return true;
-        else app->sample_selector_open = !app->sample_selector_open;
+        else {
+            if(!app->sample_selector_open) app_refresh_sample_list(app);
+            app->sample_selector_open = !app->sample_selector_open;
+        }
         return true;
     }
     if(app->view_mode == APP_VIEW_LANE_INSPECTOR) return handle_lane_inspector_key(app, e->key.key, mod);
@@ -444,6 +461,14 @@ void input_update_gamepad(App *app, double dt){
             app_toggle_inspected_lane_mute(app);
             return;
         }
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
+            app_cycle_inspected_lane_palette(app, -1);
+            return;
+        }
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
+            app_cycle_inspected_lane_palette(app, 1);
+            return;
+        }
         return;
     }
 
@@ -457,10 +482,9 @@ void input_update_gamepad(App *app, double dt){
         }
 
         if(app->timeline_context_menu_open) {
-            if(south_pressed) {
-                if(app->timeline_context_menu_roster) app_export_selected_roster_clip(app);
-                else app_timeline_remove_selected_instance(app);
-            }
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_context_menu_move(app, -1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_context_menu_move(app, 1);
+            if(south_pressed) app_timeline_context_menu_apply(app);
             if(east_pressed || start_pressed) app_timeline_close_context_menu(app);
             return;
         }
@@ -546,7 +570,8 @@ void input_update_gamepad(App *app, double dt){
     }
 
     if(app->tempo_lock_mode) {
-        if(r2_shift && north_pressed) app_snap_tempo_lock_downbeat_to_loop_start(app);
+        if(l2_shift && r2_shift && south_pressed) app_apply_tempo_lock_and_capture(app);
+        else if(r2_shift && north_pressed) app_snap_tempo_lock_downbeat_to_loop_start(app);
         else if(r2_shift && east_pressed) app_clear_tempo_lock(app);
         else if(south_pressed) app_apply_tempo_lock(app);
         else if(east_pressed) app_cancel_tempo_lock_mode(app);
@@ -554,7 +579,7 @@ void input_update_gamepad(App *app, double dt){
         else if(west_pressed) app_cycle_tempo_lock_meter(app, -1);
         if(back_pressed) toggle_metronome(app);
 
-        update_tempo_bpm_dpad(app, dt);
+        update_tempo_bpm_dpad(app, dt, l2_shift);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_cycle_tempo_lock_target_bars(app, 1);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_cycle_tempo_lock_target_bars(app, -1);
 
@@ -590,7 +615,10 @@ void input_update_gamepad(App *app, double dt){
         }
     }
 
-    if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) app->sample_selector_open=true;
+    if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) {
+        app_refresh_sample_list(app);
+        app->sample_selector_open=true;
+    }
     if(back_pressed) toggle_metronome(app);
     if(left_shoulder_pressed) {
         gamepad_edit_target=0;

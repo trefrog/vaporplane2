@@ -35,6 +35,23 @@ typedef enum {
     TIMELINE_EDIT_PLACE_CLIP
 } TimelineEditMode;
 
+typedef enum {
+    TIMELINE_CONTEXT_SCOPE_NONE,
+    TIMELINE_CONTEXT_SCOPE_TIMELINE,
+    TIMELINE_CONTEXT_SCOPE_INSTANCE,
+    TIMELINE_CONTEXT_SCOPE_ROSTER,
+    TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE
+} TimelineContextMenuScope;
+
+typedef enum {
+    TIMELINE_CONTEXT_ITEM_INSERT_BAR,
+    TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE,
+    TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER,
+    TIMELINE_CONTEXT_ITEM_DELETE_ROSTER,
+    TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_ROSTER,
+    TIMELINE_CONTEXT_ITEM_CANCEL
+} TimelineContextMenuItem;
+
 typedef struct App {
     SDL_Window *window;
     SDL_Renderer *renderer;
@@ -75,7 +92,11 @@ typedef struct App {
     TimelineRangeHandle timeline_play_range_handle;
     bool timeline_play_range_adjusting;
     bool timeline_context_menu_open;
-    bool timeline_context_menu_roster;
+    TimelineContextMenuScope timeline_context_menu_scope;
+    int timeline_context_menu_selected;
+    TimelineInstanceRef timeline_context_menu_instance;
+    int timeline_context_menu_roster_index;
+    int64_t timeline_context_menu_tick;
     TimelineEditMode timeline_edit_mode;
     TimelineInstanceRef timeline_edit_instance;
     int timeline_edit_roster_clip_index;
@@ -108,6 +129,7 @@ void app_select_sample_delta(App *app, int delta);
 void app_enter_tempo_lock_mode(App *app);
 void app_cancel_tempo_lock_mode(App *app);
 void app_apply_tempo_lock(App *app);
+void app_apply_tempo_lock_and_capture(App *app);
 void app_clear_tempo_lock(App *app);
 void app_adjust_transport_bpm(App *app, double delta);
 void app_adjust_tempo_lock_bpm(App *app, double delta);
@@ -129,7 +151,11 @@ void app_timeline_activate_focus(App *app);
 void app_timeline_cancel_focus(App *app);
 void app_timeline_open_context_menu(App *app);
 void app_timeline_close_context_menu(App *app);
+void app_timeline_context_menu_move(App *app, int delta);
+void app_timeline_context_menu_apply(App *app);
+void app_timeline_insert_bar_at_cursor(App *app);
 void app_timeline_remove_selected_instance(App *app);
+void app_delete_selected_roster_clip(App *app);
 void app_export_selected_roster_clip(App *app);
 void app_preview_selected_roster_clip(App *app);
 void app_timeline_move_cursor(App *app, int direction);
@@ -147,6 +173,7 @@ void app_zoom_timeline_view(App *app, double scale);
 void app_open_lane_inspector(App *app, int lane_index);
 void app_close_lane_inspector(App *app);
 void app_toggle_inspected_lane_mute(App *app);
+void app_cycle_inspected_lane_palette(App *app, int direction);
 BpmSource app_bpm_source(const App *app);
 const char *app_bpm_source_label(const App *app);
 bool app_get_active_tempo_params(const App *app, TempoLockParams *params);

@@ -57,7 +57,7 @@ cmake --build build
 - Future file-dialog results should call `load_clip_from_path()` directly.
 
 ## Loop Capture / Timeline
-- `L2 + R2 + South` captures the current loop into the roster as an owned in-memory PCM clip.
+- In normal waveform mode, `L2 + R2 + South` captures the current loop into the roster as an owned in-memory PCM clip.
 - Captured clips are in-memory only; they retain source path, source loop frames, copied PCM, color, source BPM, meter, target bars/beats, and downbeat offset.
 - The first captured clip initializes the master timeline BPM/meter from that clip and creates one timeline instance at tick `0` in lane 1.
 - Later captures add roster entries only for now.
@@ -69,6 +69,9 @@ cmake --build build
 - Lane mute is exposed only through the one-lane Lane Inspector; there is no solo and no lane mixer UI.
 - The master output monitor shows peak level and a `CLIP` flash/count when output exceeds the safe range.
 - The Lane Inspector analyzer is an isolated 64-bar post-lane spectrum view fed by a fixed 1024-sample active-lane snapshot.
+- Timeline context menus are vertical stacks navigated with Up/Down; South/Enter applies and East/Escape backs out.
+- Ruler/track context menus can insert one bar before the cursor's current bar, stopping transport first and shifting later instances.
+- Roster context menus can export WAVs or delete roster clips with confirmation; deleting a roster clip also removes its timeline instances and compacts references.
 - Captures fail cleanly with status text for a full roster, very short loops, oversized clips, or memory allocation failure.
 - Timeline playback is separate from waveform loop playback: switching to timeline view stops waveform playback and waits silently.
 - Timeline focus zones are `TRANSPORT`, `RULER`, `LANE INDEX`, `PLAY RANGE`, `TRACK AREA`, and `ROSTER`.
@@ -86,15 +89,18 @@ cmake --build build
 - If natural PCM duration and instance tick duration disagree, playback stops at the earlier of audio end or instance end.
 - Metronome enable/disable is global, but waveform mode follows waveform/transport tempo and timeline mode follows master timeline tempo.
 - Timeline audio mixes as instance -> lane sum -> master sum -> output.
-- The audio callback avoids file IO and heap allocation; timeline/roster mutations are locked or rejected during timeline playback.
+- The audio callback avoids file IO and heap allocation; structural timeline/roster mutations stop transport/preview first, then mutate under the audio stream lock.
 
 ## Timeline Controls
 - Keyboard `Tab` / `Shift+Tab`: cycle focus forward/back.
 - Keyboard `Space`: play/pause timeline transport.
 - Keyboard `Enter`: activate focused zone.
 - Keyboard `Escape`: exit play-range adjustment, otherwise guarded quit.
-- Gamepad Start/Plus opens a context menu for the selected timeline instance.
-- In the instance context menu, South removes the selected instance and East/Start cancels.
+- Keyboard `C` or gamepad Start/Plus opens a focus-aware context menu.
+- Context menus are vertical lists: Up/Down changes the highlighted item, South/Enter applies it, and East/Escape backs out.
+- `RULER` and `TRACK AREA` menus include `Insert bar`, which inserts one full bar before the cursor's containing bar.
+- `TRACK AREA` menus include instance actions when an instance is selected.
+- `ROSTER` menus include `Export WAV` and confirmed `Delete roster clip`.
 - In timeline view, left stick pans horizontally and zooms vertically across focus zones; hold L2 for 3x faster viewport movement.
 - In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; `Shift+Left/Right` pans.
 - In `LANE INDEX`: `Up/Down` chooses lane `1..8`, and `Enter`/South opens the Lane Inspector for that lane.
@@ -112,7 +118,7 @@ cmake --build build
 - Gamepad bumpers: cycle focus.
 - Gamepad plain South: activate focused zone.
 - Gamepad plain East: back/cancel focused adjustment.
-- Gamepad plain Start/Plus: opens the selected instance context menu.
+- Gamepad plain Start/Plus: opens the focus-aware context menu.
 - Gamepad Back/Minus: metronome on/off.
 - Gamepad `R2 + South`: play/pause timeline.
 - Gamepad `R2 + East`: stop preview, stop timeline playback, and rewind to play range start.
@@ -123,10 +129,12 @@ cmake --build build
 
 ## Lane Inspector
 - Opens from timeline `LANE INDEX` focus with `Enter` or South.
-- Shows only `LANE N`, lane palette styling, mute, a post-lane analyzer, a compact peak meter, and a red `CLIP` column.
+- Shows only `LANE N`, lane palette styling/swatches, mute, compact peak/clip state, a post-lane analyzer, a compact peak meter, and a red `CLIP` column.
+- The analyzer sits to the right of a small lane data/settings column; the inspector remains one lane at a time.
 - The analyzer uses a small UI-thread FFT; the audio callback only writes fixed-size post-lane samples for the active inspected lane.
 - The view is visually exclusive: global sample/BPM/status/debug overlay text is hidden while the inspector is open.
 - `Return` or South toggles mute for the inspected lane.
+- Left/Right changes the inspected lane palette.
 - `Escape` or East returns to the timeline.
 - Gamepad `R2 + South/East/West/North` keeps timeline transport behavior while the inspector is open.
 - Muted lanes do not contribute to the master output and render dim/desaturated in the timeline.
@@ -136,13 +144,14 @@ cmake --build build
 - Normal mode cuts/auditions loops; Tempo Lock mode calibrates the selected loop against musical time.
 - `T` or gamepad `R2 + North`: enter Tempo Lock mode; `T` cancels while active.
 - While active, loop anchor editing is disabled.
-- `[` / `]` or d-pad left/right: adjust draft BPM; gamepad uses fine nudges with a slow hold-repeat.
+- `[` / `]` or d-pad left/right: adjust draft BPM; gamepad uses fine nudges with a slow hold-repeat, and `L2 + d-pad left/right` uses faster coarse nudges.
 - `,` / `.` or d-pad up/down: cycle target bars through `0.5`, `1`, `2`, `4`, `8`.
 - `B` / `V`, `N` / `Shift+N`, left stick, or bumpers: nudge downbeat anchor.
 - Gamepad `R2 + North`: snap downbeat anchor to the left loop marker while Tempo Lock is active.
 - Right stick: pan/zoom waveform view while calibrating.
 - `M`, gamepad North, or gamepad West: cycle meter among `3/4`, `4/4`, `6/8`.
 - `Return` or South: apply tempo lock.
+- Gamepad `L2 + R2 + South`: apply tempo lock and capture the calibrated loop to the roster.
 - `Escape`, `T`, or East: cancel without applying.
 - `Ctrl+T`, `U`, or `R2 + East`: clear/de-apply tempo lock.
 - Clearing keeps the chosen params retained; if anchors move afterward, retained params are marked stale but can still seed re-entry.
