@@ -109,6 +109,8 @@ typedef struct App {
     bool timeline_edit_place_with_pulse;
     int timeline_edit_original_lane;
     int64_t timeline_edit_original_start_tick;
+    int64_t timeline_edit_downbeat_tick;
+    size_t timeline_edit_source_start_frame;
     int timeline_edit_ghost_lane;
     int64_t timeline_edit_ghost_start_tick;
     int64_t timeline_edit_duration_ticks;

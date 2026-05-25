@@ -314,6 +314,9 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
 
                 const RosterClip *clip = &a->roster[instance->roster_clip_index];
                 if(!clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0) continue;
+                double source_start_frame = (double)instance->source_start_frame;
+                if(source_start_frame < 0.0) source_start_frame = 0.0;
+                if(source_start_frame >= (double)clip->frame_count) continue;
                 double canonical_elapsed_seconds = timeline_canonical_seconds_between_ticks(timeline, instance_start, a->timeline_playhead_tick);
                 double canonical_instance_seconds = timeline_canonical_seconds_between_ticks(timeline, instance_start, instance_end);
                 if(canonical_instance_seconds <= 0.0) continue;
@@ -321,16 +324,16 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
                 if(instance->timing == TIMELINE_INSTANCE_TAPE) {
                     double progress = canonical_elapsed_seconds / canonical_instance_seconds;
                     if(progress < 0.0 || progress >= 1.0) continue;
-                    source_frame = progress * (double)clip->frame_count;
+                    source_frame = source_start_frame + progress * ((double)clip->frame_count - source_start_frame);
                 } else {
-                    source_frame = canonical_elapsed_seconds * (double)clip->sample_rate;
+                    source_frame = source_start_frame + canonical_elapsed_seconds * (double)clip->sample_rate;
                 }
                 if(source_frame >= (double)clip->frame_count) continue;
                 double elapsed_seconds = canonical_elapsed_seconds / tape_speed;
                 double instance_duration_seconds = canonical_instance_seconds / tape_speed;
                 double source_duration_seconds = instance->timing == TIMELINE_INSTANCE_TAPE ?
                     instance_duration_seconds :
-                    ((double)clip->frame_count / (double)clip->sample_rate) / tape_speed;
+                    (((double)clip->frame_count - source_start_frame) / (double)clip->sample_rate) / tape_speed;
                 double gain = timeline_declik_gain(elapsed_seconds, source_duration_seconds, instance_duration_seconds, a->spec.freq);
                 double range_elapsed_seconds = timeline_canonical_seconds_between_ticks(timeline, (double)range_start_tick, a->timeline_playhead_tick) / tape_speed;
                 double range_duration_seconds = timeline_canonical_seconds_between_ticks(timeline, (double)range_start_tick, (double)range_end_tick) / tape_speed;

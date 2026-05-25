@@ -480,6 +480,64 @@ static int64_t timeline_clip_duration_ticks(const App *app, int roster_clip_inde
     return beats_to_ticks(clip->target_beats, app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat : 960);
 }
 
+typedef struct {
+    int64_t start_tick;
+    int64_t duration_ticks;
+    int64_t downbeat_tick;
+    size_t source_start_frame;
+} TimelinePlacementSpan;
+
+static double roster_source_bpm(const RosterClip *clip) {
+    return clip && clip->source_bpm > 0.0 ? clip->source_bpm : 120.0;
+}
+
+static bool bpm_nearly_equal(double a, double b) {
+    return fabs(a - b) < 0.001;
+}
+
+static double roster_frames_to_ticks(const App *app, const RosterClip *clip, double frames) {
+    int ticks_per_beat = app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat : 960;
+    if (!clip || clip->sample_rate <= 0 || frames <= 0.0) return 0.0;
+    return frames * roster_source_bpm(clip) * (double)ticks_per_beat / ((double)clip->sample_rate * 60.0);
+}
+
+static double roster_ticks_to_frames(const App *app, const RosterClip *clip, double ticks) {
+    int ticks_per_beat = app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat : 960;
+    if (!clip || clip->sample_rate <= 0 || ticks <= 0.0) return 0.0;
+    return ticks * (double)clip->sample_rate * 60.0 / (roster_source_bpm(clip) * (double)ticks_per_beat);
+}
+
+static bool timeline_roster_placement_span(const App *app,
+                                           int roster_clip_index,
+                                           int64_t anchor_tick,
+                                           TimelinePlacementSpan *span) {
+    if (!app || !span || roster_clip_index < 0 || roster_clip_index >= app->roster_clip_count) return false;
+    const RosterClip *clip = &app->roster[roster_clip_index];
+    int64_t full_duration = timeline_clip_duration_ticks(app, roster_clip_index);
+    if (full_duration <= 0) return false;
+    if (anchor_tick < 0) anchor_tick = 0;
+
+    int64_t downbeat_offset_ticks = (int64_t)llround(roster_frames_to_ticks(app, clip, (double)clip->downbeat_offset_frames));
+    if (downbeat_offset_ticks < 0) downbeat_offset_ticks = 0;
+    if (downbeat_offset_ticks > full_duration) downbeat_offset_ticks = full_duration;
+
+    int64_t unclipped_start = anchor_tick - downbeat_offset_ticks;
+    int64_t clipped_ticks = unclipped_start < 0 ? -unclipped_start : 0;
+    span->start_tick = unclipped_start < 0 ? 0 : unclipped_start;
+    span->downbeat_tick = anchor_tick;
+    span->source_start_frame = 0;
+    if (clipped_ticks > 0) {
+        double source_frame = roster_ticks_to_frames(app, clip, (double)clipped_ticks);
+        if (source_frame < 0.0) source_frame = 0.0;
+        size_t frame = (size_t)llround(source_frame);
+        if (clip->frame_count > 0 && frame >= clip->frame_count) frame = clip->frame_count - 1;
+        span->source_start_frame = frame;
+    }
+    span->duration_ticks = full_duration - clipped_ticks;
+    if (span->duration_ticks < 1) span->duration_ticks = 1;
+    return true;
+}
+
 static int64_t timeline_snap_tick_down(const App *app, int64_t tick) {
     int64_t snap = timeline_snap_ticks(&app->timeline);
     if (snap <= 1) return tick < 0 ? 0 : tick;
@@ -538,9 +596,22 @@ static void timeline_update_ghost_valid(App *app) {
 
 static void timeline_clamp_ghost_start(App *app) {
     if (app->timeline_edit_ghost_start_tick < 0) app->timeline_edit_ghost_start_tick = 0;
-    if (app->timeline_edit_mode != TIMELINE_EDIT_PLACE_CLIP || app->timeline_edit_place_with_pulse) {
+    if (app->timeline_edit_mode != TIMELINE_EDIT_PLACE_CLIP) {
         app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline_edit_ghost_start_tick);
     }
+}
+
+static bool timeline_set_place_anchor(App *app, int64_t anchor_tick) {
+    if (!app || app->timeline_edit_mode != TIMELINE_EDIT_PLACE_CLIP) return false;
+    if (app->timeline_edit_place_with_pulse) anchor_tick = timeline_snap_tick_down(app, anchor_tick);
+    if (anchor_tick < 0) anchor_tick = 0;
+    TimelinePlacementSpan span;
+    if (!timeline_roster_placement_span(app, app->timeline_edit_roster_clip_index, anchor_tick, &span)) return false;
+    app->timeline_edit_ghost_start_tick = span.start_tick;
+    app->timeline_edit_duration_ticks = span.duration_ticks;
+    app->timeline_edit_downbeat_tick = span.downbeat_tick;
+    app->timeline_edit_source_start_frame = span.source_start_frame;
+    return true;
 }
 
 static void timeline_enter_move_instance(App *app) {
@@ -558,6 +629,8 @@ static void timeline_enter_move_instance(App *app) {
     app->timeline_edit_original_start_tick = instance->start_tick;
     app->timeline_edit_ghost_start_tick = instance->start_tick;
     app->timeline_edit_duration_ticks = instance->duration_ticks;
+    app->timeline_edit_downbeat_tick = instance->downbeat_tick;
+    app->timeline_edit_source_start_frame = instance->source_start_frame;
     timeline_update_ghost_valid(app);
     app_set_timeline_edit_status(app);
 }
@@ -584,11 +657,15 @@ static void timeline_enter_place_clip(App *app, bool with_pulse) {
     app->timeline_edit_original_lane = lane_index;
     app->timeline_edit_ghost_lane = lane_index;
     app->timeline_edit_original_start_tick = 0;
-    app->timeline_edit_ghost_start_tick = with_pulse ?
-        timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick) :
-        app->timeline.timeline_cursor_tick;
+    app->timeline_edit_ghost_start_tick = app->timeline.timeline_cursor_tick;
     app->timeline_edit_duration_ticks = duration;
-    timeline_clamp_ghost_start(app);
+    app->timeline_edit_downbeat_tick = app->timeline.timeline_cursor_tick;
+    app->timeline_edit_source_start_frame = 0;
+    if (!timeline_set_place_anchor(app, app->timeline.timeline_cursor_tick)) {
+        app->timeline_edit_mode = TIMELINE_EDIT_NONE;
+        app_set_status(app, "Invalid roster clip");
+        return;
+    }
     timeline_update_ghost_valid(app);
     if (app->timeline_edit_ghost_valid) app_set_timeline_edit_status(app);
     else app_set_status(app, "overlap blocked");
@@ -864,11 +941,20 @@ void app_capture_current_loop_to_roster(App *app) {
         app->timeline.timeline_beat_unit = next.beat_unit;
         app->timeline.ticks_per_beat = app->transport.ppqn > 0 ? app->transport.ppqn : 960;
         timeline_init_lanes(&app->timeline);
+        TimelinePlacementSpan first_span;
+        if (!timeline_roster_placement_span(app, roster_index, 0, &first_span)) {
+            first_span.start_tick = 0;
+            first_span.duration_ticks = beats_to_ticks(next.target_beats, app->timeline.ticks_per_beat);
+            first_span.downbeat_tick = 0;
+            first_span.source_start_frame = 0;
+        }
         TimelineLane *lane = &app->timeline.lanes[0];
         lane->instance_count = 1;
         lane->instances[0].roster_clip_index = roster_index;
-        lane->instances[0].start_tick = 0;
-        lane->instances[0].duration_ticks = beats_to_ticks(next.target_beats, app->timeline.ticks_per_beat);
+        lane->instances[0].start_tick = first_span.start_tick;
+        lane->instances[0].duration_ticks = first_span.duration_ticks;
+        lane->instances[0].source_start_frame = first_span.source_start_frame;
+        lane->instances[0].downbeat_tick = first_span.downbeat_tick;
         lane->instances[0].timing = TIMELINE_INSTANCE_FREE;
         lane->instances[0].midi_note = next.midi_note;
         lane->instances[0].midi_channel = next.midi_channel;
@@ -1088,8 +1174,12 @@ void app_timeline_nudge_edit_ghost(App *app, int direction) {
         step = app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat / 16 : 60;
         if (step < 1) step = 1;
     }
-    app->timeline_edit_ghost_start_tick += step * direction;
-    timeline_clamp_ghost_start(app);
+    if (app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP) {
+        timeline_set_place_anchor(app, app->timeline_edit_downbeat_tick + step * direction);
+    } else {
+        app->timeline_edit_ghost_start_tick += step * direction;
+        timeline_clamp_ghost_start(app);
+    }
     timeline_update_ghost_valid(app);
     if (!app->timeline_edit_ghost_valid) app_set_status(app, "overlap blocked");
     else app_set_timeline_edit_status(app);
@@ -1158,22 +1248,31 @@ static void app_timeline_confirm_edit_mode(App *app) {
     int64_t pulse_end = pulse_start + app->timeline_edit_duration_ticks;
     double pulse_restore_bpm = 120.0;
     double pulse_source_bpm = 120.0;
+    bool pulse_needs_tempo_events = false;
     if (pulse_placement) {
-        if (!app_tempo_map_edit_allowed(app)) return;
-        if (timeline_has_tempo_event_strictly_between(&app->timeline, pulse_start, pulse_end)) {
+        if (app->timeline_edit_roster_clip_index >= 0 &&
+            app->timeline_edit_roster_clip_index < app->roster_clip_count) {
+            pulse_source_bpm = app->roster[app->timeline_edit_roster_clip_index].source_bpm;
+        }
+        double pulse_start_bpm = timeline_bpm_at_tick(&app->timeline, (double)pulse_start);
+        bool pulse_has_interior_tempo = timeline_has_tempo_event_strictly_between(&app->timeline, pulse_start, pulse_end);
+        pulse_restore_bpm = timeline_bpm_at_tick(&app->timeline, (double)pulse_end);
+        pulse_needs_tempo_events = pulse_has_interior_tempo || !bpm_nearly_equal(pulse_source_bpm, pulse_start_bpm);
+        if (pulse_has_interior_tempo) {
             app_set_status(app, "Tempo marker inside span");
             return;
         }
+        if (!pulse_needs_tempo_events) {
+            pulse_placement = false;
+        }
+    }
+    if (pulse_needs_tempo_events) {
+        if (!app_tempo_map_edit_allowed(app)) return;
         int needed = timeline_tempo_event_new_slot_count(&app->timeline, pulse_start, pulse_end);
         if (app->timeline.tempo_event_count + needed > TIMELINE_MAX_TEMPO_EVENTS) {
             app_set_status(app, "Tempo map full");
             return;
         }
-        if (app->timeline_edit_roster_clip_index >= 0 &&
-            app->timeline_edit_roster_clip_index < app->roster_clip_count) {
-            pulse_source_bpm = app->roster[app->timeline_edit_roster_clip_index].source_bpm;
-        }
-        pulse_restore_bpm = timeline_bpm_at_tick(&app->timeline, (double)pulse_end);
     }
 
     if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
@@ -1186,7 +1285,9 @@ static void app_timeline_confirm_edit_mode(App *app) {
             return;
         }
         TimelineInstance moved = *instance;
+        int64_t move_delta = app->timeline_edit_ghost_start_tick - instance->start_tick;
         moved.start_tick = app->timeline_edit_ghost_start_tick;
+        moved.downbeat_tick += move_delta;
         app->timeline.timeline_cursor_tick = app->timeline_edit_ghost_start_tick;
         if (app->timeline_edit_ghost_lane == app->timeline_edit_instance.lane_index) {
             *instance = moved;
@@ -1237,11 +1338,13 @@ static void app_timeline_confirm_edit_mode(App *app) {
         instance->roster_clip_index = app->timeline_edit_roster_clip_index;
         instance->start_tick = app->timeline_edit_ghost_start_tick;
         instance->duration_ticks = app->timeline_edit_duration_ticks;
+        instance->source_start_frame = app->timeline_edit_source_start_frame;
+        instance->downbeat_tick = app->timeline_edit_downbeat_tick;
         instance->timing = TIMELINE_INSTANCE_FREE;
         instance->midi_note = clip->midi_note;
         instance->midi_channel = clip->midi_channel;
         instance->midi_velocity = clip->midi_velocity;
-        if (pulse_placement) {
+        if (pulse_needs_tempo_events) {
             bool tempo_ok = timeline_set_tempo_event(&app->timeline, pulse_start, pulse_source_bpm, true) &&
                             timeline_set_tempo_event(&app->timeline, pulse_end, pulse_restore_bpm, true);
             if (!tempo_ok) {
@@ -1251,7 +1354,7 @@ static void app_timeline_confirm_edit_mode(App *app) {
                 return;
             }
         }
-        app->timeline.timeline_cursor_tick = app->timeline_edit_ghost_start_tick;
+        app->timeline.timeline_cursor_tick = app->timeline_edit_downbeat_tick;
         app->selected_timeline_lane = app->timeline_edit_ghost_lane;
         app->selected_timeline_instance = (TimelineInstanceRef){ app->timeline_edit_ghost_lane, index };
         recompute_timeline_length_no_lock(app);
@@ -1259,7 +1362,11 @@ static void app_timeline_confirm_edit_mode(App *app) {
         if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
         sync_transport_from_app(app);
         app->timeline_edit_mode = TIMELINE_EDIT_NONE;
-        app_set_status(app, pulse_placement ? "Placed with pulse" : "Clip placed free");
+        if (app->timeline_edit_place_with_pulse) {
+            app_set_status(app, pulse_needs_tempo_events ? "Placed with pulse" : "Placed; pulse already matched");
+        } else {
+            app_set_status(app, "Clip placed free");
+        }
     }
 }
 
@@ -1277,6 +1384,8 @@ static void app_timeline_cancel_edit_mode(App *app) {
     app->timeline_edit_roster_clip_index = -1;
     app->timeline_edit_place_with_pulse = false;
     app->timeline_edit_ghost_lane = 0;
+    app->timeline_edit_downbeat_tick = 0;
+    app->timeline_edit_source_start_frame = 0;
     app->timeline_edit_ghost_valid = false;
 }
 
@@ -1650,7 +1759,10 @@ void app_timeline_insert_bar_at_cursor(App *app) {
         TimelineLane *lane = &app->timeline.lanes[lane_index];
         for (int i = 0; i < lane->instance_count; ++i) {
             TimelineInstance *instance = &lane->instances[i];
-            if (instance->start_tick >= insertion_tick) instance->start_tick += bar_ticks;
+            if (instance->start_tick >= insertion_tick) {
+                instance->start_tick += bar_ticks;
+                instance->downbeat_tick += bar_ticks;
+            }
         }
     }
     timeline_shift_tempo_events(&app->timeline, insertion_tick, bar_ticks);
@@ -2475,6 +2587,8 @@ static void app_render_timeline(App *app) {
     if (track_h < 220.0f) track_h = 220.0f;
     if (track_h > 390.0f) track_h = 390.0f;
     float lane_h = track_h / (float)TIMELINE_MAX_LANES;
+    SDL_FRect roster_panel = { roster_x, 132.0f, roster_w, (float)h - 162.0f };
+    bool roster_panel_visible = roster_x + roster_w < (float)w && roster_panel.h > 120.0f;
     SDL_FRect transport_rect = { 24.0f, 132.0f, timeline_w + 32.0f, 72.0f };
     SDL_FRect ruler_rect = { timeline_x, timeline_y - 58.0f, timeline_w, 42.0f };
     SDL_FRect play_range_rect = { timeline_x, timeline_y - 12.0f, timeline_w, 18.0f };
@@ -2718,6 +2832,17 @@ static void app_render_timeline(App *app) {
             char label[APP_ROSTER_CLIP_NAME_MAX + 16];
             SDL_snprintf(label, sizeof(label), "%s v%d", clip->name, instance->midi_velocity);
             render_timeline_block(app, block, clip->color, lane_color, label, style, lane->muted);
+            double downbeat_tick = (double)instance->downbeat_tick;
+            if (downbeat_tick >= view_start && downbeat_tick <= view_end &&
+                downbeat_tick >= instance_start && downbeat_tick <= instance_end) {
+                float downbeat_x = timeline_x_for_tick(downbeat_tick, view_start, view_span, timeline_x, timeline_w);
+                if (downbeat_x >= block.x && downbeat_x <= block.x + block.w) {
+                    SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, lane->muted ? 140 : 230);
+                    SDL_RenderLine(app->renderer, downbeat_x, block.y + 2.0f, downbeat_x, block.y + block.h - 2.0f);
+                    SDL_FRect bead = { downbeat_x - 3.0f, block.y + 2.0f, 6.0f, 5.0f };
+                    SDL_RenderFillRect(app->renderer, &bead);
+                }
+            }
         }
     }
 
@@ -2757,6 +2882,21 @@ static void app_render_timeline(App *app) {
                                   ghost_label,
                                   app->timeline_edit_ghost_valid ? TIMELINE_BLOCK_GHOST_VALID : TIMELINE_BLOCK_GHOST_INVALID,
                                   ghost_timeline_lane->muted);
+            int64_t ghost_downbeat_tick = app->timeline_edit_downbeat_tick;
+            if (app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE) {
+                ghost_downbeat_tick += app->timeline_edit_ghost_start_tick - app->timeline_edit_original_start_tick;
+            }
+            if ((double)ghost_downbeat_tick >= view_start && (double)ghost_downbeat_tick <= view_end &&
+                ghost_downbeat_tick >= app->timeline_edit_ghost_start_tick &&
+                ghost_downbeat_tick <= app->timeline_edit_ghost_start_tick + app->timeline_edit_duration_ticks) {
+                float downbeat_x = timeline_x_for_tick((double)ghost_downbeat_tick, view_start, view_span, timeline_x, timeline_w);
+                if (downbeat_x >= ghost.x && downbeat_x <= ghost.x + ghost.w) {
+                    SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, 235);
+                    SDL_RenderLine(app->renderer, downbeat_x, ghost.y + 2.0f, downbeat_x, ghost.y + ghost.h - 2.0f);
+                    SDL_FRect bead = { downbeat_x - 3.0f, ghost.y + 2.0f, 6.0f, 5.0f };
+                    SDL_RenderFillRect(app->renderer, &bead);
+                }
+            }
         }
     }
 
@@ -2771,8 +2911,7 @@ static void app_render_timeline(App *app) {
     render_focus_outline(app, play_range_rect, TIMELINE_FOCUS_PLAY_RANGE);
     render_focus_outline(app, track_rect, TIMELINE_FOCUS_TRACK_AREA);
 
-    if (roster_x + roster_w < (float)w) {
-        SDL_FRect roster_panel = { roster_x, 132.0f, roster_w, (float)h - 162.0f };
+    if (roster_panel_visible) {
         SDL_SetRenderDrawColor(app->renderer, 14, 15, 22, 220);
         SDL_RenderFillRect(app->renderer, &roster_panel);
         SDL_SetRenderDrawColor(app->renderer, 80, 90, 110, 255);
@@ -2828,13 +2967,23 @@ static void app_render_timeline(App *app) {
         }
         float menu_w = app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE ? 384.0f : 320.0f;
         float warning_h = app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE ? 34.0f : 0.0f;
+        bool roster_menu = (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_ROSTER ||
+                            app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE) &&
+                           roster_panel_visible;
         SDL_FRect menu = {
-            (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_ROSTER ||
-             app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE) ? roster_x + 6.0f : timeline_x + 18.0f,
+            roster_menu ? roster_panel.x : timeline_x + 18.0f,
             timeline_y + track_h + 42.0f,
-            menu_w,
-            58.0f + warning_h + (float)item_count * 22.0f
+            roster_menu ? roster_panel.w : menu_w,
+            roster_menu ? roster_panel.h : 58.0f + warning_h + (float)item_count * 22.0f
         };
+        if (roster_menu) {
+            menu.y = roster_panel.y;
+        } else {
+            if (menu.x + menu.w > (float)w - 12.0f) menu.x = (float)w - menu.w - 12.0f;
+            if (menu.y + menu.h > (float)h - 12.0f) menu.y = (float)h - menu.h - 12.0f;
+            if (menu.x < 8.0f) menu.x = 8.0f;
+            if (menu.y < 8.0f) menu.y = 8.0f;
+        }
         SDL_SetRenderDrawColor(app->renderer, 12, 13, 20, 238);
         SDL_RenderFillRect(app->renderer, &menu);
         SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
@@ -3356,6 +3505,8 @@ bool app_init(App *app){
     app->timeline_edit_instance = timeline_instance_ref_invalid();
     app->timeline_edit_place_with_pulse = false;
     app->timeline_edit_original_lane = 0;
+    app->timeline_edit_downbeat_tick = 0;
+    app->timeline_edit_source_start_frame = 0;
     app->timeline_edit_ghost_lane = 0;
     app->selected_roster_clip = -1;
     app->selected_roster_clip_armed = false;

@@ -49,6 +49,10 @@ typedef struct {
     int roster_clip_index;
     int64_t start_tick;
     int64_t duration_ticks;
+    /* First source frame rendered by this instance; non-zero when pickup audio is clipped at tick 0. */
+    size_t source_start_frame;
+    /* Musical downbeat anchor on the canonical timeline, which may fall after start_tick for pickups. */
+    int64_t downbeat_tick;
     TimelineInstanceTiming timing;
     int midi_note;
     int midi_channel;
