@@ -64,6 +64,7 @@ cmake --build build
 - Timeline has 8 fixed lanes. Each lane owns fixed-capacity timeline instances.
 - Timeline instances use musical ticks internally: `roster_clip_index`, `start_tick`, `duration_ticks`, MIDI-friendly note/channel, and velocity.
 - Timeline owns a fixed-capacity tempo map with an anchored event at tick `0` and beat-snapped tempo changes.
+- Nonzero tempo events act as structural ruler seams; the timeline cursor/edit ghost can sit on the before or after side of the same seam tick.
 - Same-lane instance overlap is blocked; different-lane overlap is allowed and mixed together.
 - Instance velocity is `1..127`, defaults to `100`, and uses a simple perceptual gain curve: `(velocity / 127)^1.5`.
 - Lanes are abstract numbered rows `1..8` with fixed palette identities; there are no lane names or roles.
@@ -73,12 +74,12 @@ cmake --build build
 - Timeline context menus are vertical stacks navigated with Up/Down; South/Enter applies and East/Escape backs out.
 - Ruler context menus can mark/remove beat-snapped tempo events; tick `0` is anchored and cannot be removed.
 - Ruler/track context menus can insert one bar before the cursor's current bar, stopping transport first and shifting later instances and later tempo events.
-- Roster context menus can export WAVs or delete roster clips with confirmation; deleting a roster clip also removes its timeline instances and compacts references.
+- Roster context menus can place clips freely, place clips with source pulse metadata, insert clips with source pulse metadata, export WAVs, or delete roster clips with confirmation; deleting a roster clip also removes its timeline instances and compacts references.
 - Captures fail cleanly with status text for a full roster, very short loops, oversized clips, or memory allocation failure.
 - Timeline playback is separate from waveform loop playback: switching to timeline view stops waveform playback and waits silently.
 - Timeline focus zones are `TRANSPORT`, `RULER`, `LANE INDEX`, `PLAY RANGE`, `TRACK AREA`, and `ROSTER`.
 - `Tab` / `Shift+Tab` cycle timeline focus. Gamepad bumpers cycle focus in timeline view.
-- Timeline cursor movement snaps to one beat by default and clamps to the timeline length.
+- Timeline cursor movement snaps to one beat by default, clamps to the timeline length, and respects tempo seams as two-step before/after barriers.
 - Timeline beat/bar grid is drawn from timeline ticks and meter; bar lines are stronger than beat lines, and tempo event BPM labels render in the ruler.
 - Timeline playback and metronome timing follow the tempo map; downbeat accents follow the master timeline grid, not play range starts or source clip anchors.
 - Play range defaults to the full timeline. `PLAY RANGE` focus can adjust start/end handles on the beat grid or reset to full timeline.
@@ -103,20 +104,21 @@ cmake --build build
 - `RULER` menus include `Mark tempo` and, when the cursor is on a removable tempo event, `Remove tempo`.
 - `RULER` and `TRACK AREA` menus include `Insert bar`, which inserts one full bar before the cursor's containing bar.
 - `TRACK AREA` menus include instance actions when an instance is selected.
-- `ROSTER` menus include `Export WAV` and confirmed `Delete roster clip`.
+- `ROSTER` menus include `Place free`, `Place pulse`, `Insert pulse`, `Export WAV`, and confirmed `Delete roster clip`.
 - In timeline view, left stick pans horizontally and zooms vertically across focus zones; hold L2 for 3x faster viewport movement.
-- In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; `Shift+Left/Right` pans.
+- In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; tempo seams take two presses to cross; `Shift+Left/Right` pans.
 - In `RULER`, `[` / `]` adjusts the tempo event at the cursor by `0.5` BPM.
 - In `RULER`, gamepad `R2 + d-pad up/down` adjusts the tempo event at the cursor by `1.0` BPM, and `R2 + d-pad left/right` adjusts by `0.1` BPM.
 - In `LANE INDEX`: `Up/Down` chooses lane `1..8`, and `Enter`/South opens the Lane Inspector for that lane.
 - In `PLAY RANGE`: `Enter` enters adjustment, `1` selects start handle, `2` selects end handle, `Left/Right` nudges the selected handle, `R` resets to full timeline; armed handles render with a padded outline and the timeline view keeps both anchors visible while adjusting.
 - In `TRACK AREA`: `Up/Down` moves the lane cursor, and `Enter`/South selects the instance under the cursor in that lane; pressing it again enters `MOVE INSTANCE`.
 - In `TRACK AREA`, gamepad `L2 + left stick X` glides the cursor horizontally with hold acceleration.
-- In `RULER` or `TRACK AREA`, gamepad `L2 + d-pad left/right` moves the cursor by one bar.
+- In `RULER` or `TRACK AREA`, gamepad `L2 + d-pad left/right` or `R2 + d-pad left/right` moves the cursor by one bar and may skip tempo seam barriers.
 - In `TRACK AREA`, `[` / `]` decreases/increases selected instance velocity. Gamepad `L2 + d-pad up/down` also adjusts velocity.
 - In `MOVE INSTANCE`: d-pad or arrow left/right moves a lifted ghost by snap units, d-pad or arrow up/down moves it between lanes, South/Enter confirms, East/Escape cancels and keeps the original lane/start tick.
 - In `ROSTER`: `Up/Down` selects a roster row; South/Enter arms it, and pressing again enters `PLACE CLIP` at the snapped cursor.
-- In `PLACE CLIP`: d-pad or arrow left/right moves a lifted ghost by snap units, d-pad or arrow up/down chooses lane 1..8, South/Enter confirms, East/Escape cancels.
+- In `PLACE CLIP`: d-pad or arrow left/right moves a lifted ghost by snap units and respects tempo seams, d-pad or arrow up/down chooses lane 1..8, South/Enter confirms, East/Escape cancels.
+- `Place free` does not alter ruler tempo. `Place pulse` writes/conforms a tempo event at the placement tick from the roster clip source BPM. `Insert pulse` shifts later timeline material and later tempo events before placing the source pulse.
 - Moving shows the original instance as a dim origin block until the ghost is dropped.
 - Armed roster rows, selected instances, valid ghosts, and invalid overlap ghosts use distinct depth-ready 2D cues.
 - Timeline move/place drops reject same-lane overlaps with status text and do not commit. Cross-lane overlaps are allowed.
@@ -183,7 +185,7 @@ cmake --build build
 - In timeline lane-index focus: d-pad up/down chooses a lane, South opens Lane Inspector
 - In Lane Inspector: South toggles mute, East returns to timeline, R2+face buttons control timeline transport
 - In timeline move/place: d-pad left/right moves by snap units and d-pad up/down chooses lane
-- In timeline track focus: L2 + left stick X glides the cursor, L2 + d-pad left/right moves by bar, and L2 + d-pad up/down adjusts selected instance velocity
+- In timeline track focus: L2 + left stick X glides the cursor, L2/R2 + d-pad left/right moves by bar, and L2 + d-pad up/down adjusts selected instance velocity
 - In timeline roster focus: right stick click previews the selected roster clip
 
 ## Known limitations

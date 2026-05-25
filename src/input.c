@@ -568,11 +568,11 @@ void input_update_gamepad(App *app, double dt){
 
         if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER || app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA) {
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
-                if(l2_shift) app_timeline_move_cursor_by_bar(app, -1);
+                if(l2_shift || r2_shift) app_timeline_move_cursor_by_bar(app, -1);
                 else app_timeline_move_cursor(app, -1);
             }
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
-                if(l2_shift) app_timeline_move_cursor_by_bar(app, 1);
+                if(l2_shift || r2_shift) app_timeline_move_cursor_by_bar(app, 1);
                 else app_timeline_move_cursor(app, 1);
             }
             if(app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA) {

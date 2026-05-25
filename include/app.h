@@ -36,6 +36,12 @@ typedef enum {
 } TimelineEditMode;
 
 typedef enum {
+    TIMELINE_PLACE_FREE,
+    TIMELINE_PLACE_PULSE,
+    TIMELINE_INSERT_PULSE
+} TimelinePlacementMode;
+
+typedef enum {
     TIMELINE_CONTEXT_SCOPE_NONE,
     TIMELINE_CONTEXT_SCOPE_TIMELINE,
     TIMELINE_CONTEXT_SCOPE_INSTANCE,
@@ -48,6 +54,9 @@ typedef enum {
     TIMELINE_CONTEXT_ITEM_MARK_TEMPO,
     TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO,
     TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE,
+    TIMELINE_CONTEXT_ITEM_PLACE_FREE,
+    TIMELINE_CONTEXT_ITEM_PLACE_PULSE,
+    TIMELINE_CONTEXT_ITEM_INSERT_PULSE,
     TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER,
     TIMELINE_CONTEXT_ITEM_DELETE_ROSTER,
     TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_ROSTER,
@@ -100,12 +109,15 @@ typedef struct App {
     int timeline_context_menu_roster_index;
     int64_t timeline_context_menu_tick;
     TimelineEditMode timeline_edit_mode;
+    TimelinePlacementMode timeline_edit_placement_mode;
     TimelineInstanceRef timeline_edit_instance;
     int timeline_edit_roster_clip_index;
     int timeline_edit_original_lane;
     int64_t timeline_edit_original_start_tick;
+    TimelineSeamSide timeline_edit_original_seam_side;
     int timeline_edit_ghost_lane;
     int64_t timeline_edit_ghost_start_tick;
+    TimelineSeamSide timeline_edit_ghost_seam_side;
     int64_t timeline_edit_duration_ticks;
     bool timeline_edit_ghost_valid;
     int selected_roster_clip;

@@ -296,14 +296,26 @@ static const char *timeline_edit_clip_name(const App *app) {
     return "clip";
 }
 
+static const char *timeline_placement_verb_label(TimelinePlacementMode mode) {
+    switch (mode) {
+        case TIMELINE_PLACE_PULSE: return "PLACING PULSE";
+        case TIMELINE_INSERT_PULSE: return "INSERTING PULSE";
+        case TIMELINE_PLACE_FREE:
+        default: return "PLACING";
+    }
+}
+
 static void app_set_timeline_edit_status(App *app) {
     if (app->timeline_edit_mode == TIMELINE_EDIT_NONE) return;
+    const char *verb = app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP ?
+        timeline_placement_verb_label(app->timeline_edit_placement_mode) :
+        timeline_edit_verb_label(app->timeline_edit_mode);
     SDL_snprintf(app->status_text, sizeof(app->status_text), "%s %s",
-                 timeline_edit_verb_label(app->timeline_edit_mode),
+                 verb,
                  timeline_edit_clip_name(app));
 }
 
-#define TIMELINE_CONTEXT_MAX_ITEMS 4
+#define TIMELINE_CONTEXT_MAX_ITEMS 8
 
 static void app_timeline_clear_context_menu(App *app) {
     app->timeline_context_menu_open = false;
@@ -368,6 +380,95 @@ static bool timeline_set_tempo_event_no_lock(MasterTimeline *timeline, int64_t t
     return true;
 }
 
+static bool timeline_tick_is_navigation_seam(const MasterTimeline *timeline, int64_t tick) {
+    return timeline && tick > 0 && timeline_tempo_event_index_at_tick(timeline, tick) > 0;
+}
+
+static const char *timeline_seam_side_label(TimelineSeamSide side) {
+    switch (side) {
+        case TIMELINE_SEAM_BEFORE: return "before seam";
+        case TIMELINE_SEAM_AFTER: return "after seam";
+        case TIMELINE_SEAM_NONE:
+        default: return "";
+    }
+}
+
+static const char *timeline_seam_side_short_label(TimelineSeamSide side) {
+    switch (side) {
+        case TIMELINE_SEAM_BEFORE: return "<";
+        case TIMELINE_SEAM_AFTER: return ">";
+        case TIMELINE_SEAM_NONE:
+        default: return "";
+    }
+}
+
+static TimelineSeamSide timeline_default_seam_side_for_tick(const MasterTimeline *timeline, int64_t tick) {
+    return timeline_tick_is_navigation_seam(timeline, tick) ? TIMELINE_SEAM_AFTER : TIMELINE_SEAM_NONE;
+}
+
+static void timeline_normalize_cursor_seam_side_no_lock(App *app) {
+    if (!app) return;
+    if (timeline_tick_is_navigation_seam(&app->timeline, app->timeline.timeline_cursor_tick)) {
+        if (app->timeline.timeline_cursor_seam_side != TIMELINE_SEAM_BEFORE &&
+            app->timeline.timeline_cursor_seam_side != TIMELINE_SEAM_AFTER) {
+            app->timeline.timeline_cursor_seam_side = TIMELINE_SEAM_AFTER;
+        }
+    } else {
+        app->timeline.timeline_cursor_seam_side = TIMELINE_SEAM_NONE;
+    }
+}
+
+static void timeline_normalize_ghost_seam_side(App *app) {
+    if (!app) return;
+    if (timeline_tick_is_navigation_seam(&app->timeline, app->timeline_edit_ghost_start_tick)) {
+        if (app->timeline_edit_ghost_seam_side != TIMELINE_SEAM_BEFORE &&
+            app->timeline_edit_ghost_seam_side != TIMELINE_SEAM_AFTER) {
+            app->timeline_edit_ghost_seam_side = TIMELINE_SEAM_AFTER;
+        }
+    } else {
+        app->timeline_edit_ghost_seam_side = TIMELINE_SEAM_NONE;
+    }
+}
+
+static void timeline_nudge_tick_with_seams(const MasterTimeline *timeline,
+                                           int64_t *tick,
+                                           TimelineSeamSide *side,
+                                           int direction,
+                                           int64_t step_ticks,
+                                           bool respect_seams) {
+    if (!timeline || !tick || !side || direction == 0) return;
+    int64_t length = timeline->length_ticks > 0 ? timeline->length_ticks : 0;
+    if (step_ticks < 1) step_ticks = 1;
+
+    /*
+     * Tempo seams are edit-intent barriers, not alternate tick values.
+     * The first grid press parks the cursor on the near side of the seam;
+     * the next press crosses to the far side at the same tick. Larger hops
+     * can opt out and land directly on the far side.
+     */
+    if (respect_seams && timeline_tick_is_navigation_seam(timeline, *tick)) {
+        if (direction > 0 && *side == TIMELINE_SEAM_BEFORE) {
+            *side = TIMELINE_SEAM_AFTER;
+            return;
+        }
+        if (direction < 0 && *side == TIMELINE_SEAM_AFTER) {
+            *side = TIMELINE_SEAM_BEFORE;
+            return;
+        }
+    }
+
+    int64_t next = *tick + step_ticks * (direction > 0 ? 1 : -1);
+    next = clamp_i64(next, 0, length);
+    *tick = next;
+    if (timeline_tick_is_navigation_seam(timeline, next)) {
+        *side = respect_seams ?
+            (direction > 0 ? TIMELINE_SEAM_BEFORE : TIMELINE_SEAM_AFTER) :
+            (direction > 0 ? TIMELINE_SEAM_AFTER : TIMELINE_SEAM_BEFORE);
+    } else {
+        *side = TIMELINE_SEAM_NONE;
+    }
+}
+
 static int64_t timeline_context_snapped_tick(const App *app) {
     int64_t tick = app->timeline_context_menu_open ?
         app->timeline_context_menu_tick : app->timeline.timeline_cursor_tick;
@@ -412,6 +513,9 @@ static int timeline_context_menu_items(const App *app,
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
         case TIMELINE_CONTEXT_SCOPE_ROSTER:
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_FREE;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_PULSE;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_INSERT_PULSE;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_DELETE_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
@@ -444,6 +548,9 @@ static const char *timeline_context_item_label(TimelineContextMenuItem item) {
         case TIMELINE_CONTEXT_ITEM_MARK_TEMPO: return "Mark tempo";
         case TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO: return "Remove tempo";
         case TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE: return "Remove instance";
+        case TIMELINE_CONTEXT_ITEM_PLACE_FREE: return "Place free";
+        case TIMELINE_CONTEXT_ITEM_PLACE_PULSE: return "Place pulse";
+        case TIMELINE_CONTEXT_ITEM_INSERT_PULSE: return "Insert pulse";
         case TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER: return "Export WAV";
         case TIMELINE_CONTEXT_ITEM_DELETE_ROSTER: return "Delete roster clip";
         case TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_ROSTER: return "Delete clip and instances";
@@ -484,6 +591,7 @@ static void sync_timeline_play_range_no_lock(App *app) {
         timeline->play_range_start_tick = 0;
         timeline->play_range_end_tick = 0;
         timeline->timeline_cursor_tick = 0;
+        timeline->timeline_cursor_seam_side = TIMELINE_SEAM_NONE;
         timeline->playhead_tick = 0;
         return;
     }
@@ -504,6 +612,7 @@ static void sync_timeline_play_range_no_lock(App *app) {
     }
 
     timeline->timeline_cursor_tick = clamp_i64(timeline->timeline_cursor_tick, 0, length);
+    timeline_normalize_cursor_seam_side_no_lock(app);
     timeline->playhead_tick = clamp_i64(timeline->playhead_tick, 0, length);
 }
 
@@ -577,7 +686,8 @@ static bool timeline_range_overlaps_existing(const App *app,
                                              int lane_index,
                                              int64_t start,
                                              int64_t duration,
-                                             TimelineInstanceRef ignore_instance) {
+                                             TimelineInstanceRef ignore_instance,
+                                             bool insertion_shifts_later) {
     if (duration <= 0) return true;
     int64_t end = start + duration;
     if (start < 0 || end <= start) return true;
@@ -589,6 +699,7 @@ static bool timeline_range_overlaps_existing(const App *app,
         if (timeline_instance_ref_equal(ref, ignore_instance)) continue;
         const TimelineInstance *instance = &lane->instances[i];
         if (instance->duration_ticks <= 0) continue;
+        if (insertion_shifts_later && instance->start_tick >= start) continue;
         int64_t other_start = instance->start_tick;
         int64_t other_end = instance->start_tick + instance->duration_ticks;
         if (start < other_end && end > other_start) return true;
@@ -611,11 +722,14 @@ static bool timeline_ghost_is_valid(const App *app) {
     }
     TimelineInstanceRef ignore = app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE ?
         app->timeline_edit_instance : timeline_instance_ref_invalid();
+    bool insertion_shifts_later = app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP &&
+                                  app->timeline_edit_placement_mode == TIMELINE_INSERT_PULSE;
     return !timeline_range_overlaps_existing(app,
                                              app->timeline_edit_ghost_lane,
                                              app->timeline_edit_ghost_start_tick,
                                              app->timeline_edit_duration_ticks,
-                                             ignore);
+                                             ignore,
+                                             insertion_shifts_later);
 }
 
 static void timeline_update_ghost_valid(App *app) {
@@ -625,6 +739,105 @@ static void timeline_update_ghost_valid(App *app) {
 static void timeline_clamp_ghost_start(App *app) {
     if (app->timeline_edit_ghost_start_tick < 0) app->timeline_edit_ghost_start_tick = 0;
     app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline_edit_ghost_start_tick);
+    timeline_normalize_ghost_seam_side(app);
+}
+
+static double timeline_roster_clip_source_bpm(const App *app, int roster_clip_index) {
+    if (!app || roster_clip_index < 0 || roster_clip_index >= app->roster_clip_count) {
+        return timeline_base_bpm(app ? &app->timeline : NULL);
+    }
+    return timeline_clamp_bpm(app->roster[roster_clip_index].source_bpm);
+}
+
+static void timeline_shift_instances_starting_at_no_lock(MasterTimeline *timeline,
+                                                         int64_t insertion_tick,
+                                                         int64_t amount_ticks) {
+    if (!timeline || amount_ticks == 0) return;
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        TimelineLane *lane = &timeline->lanes[lane_index];
+        for (int i = 0; i < lane->instance_count; ++i) {
+            TimelineInstance *instance = &lane->instances[i];
+            if (instance->start_tick >= insertion_tick) instance->start_tick += amount_ticks;
+        }
+    }
+}
+
+static void timeline_shift_tempo_events_after_tick_no_lock(MasterTimeline *timeline,
+                                                           int64_t insertion_tick,
+                                                           int64_t amount_ticks,
+                                                           bool include_event_at_tick) {
+    if (!timeline || amount_ticks == 0) return;
+    int count = timeline_valid_tempo_event_count(timeline);
+    for (int i = 0; i < count; ++i) {
+        TimelineTempoEvent *event = &timeline->tempo_events[i];
+        if (event->tick <= 0) continue;
+        bool should_shift = include_event_at_tick ?
+            event->tick >= insertion_tick :
+            event->tick > insertion_tick;
+        if (should_shift) event->tick += amount_ticks;
+    }
+}
+
+static bool timeline_place_pulse_no_lock(App *app,
+                                         int64_t tick,
+                                         TimelineSeamSide side,
+                                         double bpm,
+                                         const char **error) {
+    if (!app) return false;
+    tick = timeline_snap_tick_down(app, tick);
+    int existing = timeline_tempo_event_index_at_tick(&app->timeline, tick);
+    if (existing > 0 && side == TIMELINE_SEAM_BEFORE) {
+        if (error) *error = "Use Insert pulse before seam";
+        return false;
+    }
+    if (existing < 0 && timeline_valid_tempo_event_count(&app->timeline) >= TIMELINE_MAX_TEMPO_EVENTS) {
+        if (error) *error = "Tempo map full";
+        return false;
+    }
+    if (!timeline_set_tempo_event_no_lock(&app->timeline, tick, bpm)) {
+        if (error) *error = "Tempo map full";
+        return false;
+    }
+    return true;
+}
+
+static bool timeline_insert_pulse_no_lock(App *app,
+                                          int64_t insertion_tick,
+                                          TimelineSeamSide side,
+                                          int64_t duration_ticks,
+                                          double bpm,
+                                          int64_t old_playhead,
+                                          int64_t *new_playhead,
+                                          const char **error) {
+    if (!app || duration_ticks <= 0) return false;
+    insertion_tick = timeline_snap_tick_down(app, insertion_tick);
+    MasterTimeline *timeline = &app->timeline;
+    int existing = timeline_tempo_event_index_at_tick(timeline, insertion_tick);
+    bool before_existing_seam = existing > 0 && side == TIMELINE_SEAM_BEFORE;
+    bool needs_new_event = existing < 0 || before_existing_seam;
+    if (needs_new_event && timeline_valid_tempo_event_count(timeline) >= TIMELINE_MAX_TEMPO_EVENTS) {
+        if (error) *error = "Tempo map full";
+        return false;
+    }
+
+    timeline_shift_instances_starting_at_no_lock(timeline, insertion_tick, duration_ticks);
+    timeline_shift_tempo_events_after_tick_no_lock(timeline,
+                                                   insertion_tick,
+                                                   duration_ticks,
+                                                   before_existing_seam);
+    if (!timeline_set_tempo_event_no_lock(timeline, insertion_tick, bpm)) {
+        if (error) *error = "Tempo map full";
+        return false;
+    }
+
+    int64_t shifted_playhead = old_playhead >= insertion_tick ? old_playhead + duration_ticks : old_playhead;
+    timeline->playhead_tick = shifted_playhead;
+    if (new_playhead) *new_playhead = shifted_playhead;
+    if (timeline->play_range_custom) {
+        if (timeline->play_range_start_tick >= insertion_tick) timeline->play_range_start_tick += duration_ticks;
+        if (timeline->play_range_end_tick >= insertion_tick) timeline->play_range_end_tick += duration_ticks;
+    }
+    return true;
 }
 
 static void timeline_enter_move_instance(App *app) {
@@ -634,18 +847,26 @@ static void timeline_enter_move_instance(App *app) {
     }
     TimelineInstance *instance = timeline_instance_from_ref(&app->timeline, app->selected_timeline_instance);
     app->timeline_edit_mode = TIMELINE_EDIT_MOVE_INSTANCE;
+    app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
     app->timeline_edit_instance = app->selected_timeline_instance;
     app->timeline_edit_roster_clip_index = instance->roster_clip_index;
     app->timeline_edit_original_lane = app->selected_timeline_instance.lane_index;
     app->timeline_edit_ghost_lane = app->selected_timeline_instance.lane_index;
     app->timeline_edit_original_start_tick = instance->start_tick;
     app->timeline_edit_ghost_start_tick = instance->start_tick;
+    app->timeline_edit_original_seam_side = timeline_default_seam_side_for_tick(&app->timeline, instance->start_tick);
+    if (app->timeline.timeline_cursor_tick == instance->start_tick &&
+        app->timeline.timeline_cursor_seam_side != TIMELINE_SEAM_NONE) {
+        app->timeline_edit_original_seam_side = app->timeline.timeline_cursor_seam_side;
+    }
+    app->timeline_edit_ghost_seam_side = app->timeline_edit_original_seam_side;
     app->timeline_edit_duration_ticks = instance->duration_ticks;
+    timeline_clamp_ghost_start(app);
     timeline_update_ghost_valid(app);
     app_set_timeline_edit_status(app);
 }
 
-static void timeline_enter_place_clip(App *app) {
+static void timeline_enter_place_clip(App *app, TimelinePlacementMode placement_mode) {
     if (app->selected_roster_clip < 0 || app->selected_roster_clip >= app->roster_clip_count) {
         app_set_status(app, "roster empty");
         return;
@@ -661,12 +882,17 @@ static void timeline_enter_place_clip(App *app) {
         return;
     }
     app->timeline_edit_mode = TIMELINE_EDIT_PLACE_CLIP;
+    app->timeline_edit_placement_mode = placement_mode;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
     app->timeline_edit_roster_clip_index = app->selected_roster_clip;
     app->timeline_edit_original_lane = lane_index;
     app->timeline_edit_ghost_lane = lane_index;
     app->timeline_edit_original_start_tick = 0;
     app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick);
+    app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
+    app->timeline_edit_ghost_seam_side = app->timeline.timeline_cursor_tick == app->timeline_edit_ghost_start_tick ?
+        app->timeline.timeline_cursor_seam_side :
+        timeline_default_seam_side_for_tick(&app->timeline, app->timeline_edit_ghost_start_tick);
     app->timeline_edit_duration_ticks = duration;
     timeline_clamp_ghost_start(app);
     timeline_update_ghost_valid(app);
@@ -954,6 +1180,7 @@ void app_capture_current_loop_to_roster(App *app) {
         app->timeline.length_ticks = lane->instances[0].duration_ticks;
         app->timeline.playhead_tick = 0;
         app->timeline.timeline_cursor_tick = 0;
+        app->timeline.timeline_cursor_seam_side = TIMELINE_SEAM_NONE;
         app->timeline.play_range_start_tick = 0;
         app->timeline.play_range_end_tick = app->timeline.length_ticks;
         app->timeline.play_range_loop_enabled = false;
@@ -1029,6 +1256,7 @@ void app_rewind_timeline(App *app) {
     int64_t range_start = 0;
     timeline_effective_play_range(&app->timeline, &range_start, NULL);
     app->timeline.timeline_cursor_tick = range_start;
+    app->timeline.timeline_cursor_seam_side = timeline_default_seam_side_for_tick(&app->timeline, range_start);
     sync_transport_from_app(app);
     app_set_status(app, "Timeline rewound");
 }
@@ -1040,6 +1268,7 @@ void app_timeline_jump_to_play_range_start(App *app) {
     timeline_effective_play_range(&app->timeline, &range_start, NULL);
     audio_engine_set_timeline_playhead(&app->audio, range_start);
     app->timeline.timeline_cursor_tick = range_start;
+    app->timeline.timeline_cursor_seam_side = timeline_default_seam_side_for_tick(&app->timeline, range_start);
     sync_transport_from_app(app);
     app_set_status(app, "Jumped to play range start");
 }
@@ -1081,19 +1310,27 @@ void app_timeline_cycle_focus(App *app, int direction) {
 void app_timeline_move_cursor(App *app, int direction) {
     if (direction == 0) return;
     sync_timeline_play_range(app);
-    int64_t length = app->timeline.length_ticks > 0 ? app->timeline.length_ticks : 0;
     int64_t snap = timeline_snap_ticks(&app->timeline);
-    app->timeline.timeline_cursor_tick = clamp_i64(app->timeline.timeline_cursor_tick + snap * direction, 0, length);
+    timeline_nudge_tick_with_seams(&app->timeline,
+                                   &app->timeline.timeline_cursor_tick,
+                                   &app->timeline.timeline_cursor_seam_side,
+                                   direction,
+                                   snap,
+                                   true);
 }
 
 void app_timeline_move_cursor_by_bar(App *app, int direction) {
     if (direction == 0) return;
     sync_timeline_play_range(app);
-    int64_t length = app->timeline.length_ticks > 0 ? app->timeline.length_ticks : 0;
     int beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
     int64_t bar_ticks = timeline_snap_ticks(&app->timeline) * (int64_t)beats_per_bar;
     if (bar_ticks < 1) bar_ticks = 1;
-    app->timeline.timeline_cursor_tick = clamp_i64(app->timeline.timeline_cursor_tick + bar_ticks * direction, 0, length);
+    timeline_nudge_tick_with_seams(&app->timeline,
+                                   &app->timeline.timeline_cursor_tick,
+                                   &app->timeline.timeline_cursor_seam_side,
+                                   direction,
+                                   bar_ticks,
+                                   false);
 }
 
 void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle) {
@@ -1167,7 +1404,12 @@ void app_timeline_select_lane_delta(App *app, int delta) {
 void app_timeline_nudge_edit_ghost(App *app, int direction) {
     if (direction == 0 || app->timeline_edit_mode == TIMELINE_EDIT_NONE) return;
     int64_t snap = timeline_snap_ticks(&app->timeline);
-    app->timeline_edit_ghost_start_tick += snap * direction;
+    timeline_nudge_tick_with_seams(&app->timeline,
+                                   &app->timeline_edit_ghost_start_tick,
+                                   &app->timeline_edit_ghost_seam_side,
+                                   direction,
+                                   snap,
+                                   true);
     timeline_clamp_ghost_start(app);
     timeline_update_ghost_valid(app);
     if (!app->timeline_edit_ghost_valid) app_set_status(app, "overlap blocked");
@@ -1232,6 +1474,15 @@ static void app_timeline_confirm_edit_mode(App *app) {
         return;
     }
 
+    bool insert_pulse = app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP &&
+                        app->timeline_edit_placement_mode == TIMELINE_INSERT_PULSE;
+    int64_t old_playhead = audio_engine_get_timeline_playhead_tick(&app->audio);
+    int64_t new_playhead = old_playhead;
+    if (insert_pulse) {
+        audio_engine_stop_timeline(&app->audio, false);
+        audio_engine_stop_preview(&app->audio);
+    }
+
     if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
     if (app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE) {
         TimelineInstance *instance = timeline_instance_from_ref(&app->timeline, app->timeline_edit_instance);
@@ -1244,6 +1495,7 @@ static void app_timeline_confirm_edit_mode(App *app) {
         TimelineInstance moved = *instance;
         moved.start_tick = app->timeline_edit_ghost_start_tick;
         app->timeline.timeline_cursor_tick = app->timeline_edit_ghost_start_tick;
+        app->timeline.timeline_cursor_seam_side = app->timeline_edit_ghost_seam_side;
         if (app->timeline_edit_ghost_lane == app->timeline_edit_instance.lane_index) {
             *instance = moved;
             app->selected_timeline_instance = app->timeline_edit_instance;
@@ -1287,8 +1539,43 @@ static void app_timeline_confirm_edit_mode(App *app) {
             app_set_status(app, "lane full");
             return;
         }
-        int index = lane->instance_count++;
         RosterClip *clip = &app->roster[app->timeline_edit_roster_clip_index];
+        int64_t old_length = app->timeline.length_ticks > 0 ? app->timeline.length_ticks : 0;
+        int64_t length_floor = old_length;
+        const char *pulse_error = NULL;
+        if (app->timeline_edit_placement_mode == TIMELINE_PLACE_PULSE) {
+            double bpm = timeline_roster_clip_source_bpm(app, app->timeline_edit_roster_clip_index);
+            if (!timeline_place_pulse_no_lock(app,
+                                              app->timeline_edit_ghost_start_tick,
+                                              app->timeline_edit_ghost_seam_side,
+                                              bpm,
+                                              &pulse_error)) {
+                if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+                app_set_status(app, pulse_error ? pulse_error : "Pulse placement blocked");
+                return;
+            }
+            app->timeline_edit_ghost_seam_side = timeline_default_seam_side_for_tick(&app->timeline,
+                                                                                     app->timeline_edit_ghost_start_tick);
+        } else if (app->timeline_edit_placement_mode == TIMELINE_INSERT_PULSE) {
+            double bpm = timeline_roster_clip_source_bpm(app, app->timeline_edit_roster_clip_index);
+            if (!timeline_insert_pulse_no_lock(app,
+                                               app->timeline_edit_ghost_start_tick,
+                                               app->timeline_edit_ghost_seam_side,
+                                               app->timeline_edit_duration_ticks,
+                                               bpm,
+                                               old_playhead,
+                                               &new_playhead,
+                                               &pulse_error)) {
+                if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+                app_set_status(app, pulse_error ? pulse_error : "Pulse insert blocked");
+                return;
+            }
+            app->timeline_edit_ghost_seam_side = timeline_default_seam_side_for_tick(&app->timeline,
+                                                                                     app->timeline_edit_ghost_start_tick);
+            length_floor = old_length + app->timeline_edit_duration_ticks;
+        }
+
+        int index = lane->instance_count++;
         TimelineInstance *instance = &lane->instances[index];
         instance->roster_clip_index = app->timeline_edit_roster_clip_index;
         instance->start_tick = app->timeline_edit_ghost_start_tick;
@@ -1297,13 +1584,20 @@ static void app_timeline_confirm_edit_mode(App *app) {
         instance->midi_channel = clip->midi_channel;
         instance->midi_velocity = clip->midi_velocity;
         app->timeline.timeline_cursor_tick = app->timeline_edit_ghost_start_tick;
+        app->timeline.timeline_cursor_seam_side = app->timeline_edit_ghost_seam_side;
         app->selected_timeline_lane = app->timeline_edit_ghost_lane;
         app->selected_timeline_instance = (TimelineInstanceRef){ app->timeline_edit_ghost_lane, index };
         recompute_timeline_length_no_lock(app);
+        if (app->timeline.length_ticks < length_floor) app->timeline.length_ticks = length_floor;
         sync_timeline_play_range_no_lock(app);
         if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+        if (insert_pulse) audio_engine_set_timeline_playhead(&app->audio, new_playhead);
+        TimelinePlacementMode completed_mode = app->timeline_edit_placement_mode;
         app->timeline_edit_mode = TIMELINE_EDIT_NONE;
-        app_set_status(app, "Clip placed");
+        app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
+        if (completed_mode == TIMELINE_INSERT_PULSE) app_set_status(app, "Pulse inserted");
+        else if (completed_mode == TIMELINE_PLACE_PULSE) app_set_status(app, "Pulse placed");
+        else app_set_status(app, "Clip placed");
     }
 }
 
@@ -1311,15 +1605,19 @@ static void app_timeline_cancel_edit_mode(App *app) {
     if (app->timeline_edit_mode == TIMELINE_EDIT_NONE) return;
     if (app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE) {
         app->timeline.timeline_cursor_tick = app->timeline_edit_original_start_tick;
+        app->timeline.timeline_cursor_seam_side = app->timeline_edit_original_seam_side;
         app->selected_timeline_lane = app->timeline_edit_original_lane;
         app_set_status(app, "Move cancelled");
     } else {
         app_set_status(app, "Placement cancelled");
     }
     app->timeline_edit_mode = TIMELINE_EDIT_NONE;
+    app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
     app->timeline_edit_roster_clip_index = -1;
     app->timeline_edit_ghost_lane = 0;
+    app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
+    app->timeline_edit_ghost_seam_side = TIMELINE_SEAM_NONE;
     app->timeline_edit_ghost_valid = false;
 }
 
@@ -1371,7 +1669,7 @@ void app_timeline_activate_focus(App *app) {
                     app->selected_roster_clip_armed = true;
                     SDL_snprintf(app->status_text, sizeof(app->status_text), "Selected %s", app->roster[app->selected_roster_clip].name);
                 } else {
-                    timeline_enter_place_clip(app);
+                    timeline_enter_place_clip(app, TIMELINE_PLACE_FREE);
                 }
             } else {
                 app_set_status(app, "roster empty");
@@ -1497,6 +1795,21 @@ void app_timeline_context_menu_apply(App *app) {
             }
             app_timeline_remove_selected_instance(app);
             break;
+        case TIMELINE_CONTEXT_ITEM_PLACE_FREE:
+        case TIMELINE_CONTEXT_ITEM_PLACE_PULSE:
+        case TIMELINE_CONTEXT_ITEM_INSERT_PULSE:
+        {
+            if (app->timeline_context_menu_roster_index >= 0 &&
+                app->timeline_context_menu_roster_index < app->roster_clip_count) {
+                app->selected_roster_clip = app->timeline_context_menu_roster_index;
+            }
+            TimelinePlacementMode mode = TIMELINE_PLACE_FREE;
+            if (item == TIMELINE_CONTEXT_ITEM_PLACE_PULSE) mode = TIMELINE_PLACE_PULSE;
+            else if (item == TIMELINE_CONTEXT_ITEM_INSERT_PULSE) mode = TIMELINE_INSERT_PULSE;
+            app_timeline_clear_context_menu(app);
+            timeline_enter_place_clip(app, mode);
+            break;
+        }
         case TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER:
             if (app->timeline_context_menu_roster_index >= 0 &&
                 app->timeline_context_menu_roster_index < app->roster_clip_count) {
@@ -1537,6 +1850,11 @@ void app_timeline_mark_tempo_at_cursor(App *app) {
 
     if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
     bool ok = timeline_set_tempo_event_no_lock(&app->timeline, tick, bpm);
+    if (ok && app->timeline.timeline_cursor_tick == tick &&
+        app->timeline.timeline_cursor_seam_side == TIMELINE_SEAM_NONE) {
+        app->timeline.timeline_cursor_seam_side = timeline_default_seam_side_for_tick(&app->timeline, tick);
+    }
+    timeline_normalize_cursor_seam_side_no_lock(app);
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
 
     app_timeline_clear_context_menu(app);
@@ -1573,6 +1891,7 @@ void app_timeline_remove_tempo_at_cursor(App *app) {
     }
     app->timeline.tempo_event_count = count - 1;
     timeline_ensure_tempo_anchor_no_lock(&app->timeline);
+    timeline_normalize_cursor_seam_side_no_lock(app);
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
 
     app_timeline_clear_context_menu(app);
@@ -1685,6 +2004,7 @@ void app_timeline_remove_selected_instance(App *app) {
     if (!timeline_has_instances(&app->timeline)) {
         app->selected_timeline_instance = timeline_instance_ref_invalid();
         app->timeline.timeline_cursor_tick = 0;
+        app->timeline.timeline_cursor_seam_side = TIMELINE_SEAM_NONE;
         app->timeline.playing = false;
         app->transport.playing = false;
         app->transport.metronome_env = 0.0f;
@@ -1880,6 +2200,7 @@ void app_delete_selected_roster_clip(App *app) {
     app->selected_timeline_instance = timeline_instance_ref_invalid();
     if (!timeline_has_instances(&app->timeline)) {
         app->timeline.timeline_cursor_tick = 0;
+        app->timeline.timeline_cursor_seam_side = TIMELINE_SEAM_NONE;
         app->timeline.playhead_tick = 0;
         app->timeline.playing = false;
         app->transport.playing = false;
@@ -2403,9 +2724,12 @@ static void app_render_timeline(App *app) {
     SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
     SDL_RenderDebugText(app->renderer, 24, 132, "MASTER TIMELINE");
     if (app->timeline_edit_mode != TIMELINE_EDIT_NONE) {
+        const char *edit_verb = app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP ?
+            timeline_placement_verb_label(app->timeline_edit_placement_mode) :
+            timeline_edit_verb_label(app->timeline_edit_mode);
         SDL_RenderDebugTextFormat(app->renderer, 24, 196, "focus: %s / %s %s",
                                   timeline_focus_label(app->timeline_focus_zone),
-                                  timeline_edit_verb_label(app->timeline_edit_mode),
+                                  edit_verb,
                                   timeline_edit_clip_name(app));
     } else {
         SDL_RenderDebugTextFormat(app->renderer, 24, 196, "focus: %s%s",
@@ -2436,8 +2760,11 @@ static void app_render_timeline(App *app) {
                               audio_engine_timeline_is_playing(&app->audio) ? "playing" : "stopped");
     int64_t range_start = 0, range_end = 0;
     timeline_effective_play_range(&app->timeline, &range_start, &range_end);
-    SDL_RenderDebugTextFormat(app->renderer, 24, 214, "cursor: %lld  range: %lld..%lld  loop: %s",
+    const char *cursor_side_label = timeline_seam_side_label(app->timeline.timeline_cursor_seam_side);
+    SDL_RenderDebugTextFormat(app->renderer, 24, 214, "cursor: %lld%s%s  range: %lld..%lld  loop: %s",
                               (long long)app->timeline.timeline_cursor_tick,
+                              cursor_side_label[0] ? " " : "",
+                              cursor_side_label,
                               (long long)range_start,
                               (long long)range_end,
                               app->timeline.play_range_loop_enabled ? "on" : "off");
@@ -2535,14 +2862,32 @@ static void app_render_timeline(App *app) {
         float x = timeline_x_for_tick((double)event.tick, view_start, view_span, timeline_x, timeline_w);
         if (x < timeline_x || x > timeline_x + timeline_w) continue;
         bool highlighted = app->timeline_focus_zone == TIMELINE_FOCUS_RULER && i == selected_tempo_event;
+        bool ghost_highlighted = app->timeline_edit_mode != TIMELINE_EDIT_NONE &&
+                                 app->timeline_edit_ghost_start_tick == event.tick;
+        TimelineSeamSide active_side = TIMELINE_SEAM_NONE;
+        if (highlighted) active_side = app->timeline.timeline_cursor_seam_side;
+        else if (ghost_highlighted) active_side = app->timeline_edit_ghost_seam_side;
         SDL_SetRenderDrawColor(app->renderer,
-                               highlighted ? 255 : 92,
-                               highlighted ? 245 : 218,
-                               highlighted ? 184 : 238,
-                               highlighted ? 255 : 220);
+                               (highlighted || ghost_highlighted) ? 255 : 92,
+                               (highlighted || ghost_highlighted) ? 245 : 218,
+                               (highlighted || ghost_highlighted) ? 184 : 238,
+                               (highlighted || ghost_highlighted) ? 255 : 220);
         SDL_RenderLine(app->renderer, x, timeline_y - 62.0f, x, timeline_y + track_h + 12.0f);
         SDL_FRect flag = { x - 4.0f, timeline_y - 31.0f, 8.0f, 11.0f };
         SDL_RenderFillRect(app->renderer, &flag);
+        if (timeline_tick_is_navigation_seam(&app->timeline, event.tick) && active_side != TIMELINE_SEAM_NONE) {
+            SDL_FRect side_tab = active_side == TIMELINE_SEAM_BEFORE ?
+                (SDL_FRect){ x - 21.0f, timeline_y - 46.0f, 18.0f, 13.0f } :
+                (SDL_FRect){ x + 3.0f, timeline_y - 46.0f, 22.0f, 13.0f };
+            SDL_SetRenderDrawColor(app->renderer, 255, 250, 215, 84);
+            SDL_RenderFillRect(app->renderer, &side_tab);
+            SDL_SetRenderDrawColor(app->renderer, 255, 250, 215, 255);
+            SDL_RenderRect(app->renderer, &side_tab);
+            SDL_RenderDebugText(app->renderer,
+                                side_tab.x + 3.0f,
+                                side_tab.y + 2.0f,
+                                timeline_seam_side_short_label(active_side));
+        }
         if (x < timeline_x + timeline_w - 42.0f) {
             SDL_RenderDebugTextFormat(app->renderer, x + 5.0f, timeline_y - 28.0f, "%.1f", event.bpm);
         }
@@ -2686,8 +3031,11 @@ static void app_render_timeline(App *app) {
             if (ghost.w < 8.0f) ghost.w = 8.0f;
             char ghost_label[APP_ROSTER_CLIP_NAME_MAX + 16];
             if (app->timeline_edit_ghost_valid) {
+                const char *ghost_verb = app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP ?
+                    timeline_placement_verb_label(app->timeline_edit_placement_mode) :
+                    "moving";
                 SDL_snprintf(ghost_label, sizeof(ghost_label), "%s %s",
-                             app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE ? "moving" : "placing",
+                             ghost_verb,
                              clip->name);
             } else {
                 SDL_strlcpy(ghost_label, "overlap", sizeof(ghost_label));
@@ -3300,6 +3648,7 @@ bool app_init(App *app){
     timeline_set_tempo_event_no_lock(&app->timeline, 0, app->timeline.timeline_bpm);
     timeline_init_lanes(&app->timeline);
     app->timeline.timeline_cursor_tick = 0;
+    app->timeline.timeline_cursor_seam_side = TIMELINE_SEAM_NONE;
     app->timeline.play_range_start_tick = 0;
     app->timeline.play_range_end_tick = 0;
     app->timeline.play_range_loop_enabled = false;
@@ -3310,9 +3659,12 @@ bool app_init(App *app){
     app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
     app->timeline_play_range_adjusting = false;
     app_timeline_clear_context_menu(app);
+    app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
     app->timeline_edit_original_lane = 0;
+    app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
     app->timeline_edit_ghost_lane = 0;
+    app->timeline_edit_ghost_seam_side = TIMELINE_SEAM_NONE;
     app->selected_roster_clip = -1;
     app->selected_roster_clip_armed = false;
     app->selected_timeline_lane = 0;

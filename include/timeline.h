@@ -80,6 +80,12 @@ typedef enum {
     TIMELINE_RANGE_HANDLE_END
 } TimelineRangeHandle;
 
+typedef enum {
+    TIMELINE_SEAM_NONE,
+    TIMELINE_SEAM_BEFORE,
+    TIMELINE_SEAM_AFTER
+} TimelineSeamSide;
+
 typedef struct {
     bool initialized;
     bool playing;
@@ -90,6 +96,7 @@ typedef struct {
     int64_t length_ticks;
     int64_t playhead_tick;
     int64_t timeline_cursor_tick;
+    TimelineSeamSide timeline_cursor_seam_side;
     int64_t play_range_start_tick;
     int64_t play_range_end_tick;
     bool play_range_loop_enabled;

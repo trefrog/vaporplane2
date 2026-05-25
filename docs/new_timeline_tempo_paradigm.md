@@ -160,3 +160,27 @@ Please start by reading the relevant files and reporting:
 Do not start coding until you’ve given the plan.
 
 Please be especially careful not to turn Phase 2 into a hidden stretch engine. This is tempo ruler surgery, not audio warping.
+
+## Implementation status
+
+Implemented in two phases:
+
+### Phase 1
+
+* Added `TimelineSeamSide` and made the timeline cursor/edit ghost conceptually `tick + seam_side`.
+* Nonzero tempo events are structural navigation seams. Normal beat movement stops on the near side of a seam, then crosses to the far side on the next press.
+* Bar-sized cursor hops can skip the seam barrier.
+* Tempo event insert/remove/nudge behavior still uses the fixed-size, beat-snapped, unique-per-tick tempo map.
+* Ruler rendering highlights tempo seams and shows the active before/after side.
+* Playback timing and metronome timing continue to use the tempo map; no stretch behavior was added.
+
+### Phase 2
+
+* Added explicit roster placement modes:
+  * `Place free`: old behavior; places the clip without changing the tempo map.
+  * `Place pulse`: places the clip and writes/conforms a tempo event at the placement tick using the roster clip source BPM.
+  * `Insert pulse`: shifts later timeline material and later tempo events, then writes/conforms the insertion tempo seam using the roster clip source BPM.
+* Timeline instances still do not store BPM.
+* Roster clips remain the source of tempo metadata until an explicit pulse operation writes that metadata into the ruler.
+* Existing seams are reused on the after-side. The before-side of an existing seam inserts before the old seam by shifting that seam later and creating the incoming pulse seam at the insertion tick.
+* Tempo event storage remains fixed-capacity, tempo mutations are guarded by the audio stream lock, and the audio callback does not allocate.
