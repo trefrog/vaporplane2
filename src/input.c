@@ -234,8 +234,14 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
         case SDLK_M: toggle_metronome(app); return true;
         case SDLK_HOME: app_rewind_timeline(app); return true;
         case SDLK_C: app_timeline_open_context_menu(app); return true;
-        case SDLK_LEFTBRACKET: app_timeline_adjust_selected_instance_velocity(app, -5); return true;
-        case SDLK_RIGHTBRACKET: app_timeline_adjust_selected_instance_velocity(app, 5); return true;
+        case SDLK_LEFTBRACKET:
+            if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER) app_timeline_adjust_tempo_event_at_cursor(app, -0.5);
+            else app_timeline_adjust_selected_instance_velocity(app, -5);
+            return true;
+        case SDLK_RIGHTBRACKET:
+            if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER) app_timeline_adjust_tempo_event_at_cursor(app, 0.5);
+            else app_timeline_adjust_selected_instance_velocity(app, 5);
+            return true;
         case SDLK_R:
             if(app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE) app_timeline_reset_play_range(app);
             return true;
@@ -523,6 +529,16 @@ void input_update_gamepad(App *app, double dt){
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_adjust_selected_instance_velocity(app, -5);
             if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP) ||
                SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) return;
+        }
+        if(r2_shift && app->timeline_focus_zone == TIMELINE_FOCUS_RULER && app_timeline_cursor_on_tempo_event(app)) {
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_adjust_tempo_event_at_cursor(app, 1.0);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_adjust_tempo_event_at_cursor(app, -1.0);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_timeline_adjust_tempo_event_at_cursor(app, 0.1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_timeline_adjust_tempo_event_at_cursor(app, -0.1);
+            if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP) ||
+               SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN) ||
+               SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT) ||
+               SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) return;
         }
         if(left_stick_pressed && app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE) app_timeline_reset_play_range(app);
         if(west_pressed && app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE) app_timeline_select_play_range_handle(app, TIMELINE_RANGE_HANDLE_START);

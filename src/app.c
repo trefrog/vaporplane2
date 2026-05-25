@@ -227,6 +227,7 @@ static bool app_uses_timeline_transport(const App *app) {
 }
 
 static void reset_lane_analyzer_visual(App *app, int lane_index);
+static void clamp_timeline_view(App *app);
 
 static void timeline_init_lanes(MasterTimeline *timeline) {
     for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
@@ -242,6 +243,13 @@ static void timeline_init_lanes(MasterTimeline *timeline) {
 
 static int64_t timeline_snap_ticks(const MasterTimeline *timeline) {
     return timeline->ticks_per_beat > 0 ? (int64_t)timeline->ticks_per_beat : 960;
+}
+
+static int64_t timeline_snap_tick_down_for_timeline(const MasterTimeline *timeline, int64_t tick) {
+    int64_t snap = timeline_snap_ticks(timeline);
+    if (snap <= 1) return tick < 0 ? 0 : tick;
+    if (tick < 0) tick = 0;
+    return (tick / snap) * snap;
 }
 
 static int64_t timeline_min_range_ticks(const MasterTimeline *timeline) {
@@ -306,6 +314,73 @@ static void app_timeline_clear_context_menu(App *app) {
     app->timeline_context_menu_tick = 0;
 }
 
+static void timeline_ensure_tempo_anchor_no_lock(MasterTimeline *timeline) {
+    if (!timeline) return;
+
+    double bpm = timeline_base_bpm(timeline);
+    int count = timeline_valid_tempo_event_count(timeline);
+    int anchor_index = timeline_tempo_event_index_at_tick(timeline, 0);
+    if (anchor_index < 0) {
+        if (count >= TIMELINE_MAX_TEMPO_EVENTS) count = TIMELINE_MAX_TEMPO_EVENTS - 1;
+        for (int i = count; i > 0; --i) {
+            timeline->tempo_events[i] = timeline->tempo_events[i - 1];
+        }
+        timeline->tempo_event_count = count + 1;
+        anchor_index = 0;
+    } else if (anchor_index > 0) {
+        TimelineTempoEvent anchor = timeline->tempo_events[anchor_index];
+        for (int i = anchor_index; i > 0; --i) {
+            timeline->tempo_events[i] = timeline->tempo_events[i - 1];
+        }
+        timeline->tempo_events[0] = anchor;
+        anchor_index = 0;
+    }
+
+    timeline->tempo_events[anchor_index].tick = 0;
+    timeline->tempo_events[anchor_index].bpm = timeline_clamp_bpm(bpm);
+    timeline->timeline_bpm = timeline->tempo_events[anchor_index].bpm;
+}
+
+static bool timeline_set_tempo_event_no_lock(MasterTimeline *timeline, int64_t tick, double bpm) {
+    if (!timeline) return false;
+    if (tick < 0) tick = 0;
+    bpm = timeline_clamp_bpm(bpm);
+    timeline_ensure_tempo_anchor_no_lock(timeline);
+
+    int count = timeline_valid_tempo_event_count(timeline);
+    int existing = timeline_tempo_event_index_at_tick(timeline, tick);
+    if (existing >= 0) {
+        timeline->tempo_events[existing].bpm = bpm;
+        if (existing == 0) timeline->timeline_bpm = bpm;
+        return true;
+    }
+
+    if (count >= TIMELINE_MAX_TEMPO_EVENTS) return false;
+    int insert_at = count;
+    while (insert_at > 0 && timeline->tempo_events[insert_at - 1].tick > tick) {
+        timeline->tempo_events[insert_at] = timeline->tempo_events[insert_at - 1];
+        --insert_at;
+    }
+    timeline->tempo_events[insert_at].tick = tick;
+    timeline->tempo_events[insert_at].bpm = bpm;
+    timeline->tempo_event_count = count + 1;
+    if (insert_at == 0) timeline->timeline_bpm = bpm;
+    return true;
+}
+
+static int64_t timeline_context_snapped_tick(const App *app) {
+    int64_t tick = app->timeline_context_menu_open ?
+        app->timeline_context_menu_tick : app->timeline.timeline_cursor_tick;
+    return timeline_snap_tick_down_for_timeline(&app->timeline, tick);
+}
+
+static bool timeline_context_has_removable_tempo_event(const App *app) {
+    if (!app || app->timeline_focus_zone != TIMELINE_FOCUS_RULER) return false;
+    int64_t tick = timeline_context_snapped_tick(app);
+    int index = timeline_tempo_event_index_at_tick(&app->timeline, tick);
+    return index > 0 && app->timeline.tempo_events[index].tick > 0;
+}
+
 static int timeline_bar_ticks(const MasterTimeline *timeline) {
     int ticks_per_beat = timeline->ticks_per_beat > 0 ? timeline->ticks_per_beat : 960;
     int beats_per_bar = timeline->timeline_beats_per_bar > 0 ? timeline->timeline_beats_per_bar : 4;
@@ -322,6 +397,12 @@ static int timeline_context_menu_items(const App *app,
     int count = 0;
     switch (app->timeline_context_menu_scope) {
         case TIMELINE_CONTEXT_SCOPE_TIMELINE:
+            if (app->timeline_focus_zone == TIMELINE_FOCUS_RULER) {
+                if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_MARK_TEMPO;
+                if (timeline_context_has_removable_tempo_event(app) && count < max_items) {
+                    items[count++] = TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO;
+                }
+            }
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_INSERT_BAR;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
@@ -360,6 +441,8 @@ static const char *timeline_context_menu_title(TimelineContextMenuScope scope) {
 static const char *timeline_context_item_label(TimelineContextMenuItem item) {
     switch (item) {
         case TIMELINE_CONTEXT_ITEM_INSERT_BAR: return "Insert bar";
+        case TIMELINE_CONTEXT_ITEM_MARK_TEMPO: return "Mark tempo";
+        case TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO: return "Remove tempo";
         case TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE: return "Remove instance";
         case TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER: return "Export WAV";
         case TIMELINE_CONTEXT_ITEM_DELETE_ROSTER: return "Delete roster clip";
@@ -430,6 +513,41 @@ static void sync_timeline_play_range(App *app) {
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
 }
 
+static void app_timeline_fit_play_range_anchors(App *app) {
+    if (!app->timeline.initialized || app->timeline.length_ticks <= 0) return;
+    int64_t start = 0, end = 0;
+    timeline_effective_play_range(&app->timeline, &start, &end);
+    if (end <= start) return;
+
+    double length = (double)app->timeline.length_ticks;
+    double range_start = (double)start;
+    double range_end = (double)end;
+    double range_span = range_end - range_start;
+    double min_span = (double)timeline_min_range_ticks(&app->timeline);
+    double needed_span = range_span * 1.12;
+    if (needed_span < range_span + min_span) needed_span = range_span + min_span;
+    if (needed_span > length) needed_span = length;
+
+    double current_span = app->timeline.view_span_ticks;
+    if (current_span <= 0.0) current_span = needed_span;
+    if (current_span < needed_span) current_span = needed_span;
+
+    double pad = current_span * 0.08;
+    double visible_start = app->timeline.view_center_tick - current_span * 0.5;
+    double visible_end = app->timeline.view_center_tick + current_span * 0.5;
+    double center = app->timeline.view_center_tick;
+    if (range_start < visible_start + pad) {
+        center = range_start - pad + current_span * 0.5;
+    }
+    if (range_end > visible_end - pad) {
+        center = range_end + pad - current_span * 0.5;
+    }
+
+    app->timeline.view_span_ticks = current_span;
+    app->timeline.view_center_tick = center;
+    clamp_timeline_view(app);
+}
+
 static void recompute_timeline_length_no_lock(App *app) {
     int64_t length = 0;
     for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
@@ -452,10 +570,7 @@ static int64_t timeline_clip_duration_ticks(const App *app, int roster_clip_inde
 }
 
 static int64_t timeline_snap_tick_down(const App *app, int64_t tick) {
-    int64_t snap = timeline_snap_ticks(&app->timeline);
-    if (snap <= 1) return tick < 0 ? 0 : tick;
-    if (tick < 0) tick = 0;
-    return (tick / snap) * snap;
+    return timeline_snap_tick_down_for_timeline(&app->timeline, tick);
 }
 
 static bool timeline_range_overlaps_existing(const App *app,
@@ -579,12 +694,12 @@ static void clamp_timeline_view(App *app) {
 }
 
 static void sync_transport_to_timeline(App *app) {
-    app->transport.bpm = app->timeline.timeline_bpm > 0.0 ? app->timeline.timeline_bpm : 120.0;
+    double playhead_tick = app->timeline.playhead_tick > 0 ? (double)app->timeline.playhead_tick : 0.0;
+    app->transport.bpm = timeline_effective_bpm_at_tick(&app->timeline, playhead_tick);
     app->transport.beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
     app->transport.beat_unit = app->timeline.timeline_beat_unit > 0 ? app->timeline.timeline_beat_unit : 4;
     app->transport.current_tick = app->timeline.playhead_tick > 0 ? (uint64_t)app->timeline.playhead_tick : 0;
-    app->transport.current_seconds = app->timeline.ticks_per_beat > 0 && app->transport.bpm > 0.0 ?
-        ((double)app->transport.current_tick / (double)app->timeline.ticks_per_beat) * 60.0 / app->transport.bpm : 0.0;
+    app->transport.current_seconds = timeline_seconds_at_tick(&app->timeline, playhead_tick);
 }
 
 static TempoLockParams default_tempo_params(const App *app) {
@@ -825,6 +940,8 @@ void app_capture_current_loop_to_roster(App *app) {
         app->timeline.timeline_beats_per_bar = next.beats_per_bar;
         app->timeline.timeline_beat_unit = next.beat_unit;
         app->timeline.ticks_per_beat = app->transport.ppqn > 0 ? app->transport.ppqn : 960;
+        app->timeline.tempo_event_count = 0;
+        timeline_set_tempo_event_no_lock(&app->timeline, 0, next.source_bpm);
         timeline_init_lanes(&app->timeline);
         TimelineLane *lane = &app->timeline.lanes[0];
         lane->instance_count = 1;
@@ -955,6 +1072,8 @@ void app_timeline_cycle_focus(App *app, int direction) {
     app->timeline_focus_zone = (TimelineFocusZone)zone;
     if (app->timeline_focus_zone != TIMELINE_FOCUS_PLAY_RANGE) {
         app->timeline_play_range_adjusting = false;
+    } else {
+        app_timeline_fit_play_range_anchors(app);
     }
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Focus: %s", timeline_focus_label(app->timeline_focus_zone));
 }
@@ -981,6 +1100,7 @@ void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle)
     app->timeline_play_range_handle = handle;
     app->timeline_focus_zone = TIMELINE_FOCUS_PLAY_RANGE;
     app_timeline_clear_context_menu(app);
+    app_timeline_fit_play_range_anchors(app);
     app_set_status(app, handle == TIMELINE_RANGE_HANDLE_START ? "Play range start handle" : "Play range end handle");
 }
 
@@ -1008,6 +1128,7 @@ void app_timeline_nudge_play_range(App *app, int direction) {
     }
     sync_timeline_play_range_no_lock(app);
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    app_timeline_fit_play_range_anchors(app);
 }
 
 void app_timeline_reset_play_range(App *app) {
@@ -1018,6 +1139,7 @@ void app_timeline_reset_play_range(App *app) {
     app->timeline.timeline_cursor_tick = app->timeline.play_range_start_tick;
     sync_timeline_play_range_no_lock(app);
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    app_timeline_fit_play_range_anchors(app);
     app_set_status(app, "Play range reset");
 }
 
@@ -1219,6 +1341,7 @@ void app_timeline_activate_focus(App *app) {
             break;
         case TIMELINE_FOCUS_PLAY_RANGE:
             app->timeline_play_range_adjusting = true;
+            app_timeline_fit_play_range_anchors(app);
             app_set_status(app, "Adjusting play range");
             break;
         case TIMELINE_FOCUS_TRACK_AREA:
@@ -1301,7 +1424,7 @@ void app_timeline_open_context_menu(App *app) {
         app->timeline_context_menu_open = true;
         app->timeline_context_menu_scope = TIMELINE_CONTEXT_SCOPE_TIMELINE;
         app->timeline_context_menu_tick = app->timeline.timeline_cursor_tick;
-        app_set_status(app, "Timeline menu");
+        app_set_status(app, "Ruler menu");
         return;
     }
 
@@ -1358,6 +1481,12 @@ void app_timeline_context_menu_apply(App *app) {
     int selected = clamp_int(app->timeline_context_menu_selected, 0, count - 1);
     TimelineContextMenuItem item = items[selected];
     switch (item) {
+        case TIMELINE_CONTEXT_ITEM_MARK_TEMPO:
+            app_timeline_mark_tempo_at_cursor(app);
+            break;
+        case TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO:
+            app_timeline_remove_tempo_at_cursor(app);
+            break;
         case TIMELINE_CONTEXT_ITEM_INSERT_BAR:
             app_timeline_insert_bar_at_cursor(app);
             break;
@@ -1394,6 +1523,97 @@ void app_timeline_context_menu_apply(App *app) {
     }
 }
 
+void app_timeline_mark_tempo_at_cursor(App *app) {
+    if (!app->timeline.initialized) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "timeline empty");
+        return;
+    }
+
+    int64_t tick = timeline_context_snapped_tick(app);
+    if (tick < 0) tick = 0;
+    if (app->timeline.length_ticks > 0 && tick > app->timeline.length_ticks) tick = app->timeline.length_ticks;
+    double bpm = timeline_effective_bpm_at_tick(&app->timeline, (double)tick);
+
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    bool ok = timeline_set_tempo_event_no_lock(&app->timeline, tick, bpm);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    app_timeline_clear_context_menu(app);
+    if (!ok) {
+        app_set_status(app, "Tempo map full");
+        return;
+    }
+    sync_transport_from_app(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text),
+                 "Marked tempo %.2f bpm at tick %lld",
+                 bpm, (long long)tick);
+}
+
+void app_timeline_remove_tempo_at_cursor(App *app) {
+    if (!app->timeline.initialized) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "timeline empty");
+        return;
+    }
+
+    int64_t tick = timeline_context_snapped_tick(app);
+    int index = timeline_tempo_event_index_at_tick(&app->timeline, tick);
+    if (index <= 0) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, tick == 0 ? "Base tempo cannot be removed" : "No tempo event at cursor");
+        return;
+    }
+
+    double removed_bpm = app->timeline.tempo_events[index].bpm;
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    int count = timeline_valid_tempo_event_count(&app->timeline);
+    for (int i = index; i < count - 1; ++i) {
+        app->timeline.tempo_events[i] = app->timeline.tempo_events[i + 1];
+    }
+    app->timeline.tempo_event_count = count - 1;
+    timeline_ensure_tempo_anchor_no_lock(&app->timeline);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    app_timeline_clear_context_menu(app);
+    sync_transport_from_app(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text),
+                 "Removed %.2f bpm tempo at tick %lld",
+                 removed_bpm, (long long)tick);
+}
+
+void app_timeline_adjust_tempo_event_at_cursor(App *app, double delta) {
+    if (delta == 0.0) return;
+    if (!app->timeline.initialized) {
+        app_set_status(app, "timeline empty");
+        return;
+    }
+
+    int64_t tick = timeline_snap_tick_down_for_timeline(&app->timeline, app->timeline.timeline_cursor_tick);
+    int index = timeline_tempo_event_index_at_tick(&app->timeline, tick);
+    if (index < 0) {
+        app_set_status(app, "No tempo event at cursor");
+        return;
+    }
+
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    double bpm = timeline_clamp_bpm(app->timeline.tempo_events[index].bpm + delta);
+    app->timeline.tempo_events[index].bpm = bpm;
+    if (index == 0) app->timeline.timeline_bpm = bpm;
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    sync_transport_from_app(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text),
+                 "Tempo at tick %lld: %.2f bpm",
+                 (long long)tick, bpm);
+}
+
+bool app_timeline_cursor_on_tempo_event(const App *app) {
+    if (!app || !app->timeline.initialized) return false;
+    int64_t tick = timeline_snap_tick_down_for_timeline(&app->timeline, app->timeline.timeline_cursor_tick);
+    return timeline_tempo_event_index_at_tick(&app->timeline, tick) >= 0;
+}
+
 void app_timeline_insert_bar_at_cursor(App *app) {
     if (!app->timeline.initialized) {
         app_timeline_clear_context_menu(app);
@@ -1419,6 +1639,11 @@ void app_timeline_insert_bar_at_cursor(App *app) {
             TimelineInstance *instance = &lane->instances[i];
             if (instance->start_tick >= insertion_tick) instance->start_tick += bar_ticks;
         }
+    }
+    int tempo_count = timeline_valid_tempo_event_count(&app->timeline);
+    for (int i = 0; i < tempo_count; ++i) {
+        TimelineTempoEvent *event = &app->timeline.tempo_events[i];
+        if (event->tick > 0 && event->tick >= insertion_tick) event->tick += bar_ticks;
     }
 
     int64_t new_length_floor = old_length + bar_ticks;
@@ -2007,7 +2232,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space play/pause   Enter/South activate focus   East cancel"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: C/Start menu   Up/Down choose   South apply   East backs out"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline stick: Left/Right pan   Up/Down zoom   L2 turbo"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Ruler: Left/Right cursor by beat   Shift+Left/Right pans"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Ruler: L/R beat cursor   C menu marks/removes tempo   [/] adjusts marked BPM"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Index: Up/Down lane   South opens Lane Inspector"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Inspector: L/R palette   South mute   East timeline   R2 transport"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Play Range: Enter/South adjust   1/2 or West/North choose handle"); y += 16.0f;
@@ -2194,14 +2419,20 @@ static void app_render_timeline(App *app) {
         return;
     }
 
-    SDL_RenderDebugTextFormat(app->renderer, 24, 158, "timeline bpm: %.2f  meter: %d/%d  roster: %d",
-                              app->timeline.timeline_bpm,
+    int64_t playhead_for_bpm = audio_engine_get_timeline_playhead_tick(&app->audio);
+    double cursor_bpm = timeline_effective_bpm_at_tick(&app->timeline, (double)app->timeline.timeline_cursor_tick);
+    double playhead_bpm = timeline_effective_bpm_at_tick(&app->timeline, (double)playhead_for_bpm);
+    SDL_RenderDebugTextFormat(app->renderer, 24, 158, "base bpm: %.2f  cursor: %.2f  play: %.2f  meter: %d/%d",
+                              timeline_base_bpm(&app->timeline),
+                              cursor_bpm,
+                              playhead_bpm,
                               app->timeline.timeline_beats_per_bar,
-                              app->timeline.timeline_beat_unit,
-                              app->roster_clip_count);
-    SDL_RenderDebugTextFormat(app->renderer, 24, 176, "length: %lld ticks  playhead: %lld  %s",
+                              app->timeline.timeline_beat_unit);
+    SDL_RenderDebugTextFormat(app->renderer, 24, 176, "length: %lld ticks  playhead: %lld  tempo events: %d  roster: %d  %s",
                               (long long)app->timeline.length_ticks,
-                              (long long)audio_engine_get_timeline_playhead_tick(&app->audio),
+                              (long long)playhead_for_bpm,
+                              timeline_valid_tempo_event_count(&app->timeline),
+                              app->roster_clip_count,
                               audio_engine_timeline_is_playing(&app->audio) ? "playing" : "stopped");
     int64_t range_start = 0, range_end = 0;
     timeline_effective_play_range(&app->timeline, &range_start, &range_end);
@@ -2296,6 +2527,27 @@ static void app_render_timeline(App *app) {
         }
     }
 
+    int64_t tempo_cursor_tick = timeline_snap_tick_down_for_timeline(&app->timeline, app->timeline.timeline_cursor_tick);
+    int selected_tempo_event = timeline_tempo_event_index_at_tick(&app->timeline, tempo_cursor_tick);
+    int tempo_count = timeline_valid_tempo_event_count(&app->timeline);
+    for (int i = 0; i < tempo_count; ++i) {
+        TimelineTempoEvent event = app->timeline.tempo_events[i];
+        float x = timeline_x_for_tick((double)event.tick, view_start, view_span, timeline_x, timeline_w);
+        if (x < timeline_x || x > timeline_x + timeline_w) continue;
+        bool highlighted = app->timeline_focus_zone == TIMELINE_FOCUS_RULER && i == selected_tempo_event;
+        SDL_SetRenderDrawColor(app->renderer,
+                               highlighted ? 255 : 92,
+                               highlighted ? 245 : 218,
+                               highlighted ? 184 : 238,
+                               highlighted ? 255 : 220);
+        SDL_RenderLine(app->renderer, x, timeline_y - 62.0f, x, timeline_y + track_h + 12.0f);
+        SDL_FRect flag = { x - 4.0f, timeline_y - 31.0f, 8.0f, 11.0f };
+        SDL_RenderFillRect(app->renderer, &flag);
+        if (x < timeline_x + timeline_w - 42.0f) {
+            SDL_RenderDebugTextFormat(app->renderer, x + 5.0f, timeline_y - 28.0f, "%.1f", event.bpm);
+        }
+    }
+
     if (range_end > range_start) {
         float range_x0 = timeline_x_for_tick((double)range_start, view_start, view_span, timeline_x, timeline_w);
         float range_x1 = timeline_x_for_tick((double)range_end, view_start, view_span, timeline_x, timeline_w);
@@ -2312,13 +2564,33 @@ static void app_render_timeline(App *app) {
             SDL_FRect tab = { start_x - 5.0f, timeline_y - 20.0f, 10.0f, 18.0f };
             SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
             SDL_RenderFillRect(app->renderer, &tab);
-            if (app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE && app->timeline_play_range_handle == TIMELINE_RANGE_HANDLE_START) SDL_RenderRect(app->renderer, &tab);
+            bool armed = app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE &&
+                         app->timeline_play_range_handle == TIMELINE_RANGE_HANDLE_START;
+            if (armed) {
+                SDL_FRect pad = { tab.x - 1.0f, tab.y - 1.0f, tab.w + 2.0f, tab.h + 2.0f };
+                SDL_SetRenderDrawColor(app->renderer, 255, 250, 215, app->timeline_play_range_adjusting ? 112 : 58);
+                SDL_RenderFillRect(app->renderer, &pad);
+                SDL_SetRenderDrawColor(app->renderer, 255, 250, 215, 255);
+                SDL_RenderRect(app->renderer, &pad);
+                SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+                SDL_RenderFillRect(app->renderer, &tab);
+            }
         }
         if (end_x >= timeline_x && end_x <= timeline_x + timeline_w) {
             SDL_FRect tab = { end_x - 5.0f, timeline_y - 20.0f, 10.0f, 18.0f };
             SDL_SetRenderDrawColor(app->renderer, 255, 180, 100, 255);
             SDL_RenderFillRect(app->renderer, &tab);
-            if (app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE && app->timeline_play_range_handle == TIMELINE_RANGE_HANDLE_END) SDL_RenderRect(app->renderer, &tab);
+            bool armed = app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE &&
+                         app->timeline_play_range_handle == TIMELINE_RANGE_HANDLE_END;
+            if (armed) {
+                SDL_FRect pad = { tab.x - 1.0f, tab.y - 1.0f, tab.w + 2.0f, tab.h + 2.0f };
+                SDL_SetRenderDrawColor(app->renderer, 255, 235, 205, app->timeline_play_range_adjusting ? 112 : 58);
+                SDL_RenderFillRect(app->renderer, &pad);
+                SDL_SetRenderDrawColor(app->renderer, 255, 235, 205, 255);
+                SDL_RenderRect(app->renderer, &pad);
+                SDL_SetRenderDrawColor(app->renderer, 255, 180, 100, 255);
+                SDL_RenderFillRect(app->renderer, &tab);
+            }
         }
     }
 
@@ -2482,6 +2754,11 @@ static void app_render_timeline(App *app) {
         int item_count = timeline_context_menu_items(app, items, TIMELINE_CONTEXT_MAX_ITEMS);
         const char *title = timeline_context_menu_title(app->timeline_context_menu_scope);
         const char *name = "timeline";
+        if (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_TIMELINE &&
+            app->timeline_focus_zone == TIMELINE_FOCUS_RULER) {
+            title = "RULER MENU";
+            name = "tempo/grid";
+        }
         if (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_ROSTER ||
             app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE) {
             int roster_index = app->timeline_context_menu_roster_index;
@@ -2505,6 +2782,18 @@ static void app_render_timeline(App *app) {
             menu_w,
             58.0f + warning_h + (float)item_count * 22.0f
         };
+        float menu_pad = 18.0f;
+        if (menu.x + menu.w > (float)w - menu_pad) menu.x = (float)w - menu_pad - menu.w;
+        if (menu.y + menu.h > (float)h - menu_pad) menu.y = (float)h - menu_pad - menu.h;
+        if (menu.x < menu_pad) menu.x = menu_pad;
+        if (menu.y < menu_pad) menu.y = menu_pad;
+        SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+        SDL_FRect shadow = { menu.x + 12.0f, menu.y + 14.0f, menu.w + 20.0f, menu.h + 20.0f };
+        SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 146);
+        SDL_RenderFillRect(app->renderer, &shadow);
+        SDL_FRect soft_shadow = { menu.x + 4.0f, menu.y + 6.0f, menu.w + 12.0f, menu.h + 12.0f };
+        SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 96);
+        SDL_RenderFillRect(app->renderer, &soft_shadow);
         SDL_SetRenderDrawColor(app->renderer, 12, 13, 20, 238);
         SDL_RenderFillRect(app->renderer, &menu);
         SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
@@ -3008,6 +3297,7 @@ bool app_init(App *app){
     app->timeline.timeline_bpm = 120.0;
     app->timeline.timeline_beats_per_bar = 4;
     app->timeline.timeline_beat_unit = 4;
+    timeline_set_tempo_event_no_lock(&app->timeline, 0, app->timeline.timeline_bpm);
     timeline_init_lanes(&app->timeline);
     app->timeline.timeline_cursor_tick = 0;
     app->timeline.play_range_start_tick = 0;

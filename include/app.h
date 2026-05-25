@@ -45,6 +45,8 @@ typedef enum {
 
 typedef enum {
     TIMELINE_CONTEXT_ITEM_INSERT_BAR,
+    TIMELINE_CONTEXT_ITEM_MARK_TEMPO,
+    TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO,
     TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE,
     TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER,
     TIMELINE_CONTEXT_ITEM_DELETE_ROSTER,
@@ -154,6 +156,10 @@ void app_timeline_close_context_menu(App *app);
 void app_timeline_context_menu_move(App *app, int delta);
 void app_timeline_context_menu_apply(App *app);
 void app_timeline_insert_bar_at_cursor(App *app);
+void app_timeline_mark_tempo_at_cursor(App *app);
+void app_timeline_remove_tempo_at_cursor(App *app);
+void app_timeline_adjust_tempo_event_at_cursor(App *app, double delta);
+bool app_timeline_cursor_on_tempo_event(const App *app);
 void app_timeline_remove_selected_instance(App *app);
 void app_delete_selected_roster_clip(App *app);
 void app_export_selected_roster_clip(App *app);
