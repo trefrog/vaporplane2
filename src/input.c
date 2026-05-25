@@ -336,6 +336,14 @@ bool input_handle_event(App *app, const SDL_Event *e){
         if(e->key.key==SDLK_ESCAPE) app->controls_legend_open = false;
         return true;
     }
+    if(app->waveform_sidecar_confirm_open) {
+        switch(e->key.key) {
+            case SDLK_RETURN: app_confirm_write_tempo_sidecar(app); break;
+            case SDLK_ESCAPE: app_cancel_write_tempo_sidecar(app); break;
+            default: break;
+        }
+        return true;
+    }
     if(app->sample_selector_open) {
         switch(e->key.key) {
             case SDLK_ESCAPE: app->sample_selector_open=false; break;
@@ -444,6 +452,12 @@ void input_update_gamepad(App *app, double dt){
     bool left_shoulder_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
     bool right_shoulder_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
     bool left_stick_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+
+    if(app->waveform_sidecar_confirm_open) {
+        if(south_pressed) app_confirm_write_tempo_sidecar(app);
+        if(east_pressed) app_cancel_write_tempo_sidecar(app);
+        return;
+    }
 
     if(r2_shift && start_pressed) {
         app_toggle_view_mode(app);
@@ -587,12 +601,14 @@ void input_update_gamepad(App *app, double dt){
 
     if(app->tempo_lock_mode) {
         if(l2_shift && r2_shift && south_pressed) app_apply_tempo_lock_and_capture(app);
+        else if(l2_shift && r2_shift && back_pressed) app_request_write_tempo_sidecar(app);
         else if(r2_shift && north_pressed) app_snap_tempo_lock_downbeat_to_loop_start(app);
         else if(r2_shift && east_pressed) app_clear_tempo_lock(app);
         else if(south_pressed) app_apply_tempo_lock(app);
         else if(east_pressed) app_cancel_tempo_lock_mode(app);
         else if(north_pressed) app_cycle_tempo_lock_meter(app, 1);
         else if(west_pressed) app_cycle_tempo_lock_meter(app, -1);
+        if(l2_shift && r2_shift && back_pressed) return;
         if(back_pressed) toggle_metronome(app);
 
         update_tempo_bpm_dpad(app, dt, l2_shift);
@@ -614,10 +630,11 @@ void input_update_gamepad(App *app, double dt){
 
     if(r2_shift) {
         if(l2_shift && south_pressed) app_capture_current_loop_to_roster(app);
+        else if(l2_shift && back_pressed) app_request_write_tempo_sidecar(app);
         else if(south_pressed) set_loop_to_visible(app);
         if(north_pressed) app_enter_tempo_lock_mode(app);
         if(east_pressed) app_clear_tempo_lock(app);
-        if(south_pressed || north_pressed || east_pressed) return;
+        if(south_pressed || north_pressed || east_pressed || back_pressed) return;
     } else {
         if(south_pressed || start_pressed) toggle_playing(app);
         if(east_pressed) jump_to_loop_start(app);

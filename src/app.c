@@ -315,7 +315,7 @@ static void app_set_timeline_edit_status(App *app) {
                  timeline_edit_clip_name(app));
 }
 
-#define TIMELINE_CONTEXT_MAX_ITEMS 8
+#define TIMELINE_CONTEXT_MAX_ITEMS 9
 
 static void app_timeline_clear_context_menu(App *app) {
     app->timeline_context_menu_open = false;
@@ -513,6 +513,7 @@ static int timeline_context_menu_items(const App *app,
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
         case TIMELINE_CONTEXT_SCOPE_ROSTER:
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_FREE;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_PULSE;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_INSERT_PULSE;
@@ -548,6 +549,7 @@ static const char *timeline_context_item_label(TimelineContextMenuItem item) {
         case TIMELINE_CONTEXT_ITEM_MARK_TEMPO: return "Mark tempo";
         case TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO: return "Remove tempo";
         case TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE: return "Remove instance";
+        case TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM: return "Open waveform";
         case TIMELINE_CONTEXT_ITEM_PLACE_FREE: return "Place free";
         case TIMELINE_CONTEXT_ITEM_PLACE_PULSE: return "Place pulse";
         case TIMELINE_CONTEXT_ITEM_INSERT_PULSE: return "Insert pulse";
@@ -976,7 +978,7 @@ static void clamp_tempo_params(App *app, TempoLockParams *params) {
     if (params->bpm > 300.0) params->bpm = 300.0;
     if (params->beats_per_bar < 1) params->beats_per_bar = 4;
     if (params->beat_unit < 1) params->beat_unit = 4;
-    if (params->target_bars < 0.5) params->target_bars = 0.5;
+    if (params->target_bars < 0.25) params->target_bars = 0.25;
     if (params->target_bars > 32.0) params->target_bars = 32.0;
     if (params->downbeat_frame >= app->clip.frame_count) {
         params->downbeat_frame = app->clip.frame_count > 0 ? app->clip.frame_count - 1 : 0;
@@ -991,6 +993,37 @@ static void copy_tempo_params_to_clip(AudioClip *clip, const TempoLockParams *pa
     clip->downbeat_frame = params->downbeat_frame;
     clip->beats_per_bar = params->beats_per_bar;
     clip->beat_unit = params->beat_unit;
+}
+
+static void app_set_waveform_source_generated(App *app) {
+    app->waveform_source_mode = WAVEFORM_SOURCE_GENERATED;
+    app->waveform_source_roster_index = -1;
+    app->waveform_source_name[0] = '\0';
+    app->waveform_source_path[0] = '\0';
+    app->waveform_source_offset_frame = 0;
+    app->waveform_sidecar_confirm_open = false;
+}
+
+static void app_set_waveform_source_wav(App *app, const char *path) {
+    app->waveform_source_mode = WAVEFORM_SOURCE_WAV;
+    app->waveform_source_roster_index = -1;
+    app->waveform_source_offset_frame = 0;
+    SDL_strlcpy(app->waveform_source_path, path ? path : "", sizeof(app->waveform_source_path));
+    capture_base_name(&app->clip, app->waveform_source_name, sizeof(app->waveform_source_name));
+    app->waveform_sidecar_confirm_open = false;
+}
+
+static void app_set_waveform_source_roster(App *app, int roster_index, const RosterClip *clip) {
+    app->waveform_source_mode = WAVEFORM_SOURCE_ROSTER;
+    app->waveform_source_roster_index = roster_index;
+    app->waveform_source_offset_frame = clip ? clip->source_loop_start_frame : 0;
+    SDL_strlcpy(app->waveform_source_name,
+                clip && clip->name[0] ? clip->name : "roster",
+                sizeof(app->waveform_source_name));
+    SDL_strlcpy(app->waveform_source_path,
+                clip && clip->source_path[0] ? clip->source_path : "",
+                sizeof(app->waveform_source_path));
+    app->waveform_sidecar_confirm_open = false;
 }
 
 BpmSource app_bpm_source(const App *app) {
@@ -1128,12 +1161,17 @@ void app_capture_current_loop_to_roster(App *app) {
     RosterClip next;
     SDL_memset(&next, 0, sizeof(next));
     char base[APP_ROSTER_CLIP_NAME_MAX];
-    capture_base_name(&app->clip, base, sizeof(base));
+    if (app->waveform_source_mode == WAVEFORM_SOURCE_ROSTER && app->waveform_source_name[0]) {
+        SDL_strlcpy(base, app->waveform_source_name, sizeof(base));
+    } else {
+        capture_base_name(&app->clip, base, sizeof(base));
+    }
     int number = next_capture_number(app, base);
     SDL_snprintf(next.name, sizeof(next.name), "%s#%03d", base, number);
-    SDL_strlcpy(next.source_path, app->clip.file_path, sizeof(next.source_path));
-    next.source_loop_start_frame = start;
-    next.source_loop_end_frame = end;
+    const char *source_path = app->waveform_source_path[0] ? app->waveform_source_path : app->clip.file_path;
+    SDL_strlcpy(next.source_path, source_path, sizeof(next.source_path));
+    next.source_loop_start_frame = app->waveform_source_offset_frame + start;
+    next.source_loop_end_frame = app->waveform_source_offset_frame + end;
     next.sample_rate = app->clip.sample_rate;
     next.channels = app->clip.channels;
     next.frame_count = frame_count;
@@ -1198,6 +1236,179 @@ void app_capture_current_loop_to_roster(App *app) {
 
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Captured %s to roster", app->roster[roster_index].name);
+}
+
+void app_open_selected_roster_clip_waveform(App *app) {
+    if (app->selected_roster_clip < 0 || app->selected_roster_clip >= app->roster_clip_count) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "No roster clip selected");
+        return;
+    }
+
+    RosterClip *roster_clip = &app->roster[app->selected_roster_clip];
+    if (!roster_clip->samples || roster_clip->frame_count < 1 ||
+        roster_clip->channels <= 0 || roster_clip->sample_rate <= 0) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Invalid roster clip");
+        return;
+    }
+
+    size_t sample_count = roster_clip->frame_count * (size_t)roster_clip->channels;
+    if (sample_count > SIZE_MAX / sizeof(float)) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Clip too large");
+        return;
+    }
+    size_t byte_count = sample_count * sizeof(float);
+    float *samples = (float *)SDL_malloc(byte_count);
+    if (!samples) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Memory allocation failed");
+        return;
+    }
+    SDL_memcpy(samples, roster_clip->samples, byte_count);
+
+    AudioClip next;
+    SDL_memset(&next, 0, sizeof(next));
+    SDL_snprintf(next.file_path, sizeof(next.file_path), "roster://%s", roster_clip->name);
+    next.sample_rate = roster_clip->sample_rate;
+    next.channels = roster_clip->channels;
+    next.frame_count = roster_clip->frame_count;
+    next.samples = samples;
+    next.loop_start_frame = 0;
+    next.loop_end_frame = next.frame_count;
+    next.source_bpm = timeline_clamp_bpm(roster_clip->source_bpm);
+    next.has_clip_metadata_bpm = true;
+    next.clip_metadata_bpm = next.source_bpm;
+    next.clip_tempo_locked = true;
+    next.beats_per_bar = roster_clip->beats_per_bar > 0 ? roster_clip->beats_per_bar : 4;
+    next.beat_unit = roster_clip->beat_unit > 0 ? roster_clip->beat_unit : 4;
+    next.downbeat_frame = roster_clip->downbeat_offset_frames < next.frame_count ?
+        roster_clip->downbeat_offset_frames : 0;
+    next.tempo_lock.bpm = next.source_bpm;
+    next.tempo_lock.downbeat_frame = next.downbeat_frame;
+    next.tempo_lock.beats_per_bar = next.beats_per_bar;
+    next.tempo_lock.beat_unit = next.beat_unit;
+    next.tempo_lock.target_bars = roster_clip->target_bars > 0.0 ?
+        roster_clip->target_bars :
+        (roster_clip->target_beats > 0.0 ? roster_clip->target_beats / (double)next.beats_per_bar : 1.0);
+    next.playback_rate = 1.0;
+    next.gain = 0.9f;
+
+    audio_engine_stop_timeline(&app->audio, true);
+    audio_engine_stop_preview(&app->audio);
+    if (app->audio.stream && !SDL_LockAudioStream(app->audio.stream)) {
+        clip_destroy(&next);
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Could not lock audio stream");
+        return;
+    }
+
+    AudioClip old = app->clip;
+    app->clip = next;
+    clip_destroy(&old);
+    app->view_mode = APP_VIEW_WAVEFORM;
+    app->tempo_lock_mode = false;
+    app->transport.playing = false;
+    app->transport_bpm_manual = false;
+    app->transport_bpm = app->clip.source_bpm;
+    app->has_retained_tempo_lock_params = false;
+    app->retained_tempo_lock_stale = false;
+    app_set_waveform_source_roster(app, app->selected_roster_clip, roster_clip);
+    audio_engine_set_playback_mode(&app->audio, AUDIO_PLAYBACK_WAVEFORM);
+    audio_engine_set_playhead(&app->audio, app->clip.loop_start_frame);
+    transport_jump_to_seconds(&app->transport, 0.0);
+    waveform_view_init(&app->view);
+    app_timeline_clear_context_menu(app);
+    sync_transport_from_app(app);
+
+    if (app->audio.stream) {
+        SDL_ClearAudioStream(app->audio.stream);
+        SDL_UnlockAudioStream(app->audio.stream);
+    }
+
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Opened %s in waveform", roster_clip->name);
+}
+
+static void app_active_sidecar_tempo_params(App *app, TempoLockParams *params) {
+    if (app->tempo_lock_mode) {
+        *params = app->tempo_lock_draft;
+        return;
+    }
+    if (app->transport_bpm_manual) {
+        *params = default_tempo_params(app);
+        params->bpm = app->transport_bpm;
+        params->downbeat_frame = app->clip.loop_start_frame;
+        return;
+    }
+    if (app_get_active_tempo_params(app, params)) return;
+    *params = default_tempo_params(app);
+    params->bpm = app->transport.bpm > 0.0 ? app->transport.bpm : app->transport_bpm;
+    params->downbeat_frame = app->clip.downbeat_frame;
+}
+
+void app_request_write_tempo_sidecar(App *app) {
+    if (app->view_mode != APP_VIEW_WAVEFORM) return;
+    if (app->waveform_source_mode != WAVEFORM_SOURCE_WAV || !app->waveform_source_path[0]) {
+        app_set_status(app, "Sidecar write is source WAV only");
+        return;
+    }
+    app->waveform_sidecar_confirm_open = true;
+    app->sample_selector_open = false;
+    app_set_status(app, "Confirm tempo sidecar write");
+}
+
+void app_cancel_write_tempo_sidecar(App *app) {
+    app->waveform_sidecar_confirm_open = false;
+    app_set_status(app, "Tempo sidecar write cancelled");
+}
+
+void app_confirm_write_tempo_sidecar(App *app) {
+    if (!app->waveform_sidecar_confirm_open) return;
+    app->waveform_sidecar_confirm_open = false;
+    if (app->waveform_source_mode != WAVEFORM_SOURCE_WAV || !app->waveform_source_path[0]) {
+        app_set_status(app, "Sidecar write is source WAV only");
+        return;
+    }
+
+    TempoLockParams params;
+    app_active_sidecar_tempo_params(app, &params);
+    clamp_tempo_params(app, &params);
+
+    char sidecar[CLIP_MAX_PATH + 6];
+    SDL_snprintf(sidecar, sizeof(sidecar), "%s.json", app->waveform_source_path);
+
+    char json[512];
+    if (params.downbeat_frame > 0) {
+        SDL_snprintf(json, sizeof(json),
+                     "{\n  \"bpm\": %.6g,\n  \"beats_per_bar\": %d,\n  \"beat_unit\": %d,\n  \"target_bars\": %.6g,\n  \"downbeat_frame\": %llu\n}\n",
+                     params.bpm,
+                     params.beats_per_bar,
+                     params.beat_unit,
+                     params.target_bars,
+                     (unsigned long long)params.downbeat_frame);
+    } else {
+        SDL_snprintf(json, sizeof(json),
+                     "{\n  \"bpm\": %.6g,\n  \"beats_per_bar\": %d,\n  \"beat_unit\": %d,\n  \"target_bars\": %.6g\n}\n",
+                     params.bpm,
+                     params.beats_per_bar,
+                     params.beat_unit,
+                     params.target_bars);
+    }
+
+    SDL_IOStream *io = SDL_IOFromFile(sidecar, "wb");
+    if (!io) {
+        app_set_status(app, "Could not write tempo sidecar");
+        return;
+    }
+    size_t len = SDL_strlen(json);
+    bool ok = SDL_WriteIO(io, json, len) == len;
+    ok = SDL_CloseIO(io) && ok;
+    if (!ok) {
+        app_set_status(app, "Could not write tempo sidecar");
+        return;
+    }
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Wrote %s", sidecar);
 }
 
 void app_toggle_view_mode(App *app) {
@@ -1794,6 +2005,13 @@ void app_timeline_context_menu_apply(App *app) {
                 app->selected_timeline_lane = app->timeline_context_menu_instance.lane_index;
             }
             app_timeline_remove_selected_instance(app);
+            break;
+        case TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM:
+            if (app->timeline_context_menu_roster_index >= 0 &&
+                app->timeline_context_menu_roster_index < app->roster_clip_count) {
+                app->selected_roster_clip = app->timeline_context_menu_roster_index;
+            }
+            app_open_selected_roster_clip_waveform(app);
             break;
         case TIMELINE_CONTEXT_ITEM_PLACE_FREE:
         case TIMELINE_CONTEXT_ITEM_PLACE_PULSE:
@@ -2414,7 +2632,7 @@ void app_snap_tempo_lock_downbeat_to_loop_start(App *app) {
 }
 
 void app_cycle_tempo_lock_target_bars(App *app, int direction) {
-    static const double options[] = {0.5, 1.0, 2.0, 4.0, 8.0};
+    static const double options[] = {0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0};
     int count = (int)(sizeof(options) / sizeof(options[0]));
     int index = 0;
     double best = fabs(app->tempo_lock_draft.target_bars - options[0]);
@@ -2496,6 +2714,7 @@ bool load_clip_from_path(App *app, const char *path) {
     app->has_retained_tempo_lock_params = false;
     app->retained_tempo_lock_stale = false;
     set_transport_bpm_from_metadata(app);
+    app_set_waveform_source_wav(app, path);
     audio_engine_set_playhead(&app->audio, app->clip.loop_start_frame);
     transport_jump_to_seconds(&app->transport, 0.0);
     waveform_view_init(&app->view);
@@ -2566,7 +2785,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "R2+South set loop to visible   L2+R2+South capture loop"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform right stick picker   R2+Start timeline/waveform"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Waveform R2+North tempo lock"); y += 22.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Waveform R2+North tempo lock   L2+R2+Back writes tempo JSON"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: South apply   L2+R2+South apply+roster   East/T cancel"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: R2+North snap downbeat   R2+East clear"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: d-pad BPM/bars   L2+d-pad coarse BPM   sticks/bumpers downbeat");
@@ -3072,11 +3291,14 @@ static void app_render_timeline(App *app) {
         SDL_RenderRect(app->renderer, &roster_panel);
         SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
         SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 14.0f, "ROSTER");
+        SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 28.0f, "BPM");
+        SDL_RenderDebugText(app->renderer, roster_panel.x + 92.0f, roster_panel.y + 28.0f, "CLIP");
+        SDL_RenderDebugText(app->renderer, roster_panel.x + roster_panel.w - 54.0f, roster_panel.y + 28.0f, "BEATS");
         int visible = ((int)roster_panel.h - 52) / 18;
         if (visible > app->roster_clip_count) visible = app->roster_clip_count;
         for (int i = 0; i < visible; ++i) {
             RosterClip *clip = &app->roster[i];
-            float y = roster_panel.y + 42.0f + (float)i * 18.0f;
+            float y = roster_panel.y + 48.0f + (float)i * 18.0f;
             if (i == app->selected_roster_clip) {
                 SDL_FRect row = { roster_panel.x + 10.0f, y - 3.0f, roster_panel.w - 20.0f, 16.0f };
                 if (app->selected_roster_clip_armed) SDL_SetRenderDrawColor(app->renderer, 86, 78, 38, 230);
@@ -3087,12 +3309,13 @@ static void app_render_timeline(App *app) {
                     SDL_RenderRect(app->renderer, &row);
                 }
             }
-            SDL_FRect swatch = { roster_panel.x + 14.0f, y - 1.0f, 12.0f, 12.0f };
+            SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 14.0f, y, "%6.1f", clip->source_bpm);
+            SDL_FRect swatch = { roster_panel.x + 72.0f, y - 1.0f, 12.0f, 12.0f };
             SDL_SetRenderDrawColor(app->renderer, clip->color.r, clip->color.g, clip->color.b, 255);
             SDL_RenderFillRect(app->renderer, &swatch);
             SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
-            SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 34.0f, y, "%s  %.1fb %.2fbpm",
-                                      clip->name, clip->target_beats, clip->source_bpm);
+            SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 92.0f, y, "%s", clip->name);
+            SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + roster_panel.w - 54.0f, y, "%.1fb", clip->target_beats);
         }
         render_focus_outline(app, roster_panel, TIMELINE_FOCUS_ROSTER);
     }
@@ -3563,7 +3786,7 @@ static void app_render_overlay(App *app) {
         double target_duration = params.bpm > 0.0 ? target_beats * 60.0 / params.bpm : 0.0;
         double diff = loop_duration - target_duration;
         if (app->tempo_lock_mode) SDL_RenderDebugText(app->renderer, 12, 66, "TEMPO LOCK MODE");
-        SDL_RenderDebugTextFormat(app->renderer, 12, 80, "meter: %d/%d  bars: %.1f  beats: %.1f",
+        SDL_RenderDebugTextFormat(app->renderer, 12, 80, "meter: %d/%d  bars: %.2g  beats: %.1f",
                                   params.beats_per_bar, params.beat_unit, params.target_bars, target_beats);
         SDL_RenderDebugTextFormat(app->renderer, 12, 94, "loop: %.3fs  target: %.3fs  diff: %+.3fs",
                                   loop_duration, target_duration, diff);
@@ -3575,6 +3798,9 @@ static void app_render_overlay(App *app) {
     SDL_RenderDebugTextFormat(app->renderer, 12, 108, "view: %s  roster: %d",
                               view_label,
                               app->roster_clip_count);
+    if (app->view_mode == APP_VIEW_WAVEFORM && app->waveform_source_mode == WAVEFORM_SOURCE_ROSTER) {
+        SDL_RenderDebugTextFormat(app->renderer, 12, 122, "waveform source: roster %s", app->waveform_source_name);
+    }
 
     if (app->sample_selector_open) {
 
@@ -3618,6 +3844,26 @@ static void app_render_overlay(App *app) {
         return;
     }
 
+    if (app->waveform_sidecar_confirm_open) {
+        int w = 0, h = 0;
+        SDL_GetRenderOutputSize(app->renderer, &w, &h);
+        SDL_FRect panel = { (float)w * 0.5f - 210.0f, (float)h * 0.5f - 58.0f, 420.0f, 116.0f };
+        SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+        SDL_FRect shadow = { panel.x + 12.0f, panel.y + 14.0f, panel.w + 18.0f, panel.h + 18.0f };
+        SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 150);
+        SDL_RenderFillRect(app->renderer, &shadow);
+        SDL_SetRenderDrawColor(app->renderer, 12, 13, 20, 242);
+        SDL_RenderFillRect(app->renderer, &panel);
+        SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+        SDL_RenderRect(app->renderer, &panel);
+        SDL_SetRenderDrawColor(app->renderer, 235, 242, 245, 255);
+        SDL_RenderDebugText(app->renderer, panel.x + 14.0f, panel.y + 14.0f, "WRITE TEMPO JSON?");
+        SDL_RenderDebugText(app->renderer, panel.x + 14.0f, panel.y + 34.0f, app->waveform_source_path);
+        SDL_RenderDebugText(app->renderer, panel.x + 14.0f, panel.y + 58.0f, "South/Enter confirms");
+        SDL_RenderDebugText(app->renderer, panel.x + 14.0f, panel.y + 76.0f, "East/Escape cancels");
+        return;
+    }
+
     if (app->controls_legend_open) app_render_controls_legend(app);
 }
 
@@ -3640,6 +3886,7 @@ bool app_init(App *app){
     app->transport_bpm = 120.0;
     app->transport_bpm_manual = false;
     app->view_mode = APP_VIEW_WAVEFORM;
+    app_set_waveform_source_generated(app);
     app->controls_legend_open = false;
     app->timeline.ticks_per_beat = app->transport.ppqn;
     app->timeline.timeline_bpm = 120.0;

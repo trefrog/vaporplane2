@@ -30,6 +30,12 @@ typedef enum {
 } AppViewMode;
 
 typedef enum {
+    WAVEFORM_SOURCE_GENERATED,
+    WAVEFORM_SOURCE_WAV,
+    WAVEFORM_SOURCE_ROSTER
+} WaveformSourceMode;
+
+typedef enum {
     TIMELINE_EDIT_NONE,
     TIMELINE_EDIT_MOVE_INSTANCE,
     TIMELINE_EDIT_PLACE_CLIP
@@ -54,6 +60,7 @@ typedef enum {
     TIMELINE_CONTEXT_ITEM_MARK_TEMPO,
     TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO,
     TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE,
+    TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM,
     TIMELINE_CONTEXT_ITEM_PLACE_FREE,
     TIMELINE_CONTEXT_ITEM_PLACE_PULSE,
     TIMELINE_CONTEXT_ITEM_INSERT_PULSE,
@@ -75,6 +82,12 @@ typedef struct App {
     AudioEngine audio;
     WaveformView view;
     AppViewMode view_mode;
+    WaveformSourceMode waveform_source_mode;
+    int waveform_source_roster_index;
+    char waveform_source_name[APP_SAMPLE_NAME_MAX];
+    char waveform_source_path[CLIP_MAX_PATH];
+    size_t waveform_source_offset_frame;
+    bool waveform_sidecar_confirm_open;
     bool controls_legend_open;
 
     SampleEntry samples[APP_MAX_SAMPLES];
@@ -153,6 +166,10 @@ void app_cycle_tempo_lock_target_bars(App *app, int direction);
 void app_cycle_tempo_lock_meter(App *app, int direction);
 void app_note_loop_anchors_moved(App *app);
 void app_capture_current_loop_to_roster(App *app);
+void app_open_selected_roster_clip_waveform(App *app);
+void app_request_write_tempo_sidecar(App *app);
+void app_confirm_write_tempo_sidecar(App *app);
+void app_cancel_write_tempo_sidecar(App *app);
 void app_toggle_view_mode(App *app);
 void app_toggle_controls_legend(App *app);
 void app_toggle_timeline_playback(App *app);

@@ -4,6 +4,7 @@
 - C11 + SDL3 + CMake app split into modules: app, input, transport, audio engine, clip, waveform.
 - WAV loading from `assets/samples/` with runtime generated fallback if no WAV is available.
 - Optional `*.wav.json` sidecar metadata can define source BPM and related loop metadata.
+- Waveform view can write source WAV tempo sidecar JSON from the active tempo state after confirmation.
 - In-app sample selector backed by reusable `load_clip_from_path(App *, const char *)`.
 - `AudioClip` metadata for path/rate/channels/frames/loop/music metadata/gain/playback rate.
 - Transport with BPM, PPQN, beats-per-bar, beat-unit, play/pause, tick/second conversion.
@@ -15,6 +16,7 @@
 - Zoom-relative keyboard and gamepad loop marker trimming.
 - Dedicated Tempo Lock mode for manual BPM/downbeat/meter/length calibration.
 - Loop capture roster with owned in-memory PCM clips and a first-pass tick-based master timeline.
+- Roster clips can be opened as disposable waveform editing sources; captures from that view create new derived roster clips.
 - Timeline roster preview plays the selected roster clip as a restartable one-shot.
 - Timeline view has focus zones, a tick cursor, beat/bar grid, beat-snapped tempo markers, play range handles, and range playback.
 - Timeline sequencing uses 8 lanes with same-lane overlap blocking and cross-lane overlap allowed.
@@ -59,6 +61,7 @@ cmake --build build
 ## Loop Capture / Timeline
 - In normal waveform mode, `L2 + R2 + South` captures the current loop into the roster as an owned in-memory PCM clip.
 - Captured clips are in-memory only; they retain source path, source loop frames, copied PCM, color, source BPM, meter, target bars/beats, and downbeat offset.
+- Captures from roster-derived waveform sources preserve original source-path/frame lineage while creating a new roster item.
 - The first captured clip initializes the master timeline BPM/meter and base tempo event from that clip, then creates one timeline instance at tick `0` in lane 1.
 - Later captures add roster entries only for now.
 - Timeline has 8 fixed lanes. Each lane owns fixed-capacity timeline instances.
@@ -74,7 +77,7 @@ cmake --build build
 - Timeline context menus are vertical stacks navigated with Up/Down; South/Enter applies and East/Escape backs out.
 - Ruler context menus can mark/remove beat-snapped tempo events; tick `0` is anchored and cannot be removed.
 - Ruler/track context menus can insert one bar before the cursor's current bar, stopping transport first and shifting later instances and later tempo events.
-- Roster context menus can place clips freely, place clips with source pulse metadata, insert clips with source pulse metadata, export WAVs, or delete roster clips with confirmation; deleting a roster clip also removes its timeline instances and compacts references.
+- Roster context menus can open clips in waveform view, place clips freely, place clips with source pulse metadata, insert clips with source pulse metadata, export WAVs, or delete roster clips with confirmation; deleting a roster clip also removes its timeline instances and compacts references.
 - Captures fail cleanly with status text for a full roster, very short loops, oversized clips, or memory allocation failure.
 - Timeline playback is separate from waveform loop playback: switching to timeline view stops waveform playback and waits silently.
 - Timeline focus zones are `TRANSPORT`, `RULER`, `LANE INDEX`, `PLAY RANGE`, `TRACK AREA`, and `ROSTER`.
@@ -104,7 +107,7 @@ cmake --build build
 - `RULER` menus include `Mark tempo` and, when the cursor is on a removable tempo event, `Remove tempo`.
 - `RULER` and `TRACK AREA` menus include `Insert bar`, which inserts one full bar before the cursor's containing bar.
 - `TRACK AREA` menus include instance actions when an instance is selected.
-- `ROSTER` menus include `Place free`, `Place pulse`, `Insert pulse`, `Export WAV`, and confirmed `Delete roster clip`.
+- `ROSTER` menus include `Open waveform`, `Place free`, `Place pulse`, `Insert pulse`, `Export WAV`, and confirmed `Delete roster clip`.
 - In timeline view, left stick pans horizontally and zooms vertically across focus zones; hold L2 for 3x faster viewport movement.
 - In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; tempo seams take two presses to cross; `Shift+Left/Right` pans.
 - In `RULER`, `[` / `]` adjusts the tempo event at the cursor by `0.5` BPM.
@@ -152,13 +155,14 @@ cmake --build build
 - `T` or gamepad `R2 + North`: enter Tempo Lock mode; `T` cancels while active.
 - While active, loop anchor editing is disabled.
 - `[` / `]` or d-pad left/right: adjust draft BPM; gamepad uses fine nudges with a slow hold-repeat, and `L2 + d-pad left/right` uses faster coarse nudges.
-- `,` / `.` or d-pad up/down: cycle target bars through `0.5`, `1`, `2`, `4`, `8`.
+- `,` / `.` or d-pad up/down: cycle target bars through `0.25`, `0.5`, `0.75`, `1`, `2`, `4`, `8`.
 - `B` / `V`, `N` / `Shift+N`, left stick, or bumpers: nudge downbeat anchor.
 - Gamepad `R2 + North`: snap downbeat anchor to the left loop marker while Tempo Lock is active.
 - Right stick: pan/zoom waveform view while calibrating.
 - `M`, gamepad North, or gamepad West: cycle meter among `3/4`, `4/4`, `6/8`.
 - `Return` or South: apply tempo lock.
 - Gamepad `L2 + R2 + South`: apply tempo lock and capture the calibrated loop to the roster.
+- Gamepad `L2 + R2 + Back`: opens a confirmation modal to write source WAV tempo sidecar JSON.
 - `Escape`, `T`, or East: cancel without applying.
 - `Ctrl+T`, `U`, or `R2 + East`: clear/de-apply tempo lock.
 - Clearing keeps the chosen params retained; if anchors move afterward, retained params are marked stale but can still seed re-entry.
@@ -174,6 +178,7 @@ cmake --build build
 - D-pad left/right: trim the selected loop edge relative to visible zoom
 - Left trigger: finer trimming
 - Left trigger + right trigger + South: capture the current loop to the roster
+- Left trigger + right trigger + Back: confirm writing source WAV tempo sidecar JSON
 - Right trigger + South: set loop markers to the visible screen range
 - Right trigger + North: enter Tempo Lock mode; while active, snap downbeat to loop start
 - Right trigger + East: clear/de-apply Tempo Lock
