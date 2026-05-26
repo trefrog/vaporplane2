@@ -1541,8 +1541,6 @@ void app_timeline_cycle_focus(App *app, int direction) {
     app->timeline_focus_zone = (TimelineFocusZone)zone;
     if (app->timeline_focus_zone != TIMELINE_FOCUS_PLAY_RANGE) {
         app->timeline_play_range_adjusting = false;
-    } else {
-        app_timeline_fit_play_range_anchors(app);
     }
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Focus: %s", timeline_focus_label(app->timeline_focus_zone));
 }
@@ -1577,7 +1575,7 @@ void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle)
     app->timeline_play_range_handle = handle;
     app->timeline_focus_zone = TIMELINE_FOCUS_PLAY_RANGE;
     app_timeline_clear_context_menu(app);
-    app_timeline_fit_play_range_anchors(app);
+    if (app->timeline_play_range_adjusting) app_timeline_fit_play_range_anchors(app);
     app_set_status(app, handle == TIMELINE_RANGE_HANDLE_START ? "Play range start handle" : "Play range end handle");
 }
 
@@ -1616,7 +1614,7 @@ void app_timeline_reset_play_range(App *app) {
     app->timeline.timeline_cursor_tick = app->timeline.play_range_start_tick;
     sync_timeline_play_range_no_lock(app);
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
-    app_timeline_fit_play_range_anchors(app);
+    if (app->timeline_play_range_adjusting) app_timeline_fit_play_range_anchors(app);
     app_set_status(app, "Play range reset");
 }
 
