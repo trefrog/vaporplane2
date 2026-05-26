@@ -100,6 +100,7 @@ typedef struct App {
     bool waveform_frame_grip_snap_active;
     int waveform_frame_grip_snap_index;
     double waveform_frame_grip_snap_beats;
+    double waveform_frame_grip_l2_seconds;
     bool controls_legend_open;
 
     SampleEntry samples[APP_MAX_SAMPLES];

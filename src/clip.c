@@ -79,6 +79,10 @@ static void clip_load_sidecar_metadata(AudioClip *clip, const char *path) {
         }
     }
 
+    if (clip->has_clip_metadata_bpm) {
+        clip->clip_tempo_locked = true;
+    }
+
     SDL_free(json);
 }
 

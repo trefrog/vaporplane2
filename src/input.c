@@ -22,6 +22,7 @@ static const double TEMPO_LOCK_BPM_DPAD_REPEAT_INTERVAL = 0.12;
 static const double TEMPO_LOCK_BPM_DPAD_COARSE_REPEAT_INTERVAL = 0.07;
 static const double TIMELINE_CURSOR_STICK_THRESHOLD = 0.28;
 static const double TIMELINE_CURSOR_STICK_MAX_HELD = 3.0;
+static const double WAVEFORM_FRAME_GRIP_L2_ARM_SECONDS = 0.12;
 
 static void clamp_view_target(App *app) {
     if(app->view.target_span<0.000000001) app->view.target_span=0.000000001;
@@ -686,8 +687,7 @@ void input_update_gamepad(App *app, double dt){
         return;
     }
 
-    if(r2_shift && start_pressed &&
-       !(l2_shift && waveform_frame_grip_available(app))) {
+    if(r2_shift && start_pressed && !app->waveform_frame_grip_active) {
         app_toggle_view_mode(app);
         return;
     }
@@ -870,15 +870,29 @@ void input_update_gamepad(App *app, double dt){
         return;
     }
 
-    if(waveform_frame_grip_available(app) && l2_shift) {
-        waveform_frame_grip_update(app, ly, dt, r2_shift);
-        return;
-    }
-    if(app->waveform_frame_grip_active) {
-        app->waveform_frame_grip_active = false;
-        app->waveform_frame_grip_snap_active = false;
-        SDL_strlcpy(app->status_text, "Frame grip ready: R2+South commits", sizeof(app->status_text));
-    } else if(!waveform_frame_grip_available(app)) {
+    if(waveform_frame_grip_available(app)) {
+        if(l2_shift && app->waveform_frame_grip_active) {
+            waveform_frame_grip_update(app, ly, dt, r2_shift);
+            return;
+        }
+        if(l2_shift && !r2_shift) {
+            app->waveform_frame_grip_l2_seconds += dt;
+            if(app->waveform_frame_grip_l2_seconds >= WAVEFORM_FRAME_GRIP_L2_ARM_SECONDS) {
+                waveform_frame_grip_update(app, ly, dt, false);
+            } else {
+                SDL_strlcpy(app->status_text, "Frame grip arming", sizeof(app->status_text));
+            }
+            return;
+        }
+        if(app->waveform_frame_grip_active) {
+            app->waveform_frame_grip_active = false;
+            app->waveform_frame_grip_snap_active = false;
+            app->waveform_frame_grip_l2_seconds = 0.0;
+            SDL_strlcpy(app->status_text, "Frame grip ready: R2+South commits", sizeof(app->status_text));
+        } else if(!l2_shift) {
+            app->waveform_frame_grip_l2_seconds = 0.0;
+        }
+    } else {
         app_clear_waveform_frame_grip(app);
     }
 

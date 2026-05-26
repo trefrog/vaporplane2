@@ -1050,6 +1050,7 @@ void app_clear_waveform_frame_grip(App *app) {
     app->waveform_frame_grip_snap_active = false;
     app->waveform_frame_grip_snap_index = -1;
     app->waveform_frame_grip_snap_beats = 0.0;
+    app->waveform_frame_grip_l2_seconds = 0.0;
 }
 
 BpmSource app_bpm_source(const App *app) {
