@@ -236,12 +236,12 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
         case SDLK_C: app_timeline_open_context_menu(app); return true;
         case SDLK_LEFTBRACKET:
             if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER) app_timeline_adjust_tempo_event_at_cursor(app, -0.5);
-            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_adjust_tape_control(app, -1);
+            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_adjust_tape_control(app, -1, 1.0);
             else app_timeline_adjust_selected_instance_velocity(app, -5);
             return true;
         case SDLK_RIGHTBRACKET:
             if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER) app_timeline_adjust_tempo_event_at_cursor(app, 0.5);
-            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_adjust_tape_control(app, 1);
+            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_adjust_tape_control(app, 1, 1.0);
             else app_timeline_adjust_selected_instance_velocity(app, 5);
             return true;
         case SDLK_T:
@@ -580,8 +580,9 @@ void input_update_gamepad(App *app, double dt){
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
                 app_timeline_set_tape_control_mode(app, TIMELINE_TAPE_CONTROL_BPM);
             }
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_timeline_adjust_tape_control(app, -1);
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_timeline_adjust_tape_control(app, 1);
+            double bpm_step = r2_shift && app->timeline_tape_control_mode == TIMELINE_TAPE_CONTROL_BPM ? 0.01 : 1.0;
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_timeline_adjust_tape_control(app, -1, bpm_step);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_timeline_adjust_tape_control(app, 1, bpm_step);
             return;
         }
 

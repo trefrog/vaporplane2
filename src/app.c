@@ -2182,8 +2182,9 @@ void app_timeline_toggle_tape_control_mode(App *app) {
     app_timeline_set_tape_control_mode(app, next);
 }
 
-void app_timeline_adjust_tape_control(App *app, int direction) {
+void app_timeline_adjust_tape_control(App *app, int direction, double bpm_step) {
     if (!app || direction == 0) return;
+    if (bpm_step <= 0.0) bpm_step = 1.0;
 
     int64_t tick = timeline_tape_reference_tick(app);
     float speed = timeline_effective_tape_speed(&app->timeline);
@@ -2192,7 +2193,8 @@ void app_timeline_adjust_tape_control(App *app, int direction) {
         double semitones = timeline_tape_pitch_semitones(speed) + (double)direction;
         speed = timeline_tape_speed_from_pitch_semitones(semitones);
     } else {
-        double audible_bpm = timeline_audible_bpm_at_tick(&app->timeline, (double)tick) + (double)direction;
+        double audible_bpm = timeline_audible_bpm_at_tick(&app->timeline, (double)tick) +
+                             (double)direction * bpm_step;
         speed = timeline_tape_speed_from_audible_bpm(&app->timeline, (double)tick, audible_bpm);
     }
     app->timeline.tape_speed = speed;
@@ -2839,7 +2841,8 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space play/pause   Enter/South activate focus   East cancel"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: C/Start menu   Up/Down choose   South apply   East backs out"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline stick: Left/Right pan   Up/Down zoom   L2 turbo"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Transport focus: [/] or D-pad L/R tape   T or D-pad U/D mode   0/stick reset"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Transport focus: [/] or D-pad L/R tape   R2 fine BPM   T or D-pad U/D mode"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Transport focus: 0 or left stick resets tape speed"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Ruler: L/R beat cursor   C menu marks/removes tempo   [/] adjusts marked BPM"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Index: Up/Down lane   South opens Lane Inspector"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Inspector: L/R palette   South mute   East timeline   R2 transport"); y += 16.0f;

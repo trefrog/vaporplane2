@@ -197,7 +197,7 @@ void app_timeline_adjust_tempo_event_at_cursor(App *app, double delta);
 bool app_timeline_cursor_on_tempo_event(const App *app);
 void app_timeline_set_tape_control_mode(App *app, TimelineTapeControlMode mode);
 void app_timeline_toggle_tape_control_mode(App *app);
-void app_timeline_adjust_tape_control(App *app, int direction);
+void app_timeline_adjust_tape_control(App *app, int direction, double bpm_step);
 void app_timeline_reset_tape_speed(App *app);
 void app_timeline_remove_selected_instance(App *app);
 void app_delete_selected_roster_clip(App *app);
