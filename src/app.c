@@ -402,6 +402,21 @@ static const char *timeline_seam_side_short_label(TimelineSeamSide side) {
     }
 }
 
+static const char *timeline_tape_control_mode_label(TimelineTapeControlMode mode) {
+    switch (mode) {
+        case TIMELINE_TAPE_CONTROL_PITCH: return "pitch";
+        case TIMELINE_TAPE_CONTROL_BPM:
+        default: return "bpm";
+    }
+}
+
+static int64_t timeline_tape_reference_tick(App *app) {
+    if (audio_engine_timeline_is_playing(&app->audio)) {
+        return audio_engine_get_timeline_playhead_tick(&app->audio);
+    }
+    return app->timeline.timeline_cursor_tick;
+}
+
 static TimelineSeamSide timeline_default_seam_side_for_tick(const MasterTimeline *timeline, int64_t tick) {
     return timeline_tick_is_navigation_seam(timeline, tick) ? TIMELINE_SEAM_AFTER : TIMELINE_SEAM_NONE;
 }
@@ -2151,6 +2166,58 @@ bool app_timeline_cursor_on_tempo_event(const App *app) {
     return timeline_tempo_event_index_at_tick(&app->timeline, tick) >= 0;
 }
 
+void app_timeline_set_tape_control_mode(App *app, TimelineTapeControlMode mode) {
+    if (!app) return;
+    app->timeline_tape_control_mode = mode;
+    SDL_snprintf(app->status_text, sizeof(app->status_text),
+                 "Tape control: %s",
+                 timeline_tape_control_mode_label(app->timeline_tape_control_mode));
+}
+
+void app_timeline_toggle_tape_control_mode(App *app) {
+    if (!app) return;
+    TimelineTapeControlMode next =
+        app->timeline_tape_control_mode == TIMELINE_TAPE_CONTROL_BPM ?
+        TIMELINE_TAPE_CONTROL_PITCH : TIMELINE_TAPE_CONTROL_BPM;
+    app_timeline_set_tape_control_mode(app, next);
+}
+
+void app_timeline_adjust_tape_control(App *app, int direction) {
+    if (!app || direction == 0) return;
+
+    int64_t tick = timeline_tape_reference_tick(app);
+    float speed = timeline_effective_tape_speed(&app->timeline);
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    if (app->timeline_tape_control_mode == TIMELINE_TAPE_CONTROL_PITCH) {
+        double semitones = timeline_tape_pitch_semitones(speed) + (double)direction;
+        speed = timeline_tape_speed_from_pitch_semitones(semitones);
+    } else {
+        double audible_bpm = timeline_audible_bpm_at_tick(&app->timeline, (double)tick) + (double)direction;
+        speed = timeline_tape_speed_from_audible_bpm(&app->timeline, (double)tick, audible_bpm);
+    }
+    app->timeline.tape_speed = speed;
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    double canonical_bpm = timeline_effective_bpm_at_tick(&app->timeline, (double)tick);
+    double audible_bpm = timeline_audible_bpm_at_tick(&app->timeline, (double)tick);
+    double semitones = timeline_tape_pitch_semitones(speed);
+    SDL_snprintf(app->status_text, sizeof(app->status_text),
+                 "Tape %s: %.3fx  canon %.2f  hear %.2f  pitch %+.2f st",
+                 timeline_tape_control_mode_label(app->timeline_tape_control_mode),
+                 speed,
+                 canonical_bpm,
+                 audible_bpm,
+                 semitones);
+}
+
+void app_timeline_reset_tape_speed(App *app) {
+    if (!app) return;
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    app->timeline.tape_speed = TIMELINE_TAPE_SPEED_DEFAULT;
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    app_set_status(app, "Tape speed reset: 1.000x");
+}
+
 void app_timeline_insert_bar_at_cursor(App *app) {
     if (!app->timeline.initialized) {
         app_timeline_clear_context_menu(app);
@@ -2772,6 +2839,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space play/pause   Enter/South activate focus   East cancel"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: C/Start menu   Up/Down choose   South apply   East backs out"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline stick: Left/Right pan   Up/Down zoom   L2 turbo"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Transport focus: [/] or D-pad L/R tape   T or D-pad U/D mode   0/stick reset"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Ruler: L/R beat cursor   C menu marks/removes tempo   [/] adjusts marked BPM"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Index: Up/Down lane   South opens Lane Inspector"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Inspector: L/R palette   South mute   East timeline   R2 transport"); y += 16.0f;
@@ -2951,8 +3019,11 @@ static void app_render_timeline(App *app) {
                                   edit_verb,
                                   timeline_edit_clip_name(app));
     } else {
-        SDL_RenderDebugTextFormat(app->renderer, 24, 196, "focus: %s%s",
+        SDL_RenderDebugTextFormat(app->renderer, 24, 196, "focus: %s%s%s%s",
                                   timeline_focus_label(app->timeline_focus_zone),
+                                  app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT ? " / tape " : "",
+                                  app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT ?
+                                      timeline_tape_control_mode_label(app->timeline_tape_control_mode) : "",
                                   app->timeline_play_range_adjusting ? " / adjusting" : "");
     }
     if (!app->timeline.initialized) {
@@ -2963,20 +3034,24 @@ static void app_render_timeline(App *app) {
     }
 
     int64_t playhead_for_bpm = audio_engine_get_timeline_playhead_tick(&app->audio);
+    bool timeline_playing = audio_engine_timeline_is_playing(&app->audio);
+    double tape_reference_tick = timeline_playing ?
+        (double)playhead_for_bpm : (double)app->timeline.timeline_cursor_tick;
     double cursor_bpm = timeline_effective_bpm_at_tick(&app->timeline, (double)app->timeline.timeline_cursor_tick);
     double playhead_bpm = timeline_effective_bpm_at_tick(&app->timeline, (double)playhead_for_bpm);
-    SDL_RenderDebugTextFormat(app->renderer, 24, 158, "base bpm: %.2f  cursor: %.2f  play: %.2f  meter: %d/%d",
-                              timeline_base_bpm(&app->timeline),
+    float tape_speed = timeline_effective_tape_speed(&app->timeline);
+    SDL_RenderDebugTextFormat(app->renderer, 24, 158, "canon: cursor %.2f play %.2f  tape: %.3fx  hear: %.2f  pitch: %+.2f st",
                               cursor_bpm,
                               playhead_bpm,
-                              app->timeline.timeline_beats_per_bar,
-                              app->timeline.timeline_beat_unit);
+                              tape_speed,
+                              timeline_audible_bpm_at_tick(&app->timeline, tape_reference_tick),
+                              timeline_tape_pitch_semitones(tape_speed));
     SDL_RenderDebugTextFormat(app->renderer, 24, 176, "length: %lld ticks  playhead: %lld  tempo events: %d  roster: %d  %s",
                               (long long)app->timeline.length_ticks,
                               (long long)playhead_for_bpm,
                               timeline_valid_tempo_event_count(&app->timeline),
                               app->roster_clip_count,
-                              audio_engine_timeline_is_playing(&app->audio) ? "playing" : "stopped");
+                              timeline_playing ? "playing" : "stopped");
     int64_t range_start = 0, range_end = 0;
     timeline_effective_play_range(&app->timeline, &range_start, &range_end);
     const char *cursor_side_label = timeline_seam_side_label(app->timeline.timeline_cursor_seam_side);
@@ -3902,7 +3977,9 @@ bool app_init(App *app){
     app->timeline.play_range_custom = false;
     app->timeline.view_center_tick = (double)app->timeline.ticks_per_beat * 2.0;
     app->timeline.view_span_ticks = (double)app->timeline.ticks_per_beat * 4.0;
+    app->timeline.tape_speed = TIMELINE_TAPE_SPEED_DEFAULT;
     app->timeline_focus_zone = TIMELINE_FOCUS_RULER;
+    app->timeline_tape_control_mode = TIMELINE_TAPE_CONTROL_BPM;
     app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
     app->timeline_play_range_adjusting = false;
     app_timeline_clear_context_menu(app);

@@ -236,11 +236,19 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
         case SDLK_C: app_timeline_open_context_menu(app); return true;
         case SDLK_LEFTBRACKET:
             if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER) app_timeline_adjust_tempo_event_at_cursor(app, -0.5);
+            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_adjust_tape_control(app, -1);
             else app_timeline_adjust_selected_instance_velocity(app, -5);
             return true;
         case SDLK_RIGHTBRACKET:
             if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER) app_timeline_adjust_tempo_event_at_cursor(app, 0.5);
+            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_adjust_tape_control(app, 1);
             else app_timeline_adjust_selected_instance_velocity(app, 5);
+            return true;
+        case SDLK_T:
+            if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_toggle_tape_control_mode(app);
+            return true;
+        case SDLK_0:
+            if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_reset_tape_speed(app);
             return true;
         case SDLK_R:
             if(app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE) app_timeline_reset_play_range(app);
@@ -561,6 +569,19 @@ void input_update_gamepad(App *app, double dt){
         if(app->timeline_play_range_adjusting) {
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_timeline_nudge_play_range(app, -1);
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_timeline_nudge_play_range(app, 1);
+            return;
+        }
+
+        if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) {
+            if(left_stick_pressed) app_timeline_reset_tape_speed(app);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) {
+                app_timeline_set_tape_control_mode(app, TIMELINE_TAPE_CONTROL_PITCH);
+            }
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
+                app_timeline_set_tape_control_mode(app, TIMELINE_TAPE_CONTROL_BPM);
+            }
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_timeline_adjust_tape_control(app, -1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_timeline_adjust_tape_control(app, 1);
             return;
         }
 

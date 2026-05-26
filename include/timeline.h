@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <SDL3/SDL.h>
@@ -16,6 +17,9 @@
 #define TIMELINE_MIN_BPM 30.0
 #define TIMELINE_MAX_BPM 300.0
 #define TIMELINE_DEFAULT_BPM 120.0
+#define TIMELINE_TAPE_SPEED_DEFAULT 1.0f
+#define TIMELINE_TAPE_SPEED_MIN 0.25f
+#define TIMELINE_TAPE_SPEED_MAX 4.0f
 
 typedef struct {
     char name[APP_ROSTER_CLIP_NAME_MAX];
@@ -103,6 +107,7 @@ typedef struct {
     bool play_range_custom;
     double view_center_tick;
     double view_span_ticks;
+    float tape_speed;
     TimelineTempoEvent tempo_events[TIMELINE_MAX_TEMPO_EVENTS];
     int tempo_event_count;
     TimelineLane lanes[TIMELINE_MAX_LANES];
@@ -158,6 +163,35 @@ static inline double timeline_ticks_per_second_at_tick(const MasterTimeline *tim
     int ticks_per_beat = timeline && timeline->ticks_per_beat > 0 ? timeline->ticks_per_beat : 960;
     double bpm = timeline_effective_bpm_at_tick(timeline, tick);
     return bpm * (double)ticks_per_beat / 60.0;
+}
+
+static inline float timeline_clamp_tape_speed(float speed) {
+    if (speed < TIMELINE_TAPE_SPEED_MIN) return TIMELINE_TAPE_SPEED_MIN;
+    if (speed > TIMELINE_TAPE_SPEED_MAX) return TIMELINE_TAPE_SPEED_MAX;
+    return speed;
+}
+
+static inline float timeline_effective_tape_speed(const MasterTimeline *timeline) {
+    if (!timeline || timeline->tape_speed <= 0.0f) return TIMELINE_TAPE_SPEED_DEFAULT;
+    return timeline_clamp_tape_speed(timeline->tape_speed);
+}
+
+static inline double timeline_audible_bpm_at_tick(const MasterTimeline *timeline, double tick) {
+    return timeline_effective_bpm_at_tick(timeline, tick) * (double)timeline_effective_tape_speed(timeline);
+}
+
+static inline float timeline_tape_speed_from_audible_bpm(const MasterTimeline *timeline, double tick, double audible_bpm) {
+    double canonical_bpm = timeline_effective_bpm_at_tick(timeline, tick);
+    if (canonical_bpm <= 0.0) canonical_bpm = TIMELINE_DEFAULT_BPM;
+    return timeline_clamp_tape_speed((float)(audible_bpm / canonical_bpm));
+}
+
+static inline double timeline_tape_pitch_semitones(float speed) {
+    return 12.0 * log2((double)timeline_clamp_tape_speed(speed));
+}
+
+static inline float timeline_tape_speed_from_pitch_semitones(double semitones) {
+    return timeline_clamp_tape_speed((float)pow(2.0, semitones / 12.0));
 }
 
 static inline double timeline_seconds_between_ticks(const MasterTimeline *timeline, double start_tick, double end_tick) {

@@ -48,6 +48,11 @@ typedef enum {
 } TimelinePlacementMode;
 
 typedef enum {
+    TIMELINE_TAPE_CONTROL_BPM,
+    TIMELINE_TAPE_CONTROL_PITCH
+} TimelineTapeControlMode;
+
+typedef enum {
     TIMELINE_CONTEXT_SCOPE_NONE,
     TIMELINE_CONTEXT_SCOPE_TIMELINE,
     TIMELINE_CONTEXT_SCOPE_INSTANCE,
@@ -113,6 +118,7 @@ typedef struct App {
     int roster_clip_count;
     MasterTimeline timeline;
     TimelineFocusZone timeline_focus_zone;
+    TimelineTapeControlMode timeline_tape_control_mode;
     TimelineRangeHandle timeline_play_range_handle;
     bool timeline_play_range_adjusting;
     bool timeline_context_menu_open;
@@ -189,6 +195,10 @@ void app_timeline_mark_tempo_at_cursor(App *app);
 void app_timeline_remove_tempo_at_cursor(App *app);
 void app_timeline_adjust_tempo_event_at_cursor(App *app, double delta);
 bool app_timeline_cursor_on_tempo_event(const App *app);
+void app_timeline_set_tape_control_mode(App *app, TimelineTapeControlMode mode);
+void app_timeline_toggle_tape_control_mode(App *app);
+void app_timeline_adjust_tape_control(App *app, int direction);
+void app_timeline_reset_tape_speed(App *app);
 void app_timeline_remove_selected_instance(App *app);
 void app_delete_selected_roster_clip(App *app);
 void app_export_selected_roster_clip(App *app);

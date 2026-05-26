@@ -288,7 +288,8 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
         a->metronome_beat_valid = false;
     }
 
-    double ticks_per_second = timeline_ticks_per_second_at_tick(timeline, a->timeline_playhead_tick);
+    double ticks_per_second = timeline_ticks_per_second_at_tick(timeline, a->timeline_playhead_tick) *
+                              (double)timeline_effective_tape_speed(timeline);
     double tick_step = ticks_per_second / (double)a->spec.freq;
     if(tick_step <= 0.0) return;
 
