@@ -245,11 +245,59 @@ static int64_t timeline_snap_ticks(const MasterTimeline *timeline) {
     return timeline->ticks_per_beat > 0 ? (int64_t)timeline->ticks_per_beat : 960;
 }
 
-static int64_t timeline_snap_tick_down_for_timeline(const MasterTimeline *timeline, int64_t tick) {
-    int64_t snap = timeline_snap_ticks(timeline);
+static int64_t timeline_snap_tick_down_to_grid(int64_t tick, int64_t snap) {
     if (snap <= 1) return tick < 0 ? 0 : tick;
     if (tick < 0) tick = 0;
     return (tick / snap) * snap;
+}
+
+static int timeline_bar_ticks(const MasterTimeline *timeline) {
+    int ticks_per_beat = timeline->ticks_per_beat > 0 ? timeline->ticks_per_beat : 960;
+    int beats_per_bar = timeline->timeline_beats_per_bar > 0 ? timeline->timeline_beats_per_bar : 4;
+    int64_t ticks = (int64_t)ticks_per_beat * (int64_t)beats_per_bar;
+    if (ticks < 1) ticks = 1;
+    if (ticks > 0x7fffffff) ticks = 0x7fffffff;
+    return (int)ticks;
+}
+
+static double timeline_visible_bars(const App *app) {
+    if (!app) return 0.0;
+    int bar_ticks = timeline_bar_ticks(&app->timeline);
+    double span = app->timeline.view_span_ticks;
+    if (span <= 0.0) span = app->timeline.length_ticks > 0 ? (double)app->timeline.length_ticks : (double)bar_ticks;
+    if (span <= 0.0) span = (double)bar_ticks;
+    return span / (double)bar_ticks;
+}
+
+static int64_t timeline_edit_snap_ticks(const App *app) {
+    if (!app) return 1;
+    int64_t beat = timeline_snap_ticks(&app->timeline);
+    int beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
+    double bars = timeline_visible_bars(app);
+    int64_t snap = beat;
+    if (bars < 3.0) snap = beat / 4;
+    else if (bars < 6.0) snap = beat / 2;
+    else if (bars < 12.0) snap = beat;
+    else if (bars < 20.0) snap = beat * 2;
+    else snap = beat * (int64_t)beats_per_bar;
+    return snap > 0 ? snap : 1;
+}
+
+static const char *timeline_edit_snap_label(const App *app) {
+    if (!app) return "snap";
+    double bars = timeline_visible_bars(app);
+    if (bars < 3.0) return "1/16";
+    if (bars < 6.0) return "1/8";
+    if (bars < 12.0) return "1/4";
+    if (bars < 20.0) return "1/2";
+    return "1 bar";
+}
+
+static int64_t timeline_snap_tick_down(const App *app, int64_t tick) {
+    if (!app) return tick < 0 ? 0 : tick;
+    if (tick < 0) tick = 0;
+    if (timeline_tempo_event_index_at_tick(&app->timeline, tick) >= 0) return tick;
+    return timeline_snap_tick_down_to_grid(tick, timeline_edit_snap_ticks(app));
 }
 
 static int64_t timeline_min_range_ticks(const MasterTimeline *timeline) {
@@ -474,6 +522,30 @@ static void timeline_nudge_tick_with_seams(const MasterTimeline *timeline,
 
     int64_t next = *tick + step_ticks * (direction > 0 ? 1 : -1);
     next = clamp_i64(next, 0, length);
+    if (respect_seams && next != *tick) {
+        int64_t crossed_seam = -1;
+        int count = timeline_valid_tempo_event_count(timeline);
+        for (int i = 0; i < count; ++i) {
+            int64_t event_tick = timeline->tempo_events[i].tick;
+            if (event_tick <= 0) continue;
+            if (direction > 0) {
+                if (event_tick > *tick && event_tick <= next &&
+                    (crossed_seam < 0 || event_tick < crossed_seam)) {
+                    crossed_seam = event_tick;
+                }
+            } else {
+                if (event_tick < *tick && event_tick >= next &&
+                    (crossed_seam < 0 || event_tick > crossed_seam)) {
+                    crossed_seam = event_tick;
+                }
+            }
+        }
+        if (crossed_seam >= 0) {
+            *tick = crossed_seam;
+            *side = direction > 0 ? TIMELINE_SEAM_BEFORE : TIMELINE_SEAM_AFTER;
+            return;
+        }
+    }
     *tick = next;
     if (timeline_tick_is_navigation_seam(timeline, next)) {
         *side = respect_seams ?
@@ -487,7 +559,7 @@ static void timeline_nudge_tick_with_seams(const MasterTimeline *timeline,
 static int64_t timeline_context_snapped_tick(const App *app) {
     int64_t tick = app->timeline_context_menu_open ?
         app->timeline_context_menu_tick : app->timeline.timeline_cursor_tick;
-    return timeline_snap_tick_down_for_timeline(&app->timeline, tick);
+    return timeline_snap_tick_down(app, tick);
 }
 
 static bool timeline_context_has_removable_tempo_event(const App *app) {
@@ -495,15 +567,6 @@ static bool timeline_context_has_removable_tempo_event(const App *app) {
     int64_t tick = timeline_context_snapped_tick(app);
     int index = timeline_tempo_event_index_at_tick(&app->timeline, tick);
     return index > 0 && app->timeline.tempo_events[index].tick > 0;
-}
-
-static int timeline_bar_ticks(const MasterTimeline *timeline) {
-    int ticks_per_beat = timeline->ticks_per_beat > 0 ? timeline->ticks_per_beat : 960;
-    int beats_per_bar = timeline->timeline_beats_per_bar > 0 ? timeline->timeline_beats_per_bar : 4;
-    int64_t ticks = (int64_t)ticks_per_beat * (int64_t)beats_per_bar;
-    if (ticks < 1) ticks = 1;
-    if (ticks > 0x7fffffff) ticks = 0x7fffffff;
-    return (int)ticks;
 }
 
 static int timeline_context_menu_items(const App *app,
@@ -693,10 +756,6 @@ static int64_t timeline_clip_duration_ticks(const App *app, int roster_clip_inde
     if (roster_clip_index < 0 || roster_clip_index >= app->roster_clip_count) return 0;
     const RosterClip *clip = &app->roster[roster_clip_index];
     return beats_to_ticks(clip->target_beats, app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat : 960);
-}
-
-static int64_t timeline_snap_tick_down(const App *app, int64_t tick) {
-    return timeline_snap_tick_down_for_timeline(&app->timeline, tick);
 }
 
 static bool timeline_range_overlaps_existing(const App *app,
@@ -1548,7 +1607,7 @@ void app_timeline_cycle_focus(App *app, int direction) {
 void app_timeline_move_cursor(App *app, int direction) {
     if (direction == 0) return;
     sync_timeline_play_range(app);
-    int64_t snap = timeline_snap_ticks(&app->timeline);
+    int64_t snap = timeline_edit_snap_ticks(app);
     timeline_nudge_tick_with_seams(&app->timeline,
                                    &app->timeline.timeline_cursor_tick,
                                    &app->timeline.timeline_cursor_seam_side,
@@ -1587,7 +1646,7 @@ void app_timeline_nudge_play_range(App *app, int direction, bool by_bar) {
         return;
     }
 
-    int64_t snap = timeline_snap_ticks(&app->timeline);
+    int64_t snap = by_bar ? timeline_snap_ticks(&app->timeline) : timeline_edit_snap_ticks(app);
     if (by_bar) {
         int beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
         snap *= (int64_t)beats_per_bar;
@@ -1645,7 +1704,7 @@ void app_timeline_select_lane_delta(App *app, int delta) {
 
 void app_timeline_nudge_edit_ghost(App *app, int direction) {
     if (direction == 0 || app->timeline_edit_mode == TIMELINE_EDIT_NONE) return;
-    int64_t snap = timeline_snap_ticks(&app->timeline);
+    int64_t snap = timeline_edit_snap_ticks(app);
     timeline_nudge_tick_with_seams(&app->timeline,
                                    &app->timeline_edit_ghost_start_tick,
                                    &app->timeline_edit_ghost_seam_side,
@@ -1670,7 +1729,7 @@ void app_timeline_nudge_edit_lane(App *app, int direction) {
 static TimelineInstanceRef app_timeline_instance_at_cursor(App *app) {
     int64_t cursor = app->timeline.timeline_cursor_tick;
     TimelineInstanceRef best = timeline_instance_ref_invalid();
-    int64_t tolerance = timeline_snap_ticks(&app->timeline);
+    int64_t tolerance = timeline_edit_snap_ticks(app);
     if (tolerance < 1) tolerance = 1;
     int64_t best_distance = tolerance + 1;
 
@@ -2157,7 +2216,7 @@ void app_timeline_adjust_tempo_event_at_cursor(App *app, double delta) {
         return;
     }
 
-    int64_t tick = timeline_snap_tick_down_for_timeline(&app->timeline, app->timeline.timeline_cursor_tick);
+    int64_t tick = timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick);
     int index = timeline_tempo_event_index_at_tick(&app->timeline, tick);
     if (index < 0) {
         app_set_status(app, "No tempo event at cursor");
@@ -2178,7 +2237,7 @@ void app_timeline_adjust_tempo_event_at_cursor(App *app, double delta) {
 
 bool app_timeline_cursor_on_tempo_event(const App *app) {
     if (!app || !app->timeline.initialized) return false;
-    int64_t tick = timeline_snap_tick_down_for_timeline(&app->timeline, app->timeline.timeline_cursor_tick);
+    int64_t tick = timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick);
     return timeline_tempo_event_index_at_tick(&app->timeline, tick) >= 0;
 }
 
@@ -3078,13 +3137,14 @@ static void app_render_timeline(App *app) {
     int64_t range_start = 0, range_end = 0;
     timeline_effective_play_range(&app->timeline, &range_start, &range_end);
     const char *cursor_side_label = timeline_seam_side_label(app->timeline.timeline_cursor_seam_side);
-    SDL_RenderDebugTextFormat(app->renderer, 24, 214, "cursor: %lld%s%s  range: %lld..%lld  loop: %s",
+    SDL_RenderDebugTextFormat(app->renderer, 24, 214, "cursor: %lld%s%s  range: %lld..%lld  loop: %s  snap: %s",
                               (long long)app->timeline.timeline_cursor_tick,
                               cursor_side_label[0] ? " " : "",
                               cursor_side_label,
                               (long long)range_start,
                               (long long)range_end,
-                              app->timeline.play_range_loop_enabled ? "on" : "off");
+                              app->timeline.play_range_loop_enabled ? "on" : "off",
+                              timeline_edit_snap_label(app));
     SDL_FRect meter_rect = { timeline_x + timeline_w - 260.0f, 134.0f, 248.0f, 42.0f };
     if (meter_rect.x > 320.0f) render_master_meter(app, meter_rect);
 
@@ -3150,28 +3210,30 @@ static void app_render_timeline(App *app) {
     int64_t beat_ticks = timeline_snap_ticks(&app->timeline);
     int64_t bar_ticks = (int64_t)app->timeline.ticks_per_beat * app->timeline.timeline_beats_per_bar;
     if (bar_ticks < 1) bar_ticks = beat_ticks;
-    int64_t grid_step = beat_ticks > 0 ? beat_ticks : 960;
+    int64_t grid_step = timeline_edit_snap_ticks(app);
     while (grid_step > 0 && view_span / (double)grid_step > 160.0) grid_step *= 2;
     int64_t first_grid = (int64_t)floor(view_start / (double)grid_step) * grid_step;
     if (first_grid < 0) first_grid = 0;
     for (int64_t tick = first_grid; grid_step > 0 && (double)tick <= view_end; tick += grid_step) {
         float x = timeline_x_for_tick((double)tick, view_start, view_span, timeline_x, timeline_w);
         bool bar = bar_ticks > 0 && tick % bar_ticks == 0;
+        bool beat = beat_ticks > 0 && tick % beat_ticks == 0;
         if (bar) SDL_SetRenderDrawColor(app->renderer, 130, 135, 170, 180);
-        else SDL_SetRenderDrawColor(app->renderer, 70, 72, 96, 120);
+        else if (beat) SDL_SetRenderDrawColor(app->renderer, 78, 82, 108, 132);
+        else SDL_SetRenderDrawColor(app->renderer, 58, 62, 84, 82);
         SDL_RenderLine(app->renderer, x, timeline_y - 58.0f, x, timeline_y + track_h + 8.0f);
         if (bar && x < timeline_x + timeline_w - 28.0f) {
             int64_t bar_index = bar_ticks > 0 ? tick / bar_ticks + 1 : 1;
             SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 255);
             SDL_RenderDebugTextFormat(app->renderer, x + 4.0f, timeline_y - 52.0f, "bar %lld", (long long)bar_index);
-        } else if (view_span / (double)grid_step < 24.0 && x < timeline_x + timeline_w - 18.0f) {
+        } else if (beat && view_span / (double)grid_step < 24.0 && x < timeline_x + timeline_w - 18.0f) {
             int64_t beat_index = beat_ticks > 0 ? tick / beat_ticks + 1 : 1;
             SDL_SetRenderDrawColor(app->renderer, 150, 158, 176, 210);
             SDL_RenderDebugTextFormat(app->renderer, x + 4.0f, timeline_y - 38.0f, "%lld", (long long)beat_index);
         }
     }
 
-    int64_t tempo_cursor_tick = timeline_snap_tick_down_for_timeline(&app->timeline, app->timeline.timeline_cursor_tick);
+    int64_t tempo_cursor_tick = timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick);
     int selected_tempo_event = timeline_tempo_event_index_at_tick(&app->timeline, tempo_cursor_tick);
     int tempo_count = timeline_valid_tempo_event_count(&app->timeline);
     for (int i = 0; i < tempo_count; ++i) {
@@ -3225,10 +3287,6 @@ static void app_render_timeline(App *app) {
                 SDL_SetRenderDrawColor(app->renderer, 255, 226, 90, 135);
                 SDL_RenderLine(app->renderer, range_x0, timeline_y - 13.0f, range_x1, timeline_y - 13.0f);
                 SDL_RenderLine(app->renderer, range_x0, timeline_y + 1.0f, range_x1, timeline_y + 1.0f);
-            } else {
-                SDL_FRect range_rect = { range_x0, timeline_y - 12.0f, range_x1 - range_x0, track_h + 20.0f };
-                SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 28);
-                SDL_RenderFillRect(app->renderer, &range_rect);
             }
         }
         float start_x = timeline_x_for_tick((double)range_start, view_start, view_span, timeline_x, timeline_w);
