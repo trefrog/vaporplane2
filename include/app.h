@@ -213,7 +213,7 @@ void app_delete_selected_roster_clip(App *app);
 void app_export_selected_roster_clip(App *app);
 void app_preview_selected_roster_clip(App *app);
 void app_timeline_move_cursor(App *app, int direction);
-void app_timeline_nudge_play_range(App *app, int direction);
+void app_timeline_nudge_play_range(App *app, int direction, bool by_bar);
 void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle);
 void app_timeline_reset_play_range(App *app);
 void app_timeline_select_roster_delta(App *app, int delta);

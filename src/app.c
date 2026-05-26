@@ -1579,7 +1579,7 @@ void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle)
     app_set_status(app, handle == TIMELINE_RANGE_HANDLE_START ? "Play range start handle" : "Play range end handle");
 }
 
-void app_timeline_nudge_play_range(App *app, int direction) {
+void app_timeline_nudge_play_range(App *app, int direction, bool by_bar) {
     if (direction == 0) return;
     int64_t length = app->timeline.length_ticks > 0 ? app->timeline.length_ticks : 0;
     if (length <= 0) {
@@ -1588,6 +1588,10 @@ void app_timeline_nudge_play_range(App *app, int direction) {
     }
 
     int64_t snap = timeline_snap_ticks(&app->timeline);
+    if (by_bar) {
+        int beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
+        snap *= (int64_t)beats_per_bar;
+    }
     int64_t min_len = timeline_min_range_ticks(&app->timeline);
     if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
     sync_timeline_play_range_no_lock(app);
@@ -3212,9 +3216,20 @@ static void app_render_timeline(App *app) {
         if (range_x0 < timeline_x) range_x0 = timeline_x;
         if (range_x1 > timeline_x + timeline_w) range_x1 = timeline_x + timeline_w;
         if (range_x1 > range_x0) {
-            SDL_FRect range_rect = { range_x0, timeline_y - 12.0f, range_x1 - range_x0, track_h + 20.0f };
-            SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, app->timeline.play_range_loop_enabled ? 56 : 34);
-            SDL_RenderFillRect(app->renderer, &range_rect);
+            if (app->timeline.play_range_loop_enabled) {
+                SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(app->renderer, 255, 226, 90, 230);
+                for (float y = timeline_y - 10.0f; y <= timeline_y - 2.0f; y += 4.0f) {
+                    SDL_RenderLine(app->renderer, range_x0, y, range_x1, y);
+                }
+                SDL_SetRenderDrawColor(app->renderer, 255, 226, 90, 135);
+                SDL_RenderLine(app->renderer, range_x0, timeline_y - 13.0f, range_x1, timeline_y - 13.0f);
+                SDL_RenderLine(app->renderer, range_x0, timeline_y + 1.0f, range_x1, timeline_y + 1.0f);
+            } else {
+                SDL_FRect range_rect = { range_x0, timeline_y - 12.0f, range_x1 - range_x0, track_h + 20.0f };
+                SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 28);
+                SDL_RenderFillRect(app->renderer, &range_rect);
+            }
         }
         float start_x = timeline_x_for_tick((double)range_start, view_start, view_span, timeline_x, timeline_w);
         float end_x = timeline_x_for_tick((double)range_end, view_start, view_span, timeline_x, timeline_w);
