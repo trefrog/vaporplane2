@@ -1041,6 +1041,17 @@ static void app_set_waveform_source_roster(App *app, int roster_index, const Ros
     app->waveform_sidecar_confirm_open = false;
 }
 
+void app_clear_waveform_frame_grip(App *app) {
+    if (!app) return;
+    app->waveform_frame_grip_active = false;
+    app->waveform_frame_grip_exact_valid = false;
+    app->waveform_frame_grip_left_frame = 0;
+    app->waveform_frame_grip_right_frame = 0;
+    app->waveform_frame_grip_snap_active = false;
+    app->waveform_frame_grip_snap_index = -1;
+    app->waveform_frame_grip_snap_beats = 0.0;
+}
+
 BpmSource app_bpm_source(const App *app) {
     if (app_uses_timeline_transport(app)) return BPM_SOURCE_MASTER_TIMELINE;
     if (app->tempo_lock_mode) return BPM_SOURCE_TEMPO_LOCKED;
@@ -1329,6 +1340,7 @@ void app_open_selected_roster_clip_waveform(App *app) {
     app->transport_bpm = app->clip.source_bpm;
     app->has_retained_tempo_lock_params = false;
     app->retained_tempo_lock_stale = false;
+    app_clear_waveform_frame_grip(app);
     app_set_waveform_source_roster(app, app->selected_roster_clip, roster_clip);
     audio_engine_set_playback_mode(&app->audio, AUDIO_PLAYBACK_WAVEFORM);
     audio_engine_set_playhead(&app->audio, app->clip.loop_start_frame);
@@ -1429,6 +1441,7 @@ void app_confirm_write_tempo_sidecar(App *app) {
 void app_toggle_view_mode(App *app) {
     if (app->view_mode == APP_VIEW_WAVEFORM) {
         app->transport.playing = false;
+        app_clear_waveform_frame_grip(app);
         audio_engine_set_playback_mode(&app->audio, AUDIO_PLAYBACK_TIMELINE);
         app->view_mode = APP_VIEW_TIMELINE;
         app->tempo_lock_mode = false;
@@ -2602,6 +2615,7 @@ void app_enter_tempo_lock_mode(App *app) {
         app_cancel_tempo_lock_mode(app);
         return;
     }
+    app_clear_waveform_frame_grip(app);
     if (app->clip.clip_tempo_locked) {
         app->tempo_lock_draft = app->clip.tempo_lock;
     } else if (app->has_retained_tempo_lock_params) {
@@ -2658,6 +2672,7 @@ void app_apply_tempo_lock_and_capture(App *app) {
 }
 
 void app_clear_tempo_lock(App *app) {
+    app_clear_waveform_frame_grip(app);
     if (app->clip.clip_tempo_locked) {
         app->has_retained_tempo_lock_params = true;
         app->retained_tempo_lock = app->clip.tempo_lock;
@@ -2782,6 +2797,7 @@ bool load_clip_from_path(App *app, const char *path) {
     app->tempo_lock_mode = false;
     app->has_retained_tempo_lock_params = false;
     app->retained_tempo_lock_stale = false;
+    app_clear_waveform_frame_grip(app);
     set_transport_bpm_from_metadata(app);
     app_set_waveform_source_wav(app, path);
     audio_engine_set_playhead(&app->audio, app->clip.loop_start_frame);
@@ -2854,6 +2870,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Timeline R2: South play   East stop all   West jump start   North loop"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad waveform: South/Start play   Back metronome"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Waveform frame grip: hold L2 pins left edge   add R2 + D-pad L/R snaps beats"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "R2+South set loop to visible   L2+R2+South capture loop"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform right stick picker   R2+Start timeline/waveform"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform R2+North tempo lock   L2+R2+Back writes tempo JSON"); y += 22.0f;
@@ -3879,6 +3896,15 @@ static void app_render_overlay(App *app) {
     if (app->view_mode == APP_VIEW_WAVEFORM && app->waveform_source_mode == WAVEFORM_SOURCE_ROSTER) {
         SDL_RenderDebugTextFormat(app->renderer, 12, 122, "waveform source: roster %s", app->waveform_source_name);
     }
+    if (app->view_mode == APP_VIEW_WAVEFORM && app->waveform_frame_grip_active) {
+        SDL_RenderDebugText(app->renderer, 12, 136, "FRAME GRIP");
+        if (app->waveform_frame_grip_snap_active && app->waveform_frame_grip_snap_beats > 0.0) {
+            int beats_per_bar = app->clip.tempo_lock.beats_per_bar > 0 ? app->clip.tempo_lock.beats_per_bar : 4;
+            SDL_RenderDebugTextFormat(app->renderer, 12, 150, "SNAP FRAME: %.0f beats / %.2f bars",
+                                      app->waveform_frame_grip_snap_beats,
+                                      app->waveform_frame_grip_snap_beats / (double)beats_per_bar);
+        }
+    }
 
     if (app->sample_selector_open) {
 
@@ -3965,6 +3991,7 @@ bool app_init(App *app){
     app->transport_bpm_manual = false;
     app->view_mode = APP_VIEW_WAVEFORM;
     app_set_waveform_source_generated(app);
+    app_clear_waveform_frame_grip(app);
     app->controls_legend_open = false;
     app->timeline.ticks_per_beat = app->transport.ppqn;
     app->timeline.timeline_bpm = 120.0;

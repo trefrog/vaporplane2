@@ -13,6 +13,8 @@ static int timeline_cursor_stick_direction = 0;
 static double timeline_cursor_stick_repeat_timer = 0.0;
 static double timeline_cursor_stick_held_seconds = 0.0;
 
+static bool button_pressed(SDL_Gamepad *gamepad, SDL_GamepadButton button);
+
 static const double TEMPO_LOCK_BPM_DPAD_NUDGE = 0.1;
 static const double TEMPO_LOCK_BPM_DPAD_COARSE_NUDGE = 1.0;
 static const double TEMPO_LOCK_BPM_DPAD_REPEAT_DELAY = 0.35;
@@ -22,7 +24,7 @@ static const double TIMELINE_CURSOR_STICK_THRESHOLD = 0.28;
 static const double TIMELINE_CURSOR_STICK_MAX_HELD = 3.0;
 
 static void clamp_view_target(App *app) {
-    if(app->view.target_span<0.01) app->view.target_span=0.01;
+    if(app->view.target_span<0.000000001) app->view.target_span=0.000000001;
     if(app->view.target_span>1.0) app->view.target_span=1.0;
     double half = app->view.target_span * 0.5;
     if(app->view.target_center<half) app->view.target_center=half;
@@ -82,6 +84,208 @@ static size_t visible_frame_count(App *app) {
     return end > start ? end - start : 1;
 }
 
+static size_t target_visible_frame_count(App *app) {
+    if(!app || app->clip.frame_count < 1) return 1;
+    double start = app->view.target_center - app->view.target_span * 0.5;
+    double end = app->view.target_center + app->view.target_span * 0.5;
+    if(start < 0.0) start = 0.0;
+    if(end > 1.0) end = 1.0;
+    size_t sf = (size_t)(start * (double)app->clip.frame_count);
+    size_t ef = (size_t)ceil(end * (double)app->clip.frame_count);
+    if(ef > app->clip.frame_count) ef = app->clip.frame_count;
+    return ef > sf ? ef - sf : 1;
+}
+
+static bool waveform_frame_grip_available(const App *app) {
+    return app &&
+           app->view_mode == APP_VIEW_WAVEFORM &&
+           app->clip.clip_tempo_locked &&
+           !app->tempo_lock_mode &&
+           app->clip.samples &&
+           app->clip.frame_count > 1 &&
+           app->clip.sample_rate > 0 &&
+           app->clip.tempo_lock.bpm > 0.0;
+}
+
+static void set_view_to_exact_frames(App *app, size_t left, size_t right) {
+    if(!app || app->clip.frame_count < 1) return;
+    if(left >= app->clip.frame_count) left = app->clip.frame_count - 1;
+    if(right > app->clip.frame_count) right = app->clip.frame_count;
+    if(right <= left) right = left + 1 <= app->clip.frame_count ? left + 1 : app->clip.frame_count;
+    double start = (double)left / (double)app->clip.frame_count;
+    double end = (double)right / (double)app->clip.frame_count;
+    double span = end - start;
+    double center = start + span * 0.5;
+    app->view.target_center = center;
+    app->view.target_span = span;
+    app->view.view_center = center;
+    app->view.view_span = span;
+    clamp_view_target(app);
+}
+
+static void waveform_frame_grip_set_right(App *app, size_t right, bool clear_snap) {
+    if(!app || app->clip.frame_count < 2) return;
+    size_t left = app->waveform_frame_grip_left_frame;
+    if(left >= app->clip.frame_count) left = app->clip.frame_count - 1;
+    if(right > app->clip.frame_count) right = app->clip.frame_count;
+    if(right <= left) right = left + 1 <= app->clip.frame_count ? left + 1 : app->clip.frame_count;
+    app->waveform_frame_grip_left_frame = left;
+    app->waveform_frame_grip_right_frame = right;
+    app->waveform_frame_grip_exact_valid = true;
+    if(clear_snap) {
+        app->waveform_frame_grip_snap_index = -1;
+        app->waveform_frame_grip_snap_beats = 0.0;
+    }
+    set_view_to_exact_frames(app, left, right);
+}
+
+static void waveform_frame_grip_begin(App *app) {
+    size_t left = app->clip.loop_start_frame;
+    if(left >= app->clip.frame_count) left = app->clip.frame_count - 1;
+    size_t length = target_visible_frame_count(app);
+    if(length < 1) length = 1;
+    size_t right = left + length;
+    if(right > app->clip.frame_count) right = app->clip.frame_count;
+    if(right <= left) right = left + 1 <= app->clip.frame_count ? left + 1 : app->clip.frame_count;
+    app->waveform_frame_grip_active = true;
+    app->waveform_frame_grip_snap_active = false;
+    app->waveform_frame_grip_snap_index = -1;
+    app->waveform_frame_grip_snap_beats = 0.0;
+    app->waveform_frame_grip_left_frame = left;
+    waveform_frame_grip_set_right(app, right, true);
+    SDL_strlcpy(app->status_text, "FRAME GRIP", sizeof(app->status_text));
+}
+
+static double waveform_frame_grip_frames_per_beat(const App *app) {
+    if(!app || app->clip.sample_rate <= 0 || app->clip.tempo_lock.bpm <= 0.0) return 0.0;
+    return (60.0 / app->clip.tempo_lock.bpm) * (double)app->clip.sample_rate;
+}
+
+static const double waveform_frame_snap_beats[] = { 1.0, 2.0, 3.0, 4.0, 8.0, 16.0 };
+
+static int waveform_frame_snap_count(void) {
+    return (int)(sizeof(waveform_frame_snap_beats) / sizeof(waveform_frame_snap_beats[0]));
+}
+
+static bool waveform_frame_snap_right_for_index(const App *app, int index, size_t *right, double *beats) {
+    int count = waveform_frame_snap_count();
+    if(!app || index < 0 || index >= count) return false;
+    double frames_per_beat = waveform_frame_grip_frames_per_beat(app);
+    if(frames_per_beat <= 0.0) return false;
+    double beat_count = waveform_frame_snap_beats[index];
+    size_t length = (size_t)llround(frames_per_beat * beat_count);
+    if(length < 1) length = 1;
+    size_t left = app->waveform_frame_grip_left_frame;
+    if(left >= app->clip.frame_count) return false;
+    if(length > app->clip.frame_count - left) return false;
+    if(right) *right = left + length;
+    if(beats) *beats = beat_count;
+    return true;
+}
+
+static int waveform_frame_nearest_snap_index(App *app) {
+    int best = -1;
+    double best_distance = 0.0;
+    double current = (double)(app->waveform_frame_grip_right_frame - app->waveform_frame_grip_left_frame);
+    int count = waveform_frame_snap_count();
+    for(int i = 0; i < count; ++i) {
+        size_t right = 0;
+        double beats = 0.0;
+        if(!waveform_frame_snap_right_for_index(app, i, &right, &beats)) continue;
+        double distance = fabs((double)(right - app->waveform_frame_grip_left_frame) - current);
+        if(best < 0 || distance < best_distance) {
+            best = i;
+            best_distance = distance;
+        }
+    }
+    return best;
+}
+
+static int waveform_frame_next_snap_index(App *app, int direction) {
+    int count = waveform_frame_snap_count();
+    int start = app->waveform_frame_grip_snap_index;
+    if(start < 0 || start >= count) start = waveform_frame_nearest_snap_index(app);
+    if(start < 0) return -1;
+    for(int step = 1; step <= count; ++step) {
+        int index = (start + direction * step) % count;
+        if(index < 0) index += count;
+        size_t right = 0;
+        double beats = 0.0;
+        if(waveform_frame_snap_right_for_index(app, index, &right, &beats)) return index;
+    }
+    return start;
+}
+
+static void waveform_frame_apply_snap_index(App *app, int index) {
+    size_t right = 0;
+    double beats = 0.0;
+    if(!waveform_frame_snap_right_for_index(app, index, &right, &beats)) {
+        double frames_per_beat = waveform_frame_grip_frames_per_beat(app);
+        right = app->clip.frame_count;
+        beats = frames_per_beat > 0.0 ?
+            (double)(right - app->waveform_frame_grip_left_frame) / frames_per_beat : 0.0;
+        index = -1;
+    }
+    app->waveform_frame_grip_snap_index = index;
+    app->waveform_frame_grip_snap_beats = beats;
+    waveform_frame_grip_set_right(app, right, false);
+    SDL_snprintf(app->status_text, sizeof(app->status_text),
+                 "SNAP FRAME: %.0f beats", beats);
+}
+
+static void waveform_frame_grip_update(App *app, double ly, double dt, bool r2_shift) {
+    if(!app->waveform_frame_grip_active) waveform_frame_grip_begin(app);
+
+    if(r2_shift) {
+        if(!app->waveform_frame_grip_snap_active) {
+            app->waveform_frame_grip_snap_active = true;
+            int index = waveform_frame_nearest_snap_index(app);
+            waveform_frame_apply_snap_index(app, index);
+        }
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
+            waveform_frame_apply_snap_index(app, waveform_frame_next_snap_index(app, -1));
+        }
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
+            waveform_frame_apply_snap_index(app, waveform_frame_next_snap_index(app, 1));
+        }
+        return;
+    }
+
+    app->waveform_frame_grip_snap_active = false;
+    size_t left = app->waveform_frame_grip_left_frame;
+    size_t right = app->waveform_frame_grip_right_frame;
+    double length = right > left ? (double)(right - left) : 1.0;
+    bool changed = false;
+    if(fabs(ly) > 0.0) {
+        length += ly * length * dt * 1.4;
+        changed = true;
+    }
+    if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) {
+        length *= 1.0 - fmin(0.9, dt * 1.8);
+        changed = true;
+    }
+    if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
+        length *= 1.0 + dt * 1.8;
+        changed = true;
+    }
+    long dpad_step = (long)(length * 0.1 * dt);
+    if(dpad_step < 1) dpad_step = 1;
+    if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
+        length -= (double)dpad_step;
+        changed = true;
+    }
+    if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
+        length += (double)dpad_step;
+        changed = true;
+    }
+    if(length < 1.0) length = 1.0;
+    if(left + (size_t)ceil(length) > app->clip.frame_count) {
+        length = (double)(app->clip.frame_count - left);
+    }
+    if(changed) waveform_frame_grip_set_right(app, left + (size_t)llround(length), true);
+    else set_view_to_exact_frames(app, left, right);
+}
+
 static long visible_fraction_frames(App *app, double fraction) {
     long frames = (long)((double)visible_frame_count(app) * fraction);
     if(frames < 1) frames = 1;
@@ -90,7 +294,12 @@ static long visible_fraction_frames(App *app, double fraction) {
 
 static void set_loop_to_visible(App *app) {
     size_t start = 0, end = 0;
-    waveform_view_get_frame_bounds(&app->view, &app->clip, &start, &end);
+    if(app->waveform_frame_grip_exact_valid) {
+        start = app->waveform_frame_grip_left_frame;
+        end = app->waveform_frame_grip_right_frame;
+    } else {
+        waveform_view_get_frame_bounds(&app->view, &app->clip, &start, &end);
+    }
     if(app->clip.frame_count < 2) return;
     if(end > app->clip.frame_count) end = app->clip.frame_count;
     if(end <= start) end = start + 1;
@@ -101,7 +310,17 @@ static void set_loop_to_visible(App *app) {
     app->clip.loop_start_frame = start;
     app->clip.loop_end_frame = end;
     clip_clamp_loop(&app->clip);
+    if(app->clip.clip_tempo_locked && app->waveform_frame_grip_snap_beats > 0.0) {
+        int beats_per_bar = app->clip.tempo_lock.beats_per_bar > 0 ? app->clip.tempo_lock.beats_per_bar : 4;
+        app->clip.tempo_lock.target_bars = app->waveform_frame_grip_snap_beats / (double)beats_per_bar;
+        app->has_retained_tempo_lock_params = true;
+        app->retained_tempo_lock = app->clip.tempo_lock;
+        app->retained_loop_start_frame = app->clip.loop_start_frame;
+        app->retained_loop_end_frame = app->clip.loop_end_frame;
+        app->retained_tempo_lock_stale = false;
+    }
     app_note_loop_anchors_moved(app);
+    app_clear_waveform_frame_grip(app);
     jump_to_loop_start(app);
 }
 
@@ -467,7 +686,8 @@ void input_update_gamepad(App *app, double dt){
         return;
     }
 
-    if(r2_shift && start_pressed) {
+    if(r2_shift && start_pressed &&
+       !(l2_shift && waveform_frame_grip_available(app))) {
         app_toggle_view_mode(app);
         return;
     }
@@ -650,6 +870,18 @@ void input_update_gamepad(App *app, double dt){
         return;
     }
 
+    if(waveform_frame_grip_available(app) && l2_shift) {
+        waveform_frame_grip_update(app, ly, dt, r2_shift);
+        return;
+    }
+    if(app->waveform_frame_grip_active) {
+        app->waveform_frame_grip_active = false;
+        app->waveform_frame_grip_snap_active = false;
+        SDL_strlcpy(app->status_text, "Frame grip ready: R2+South commits", sizeof(app->status_text));
+    } else if(!waveform_frame_grip_available(app)) {
+        app_clear_waveform_frame_grip(app);
+    }
+
     if(r2_shift) {
         if(l2_shift && south_pressed) app_capture_current_loop_to_roster(app);
         else if(l2_shift && back_pressed) app_request_write_tempo_sidecar(app);
@@ -683,7 +915,19 @@ void input_update_gamepad(App *app, double dt){
         gamepad_edit_target=1;
         app_focus_loop_end(app);
     }
-    if(left_stick_pressed) { clip_reset_loop(&app->clip); app_note_loop_anchors_moved(app); }
+    if(left_stick_pressed) {
+        app_clear_waveform_frame_grip(app);
+        clip_reset_loop(&app->clip);
+        app_note_loop_anchors_moved(app);
+    }
+
+    bool normal_view_or_trim_motion =
+        fabs(lx) > 0.0 || fabs(ly) > 0.0 ||
+        SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP) ||
+        SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN) ||
+        SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT) ||
+        SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    if(normal_view_or_trim_motion) app_clear_waveform_frame_grip(app);
 
     app->view.target_center += lx * app->view.target_span * dt * 0.9;
     app->view.target_span += ly * app->view.target_span * dt * 1.4;

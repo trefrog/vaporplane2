@@ -93,6 +93,13 @@ typedef struct App {
     char waveform_source_path[CLIP_MAX_PATH];
     size_t waveform_source_offset_frame;
     bool waveform_sidecar_confirm_open;
+    bool waveform_frame_grip_active;
+    bool waveform_frame_grip_exact_valid;
+    size_t waveform_frame_grip_left_frame;
+    size_t waveform_frame_grip_right_frame;
+    bool waveform_frame_grip_snap_active;
+    int waveform_frame_grip_snap_index;
+    double waveform_frame_grip_snap_beats;
     bool controls_legend_open;
 
     SampleEntry samples[APP_MAX_SAMPLES];
@@ -176,6 +183,7 @@ void app_open_selected_roster_clip_waveform(App *app);
 void app_request_write_tempo_sidecar(App *app);
 void app_confirm_write_tempo_sidecar(App *app);
 void app_cancel_write_tempo_sidecar(App *app);
+void app_clear_waveform_frame_grip(App *app);
 void app_toggle_view_mode(App *app);
 void app_toggle_controls_legend(App *app);
 void app_toggle_timeline_playback(App *app);

@@ -2,7 +2,7 @@
 #include <math.h>
 
 static void clamp_view_values(double *center, double *span) {
-    if(*span < 0.01) *span = 0.01;
+    if(*span < 0.000000001) *span = 0.000000001;
     if(*span > 1.0) *span = 1.0;
     double half = *span * 0.5;
     if(*center < half) *center = half;
