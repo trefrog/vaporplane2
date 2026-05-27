@@ -22,7 +22,9 @@
 - Timeline sequencing uses 8 lanes with same-lane overlap blocking and cross-lane overlap allowed.
 - Timeline playback applies per-instance velocity and shows a compact master output meter/clipping indicator.
 - Master Mix is a third main view for the master bus meter and future reverb, FX chain, and MIDI/control sections.
-- Master audio owns a fixed-size built-in FX chain scaffold; it is empty and pass-through, with no audible processing yet.
+- Master audio owns a fixed-size built-in FX chain with one real built-in unit, `Reverb 1`, disabled by default.
+- `Reverb 1` defaults to a more assertive long-room character when enabled, while startup playback remains dry.
+- Master FX process timeline/master playback only; waveform loop audition stays dry.
 - First-pass Lane Inspector opens from the lane row number and shows lane identity, mute, post-lane analyzer, peak meter, and clip LED.
 - Timeline playback starts from the play range and stops/rewinds or loops at the range end.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
@@ -142,9 +144,11 @@ cmake --build build
 ## Master Mix
 - Master Mix is reached with `F2` or gamepad `R2 + Start` as part of the main view cycle.
 - It shows the existing read-only master gain, peak meter, and clip state.
-- FX Chain reflects the real empty master FX scaffold. Reverb and MIDI/Control remain intentional placeholders only.
-- Keyboard `Tab`/`Shift+Tab` or `Up`/`Down` changes focused section. Gamepad d-pad up/down or bumpers change focused section.
+- FX Chain reflects `Slot 1: Reverb 1`. Reverb controls are real; MIDI/Control remains an intentional placeholder.
+- Keyboard `Tab`/`Shift+Tab` and gamepad bumpers change focused section; outside `REVERB`, Up/Down also changes section focus.
 - Keyboard `Esc` is consumed and does not enter the quit flow while on Master Mix. Gamepad East returns to Timeline.
+- In `REVERB`, keyboard `Up`/`Down` or gamepad d-pad up/down selects a `Reverb 1` parameter; `Left`/`Right` or d-pad left/right adjusts it; `Shift`/L2 uses fine steps.
+- `Enter`/South toggles `Reverb 1` when `Enabled` is selected, and `R`/left-stick click clears the reverb tail.
 
 ## Lane Inspector
 - Opens from timeline `LANE INDEX` focus with `Enter` or South.

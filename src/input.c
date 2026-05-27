@@ -533,11 +533,30 @@ static bool handle_lane_inspector_key(App *app, SDL_Keycode key, SDL_Keymod mod)
 }
 
 static bool handle_master_mix_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
+    bool fine = (mod & SDL_KMOD_SHIFT) != 0;
     switch(key) {
         case SDLK_ESCAPE: return true;
         case SDLK_TAB: app_master_mix_cycle_focus(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1); return true;
-        case SDLK_UP: app_master_mix_cycle_focus(app, -1); return true;
-        case SDLK_DOWN: app_master_mix_cycle_focus(app, 1); return true;
+        case SDLK_UP:
+            if(app->master_mix_focus == MASTER_MIX_FOCUS_REVERB) app_master_reverb_select_param_delta(app, -1);
+            else app_master_mix_cycle_focus(app, -1);
+            return true;
+        case SDLK_DOWN:
+            if(app->master_mix_focus == MASTER_MIX_FOCUS_REVERB) app_master_reverb_select_param_delta(app, 1);
+            else app_master_mix_cycle_focus(app, 1);
+            return true;
+        case SDLK_LEFT:
+            if(app->master_mix_focus == MASTER_MIX_FOCUS_REVERB) app_master_reverb_adjust_param(app, -1, fine);
+            return true;
+        case SDLK_RIGHT:
+            if(app->master_mix_focus == MASTER_MIX_FOCUS_REVERB) app_master_reverb_adjust_param(app, 1, fine);
+            return true;
+        case SDLK_RETURN:
+            if(app->master_mix_focus == MASTER_MIX_FOCUS_REVERB) app_master_reverb_activate_selected(app);
+            return true;
+        case SDLK_R:
+            if(app->master_mix_focus == MASTER_MIX_FOCUS_REVERB) app_master_reverb_clear_tail(app);
+            return true;
         case SDLK_SPACE: app_toggle_timeline_playback(app); return true;
         case SDLK_M: toggle_metronome(app); return true;
         default: return true;
@@ -723,8 +742,17 @@ void input_update_gamepad(App *app, double dt){
         if(back_pressed) toggle_metronome(app);
         if(left_shoulder_pressed) app_master_mix_cycle_focus(app, -1);
         if(right_shoulder_pressed) app_master_mix_cycle_focus(app, 1);
-        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_master_mix_cycle_focus(app, -1);
-        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_master_mix_cycle_focus(app, 1);
+        if(app->master_mix_focus == MASTER_MIX_FOCUS_REVERB) {
+            if(south_pressed) app_master_reverb_activate_selected(app);
+            if(left_stick_pressed) app_master_reverb_clear_tail(app);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_master_reverb_select_param_delta(app, -1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_master_reverb_select_param_delta(app, 1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_master_reverb_adjust_param(app, -1, l2_shift);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_master_reverb_adjust_param(app, 1, l2_shift);
+        } else {
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_master_mix_cycle_focus(app, -1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_master_mix_cycle_focus(app, 1);
+        }
         return;
     }
 

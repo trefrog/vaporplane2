@@ -107,6 +107,7 @@ typedef struct App {
     WaveformView view;
     AppViewMode view_mode;
     MasterMixFocusSection master_mix_focus;
+    MasterReverbParamId master_reverb_selected_param;
     WaveformSourceMode waveform_source_mode;
     int waveform_source_roster_index;
     char waveform_source_name[APP_SAMPLE_NAME_MAX];
@@ -209,6 +210,10 @@ void app_clear_waveform_frame_grip(App *app);
 void app_toggle_view_mode(App *app);
 void app_master_mix_return_to_timeline(App *app);
 void app_master_mix_cycle_focus(App *app, int direction);
+void app_master_reverb_select_param_delta(App *app, int delta);
+void app_master_reverb_adjust_param(App *app, int direction, bool fine);
+void app_master_reverb_activate_selected(App *app);
+void app_master_reverb_clear_tail(App *app);
 void app_toggle_controls_legend(App *app);
 void app_toggle_timeline_playback(App *app);
 void app_rewind_timeline(App *app);

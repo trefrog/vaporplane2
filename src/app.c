@@ -1599,6 +1599,101 @@ void app_master_mix_cycle_focus(App *app, int direction) {
                  master_mix_focus_label(app->master_mix_focus));
 }
 
+static float app_master_reverb_param_value(const MasterReverbParams *params, MasterReverbParamId param) {
+    if (!params) return 0.0f;
+    switch (param) {
+        case MASTER_REVERB_PARAM_ENABLED: return params->enabled ? 1.0f : 0.0f;
+        case MASTER_REVERB_PARAM_SEND: return params->send;
+        case MASTER_REVERB_PARAM_RETURN: return params->return_gain;
+        case MASTER_REVERB_PARAM_PREDELAY_MS: return params->predelay_ms;
+        case MASTER_REVERB_PARAM_DECAY_SECONDS: return params->decay_seconds;
+        case MASTER_REVERB_PARAM_SIZE: return params->size;
+        case MASTER_REVERB_PARAM_DIFFUSION: return params->diffusion;
+        case MASTER_REVERB_PARAM_DAMPING: return params->damping;
+        case MASTER_REVERB_PARAM_LOW_CUT_HZ: return params->low_cut_hz;
+        case MASTER_REVERB_PARAM_HIGH_CUT_HZ: return params->high_cut_hz;
+        case MASTER_REVERB_PARAM_WIDTH: return params->width;
+        case MASTER_REVERB_PARAM_COUNT:
+        default: return 0.0f;
+    }
+}
+
+static float app_master_reverb_param_step(MasterReverbParamId param, bool fine) {
+    switch (param) {
+        case MASTER_REVERB_PARAM_SEND:
+        case MASTER_REVERB_PARAM_RETURN:
+        case MASTER_REVERB_PARAM_SIZE:
+        case MASTER_REVERB_PARAM_DIFFUSION:
+        case MASTER_REVERB_PARAM_DAMPING:
+        case MASTER_REVERB_PARAM_WIDTH:
+            return fine ? 0.01f : 0.05f;
+        case MASTER_REVERB_PARAM_PREDELAY_MS:
+            return fine ? 1.0f : 5.0f;
+        case MASTER_REVERB_PARAM_DECAY_SECONDS:
+            return fine ? 0.05f : 0.25f;
+        case MASTER_REVERB_PARAM_LOW_CUT_HZ:
+            return fine ? 5.0f : 20.0f;
+        case MASTER_REVERB_PARAM_HIGH_CUT_HZ:
+            return fine ? 100.0f : 500.0f;
+        case MASTER_REVERB_PARAM_ENABLED:
+        case MASTER_REVERB_PARAM_COUNT:
+        default:
+            return 1.0f;
+    }
+}
+
+void app_master_reverb_select_param_delta(App *app, int delta) {
+    if (!app || delta == 0) return;
+    int param = (int)app->master_reverb_selected_param + delta;
+    while (param < 0) param += (int)MASTER_REVERB_PARAM_COUNT;
+    param %= (int)MASTER_REVERB_PARAM_COUNT;
+    app->master_reverb_selected_param = (MasterReverbParamId)param;
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Reverb 1: %s",
+                 audio_engine_master_reverb_param_label(app->master_reverb_selected_param));
+}
+
+void app_master_reverb_adjust_param(App *app, int direction, bool fine) {
+    if (!app || direction == 0) return;
+    MasterReverbParamId param = app->master_reverb_selected_param;
+    if (param == MASTER_REVERB_PARAM_ENABLED) {
+        audio_engine_set_master_reverb_enabled(&app->audio, direction > 0);
+    } else {
+        MasterReverbParams target;
+        audio_engine_get_master_reverb_params(&app->audio, NULL, &target);
+        float value = app_master_reverb_param_value(&target, param);
+        value += (float)direction * app_master_reverb_param_step(param, fine);
+        audio_engine_set_master_reverb_param(&app->audio, param, value);
+    }
+
+    MasterReverbParams target_after;
+    audio_engine_get_master_reverb_params(&app->audio, NULL, &target_after);
+    if (param == MASTER_REVERB_PARAM_ENABLED) {
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Reverb 1 %s",
+                     target_after.enabled ? "enabled" : "bypassed");
+    } else {
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Reverb 1: %s %.2f",
+                     audio_engine_master_reverb_param_label(param),
+                     app_master_reverb_param_value(&target_after, param));
+    }
+}
+
+void app_master_reverb_activate_selected(App *app) {
+    if (!app) return;
+    if (app->master_reverb_selected_param == MASTER_REVERB_PARAM_ENABLED) {
+        audio_engine_toggle_master_reverb(&app->audio);
+        MasterReverbParams target;
+        audio_engine_get_master_reverb_params(&app->audio, NULL, &target);
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Reverb 1 %s",
+                     target.enabled ? "enabled" : "bypassed");
+    }
+}
+
+void app_master_reverb_clear_tail(App *app) {
+    if (!app) return;
+    audio_engine_clear_master_reverb_tail(&app->audio);
+    app_set_status(app, "Reverb 1 tail cleared");
+}
+
 void app_toggle_controls_legend(App *app) {
     app->controls_legend_open = !app->controls_legend_open;
 }
@@ -3041,7 +3136,8 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Ruler: L/R beat cursor   C menu marks/removes tempo   [/] adjusts marked BPM"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Index: Up/Down lane   South opens Lane Inspector"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Inspector: L/R palette   South mute   East timeline   R2 transport"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Master Mix: Tab/Up/Down focus   East timeline   Space/R2+South transport"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Master Mix: Tab focus   Reverb 1 U/D select L/R adjust Enter toggle R clear"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Master Mix gamepad: bumpers focus   Reverb 1 d-pad edit   South toggle   LS clear"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Play Range: Enter/South adjust   1/2 or West/North choose handle"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Track: L/R cursor   U/D lane cursor   South select/move   [/] velocity"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad track: L2+stick X glide   L2+D-pad L/R bars   L2+D-pad U/D velocity"); y += 16.0f;
@@ -4126,6 +4222,41 @@ static void render_master_mix_section(App *app,
     render_master_mix_focus_outline(app, rect, section);
 }
 
+static void format_master_reverb_value(const MasterReverbParams *params,
+                                       MasterReverbParamId param,
+                                       char *out,
+                                       size_t out_size) {
+    if (!out || out_size == 0) return;
+    float value = app_master_reverb_param_value(params, param);
+    switch (param) {
+        case MASTER_REVERB_PARAM_ENABLED:
+            SDL_strlcpy(out, params && params->enabled ? "ON" : "BYPASS", out_size);
+            break;
+        case MASTER_REVERB_PARAM_PREDELAY_MS:
+            SDL_snprintf(out, out_size, "%.0f ms", value);
+            break;
+        case MASTER_REVERB_PARAM_DECAY_SECONDS:
+            SDL_snprintf(out, out_size, "%.2f s", value);
+            break;
+        case MASTER_REVERB_PARAM_LOW_CUT_HZ:
+        case MASTER_REVERB_PARAM_HIGH_CUT_HZ:
+            SDL_snprintf(out, out_size, "%.0f Hz", value);
+            break;
+        case MASTER_REVERB_PARAM_SEND:
+        case MASTER_REVERB_PARAM_RETURN:
+        case MASTER_REVERB_PARAM_SIZE:
+        case MASTER_REVERB_PARAM_DIFFUSION:
+        case MASTER_REVERB_PARAM_DAMPING:
+        case MASTER_REVERB_PARAM_WIDTH:
+            SDL_snprintf(out, out_size, "%.2f", value);
+            break;
+        case MASTER_REVERB_PARAM_COUNT:
+        default:
+            SDL_strlcpy(out, "--", out_size);
+            break;
+    }
+}
+
 static void app_render_master_mix(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
@@ -4149,7 +4280,7 @@ static void app_render_master_mix(App *app) {
     set_draw_color(app->renderer, master_accent);
     render_debug_text_scaled(app->renderer, margin, 32.0f, 2.6f, "MASTER MIX");
     SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 205);
-    SDL_RenderDebugText(app->renderer, margin, 68.0f, "Focused master bus home. Stage 2 has an empty built-in FX chain.");
+    SDL_RenderDebugText(app->renderer, margin, 68.0f, "Focused master bus home. Reverb 1 is a built-in master FX unit.");
 
     float master_h = content_h * 0.43f;
     if (master_h < 182.0f) master_h = 182.0f;
@@ -4157,10 +4288,14 @@ static void app_render_master_mix(App *app) {
     SDL_FRect master = { margin, top, content_w, master_h };
     float lower_y = master.y + master.h + gap;
     float lower_h = content_h - master.h - gap;
-    float col_w = (content_w - gap) * 0.5f;
-    SDL_FRect reverb = { margin, lower_y, col_w, lower_h * 0.52f - gap * 0.5f };
-    SDL_FRect fx = { margin + col_w + gap, lower_y, col_w, reverb.h };
-    SDL_FRect midi = { margin, reverb.y + reverb.h + gap, content_w, lower_h - reverb.h - gap };
+    float reverb_w = content_w * 0.63f;
+    if (reverb_w < 380.0f) reverb_w = 380.0f;
+    if (reverb_w > content_w - 230.0f) reverb_w = content_w - 230.0f;
+    float right_w = content_w - reverb_w - gap;
+    SDL_FRect reverb = { margin, lower_y, reverb_w, lower_h };
+    SDL_FRect fx = { margin + reverb_w + gap, lower_y, right_w, lower_h * 0.50f - gap * 0.5f };
+    SDL_FRect midi = { fx.x, fx.y + fx.h + gap, right_w, lower_h - fx.h - gap };
+    if (fx.h < 112.0f) fx.h = 112.0f;
     if (midi.h < 86.0f) midi.h = 86.0f;
 
     render_master_mix_section(app, master, MASTER_MIX_FOCUS_MASTER, master_accent, "MASTER");
@@ -4206,14 +4341,38 @@ static void app_render_master_mix(App *app) {
     SDL_RenderRect(app->renderer, &gain_slot);
     SDL_SetRenderDrawColor(app->renderer, 208, 216, 226, 235);
     SDL_RenderDebugText(app->renderer, gain_slot.x + 12.0f, gain_slot.y + 12.0f,
-                        "Master level is fixed in Stage 1. No gain or DSP changes are applied.");
+                        "Master level is fixed. Reverb 1 adds wet return after this dry signal.");
 
     render_master_mix_section(app, reverb, MASTER_MIX_FOCUS_REVERB, reverb_accent, "REVERB");
+    MasterReverbParams reverb_target;
+    audio_engine_get_master_reverb_params(&app->audio, NULL, &reverb_target);
     SDL_SetRenderDrawColor(app->renderer, 226, 232, 238, 235);
-    SDL_RenderDebugText(app->renderer, reverb.x + 18.0f, reverb.y + 48.0f, "Not installed");
+    SDL_RenderDebugText(app->renderer, reverb.x + 18.0f, reverb.y + 44.0f, "Reverb 1");
     SDL_SetRenderDrawColor(app->renderer, 176, 184, 198, 225);
-    SDL_RenderDebugText(app->renderer, reverb.x + 18.0f, reverb.y + 70.0f, "Stage 3 will add one shared master reverb.");
-    SDL_RenderDebugText(app->renderer, reverb.x + 18.0f, reverb.y + 90.0f, "No send, return, tone, or tail exists yet.");
+    SDL_RenderDebugText(app->renderer, reverb.x + 96.0f, reverb.y + 44.0f,
+                        reverb_target.enabled ? "active" : "bypassed");
+    float row_y = reverb.y + 68.0f;
+    for (int i = 0; i < (int)MASTER_REVERB_PARAM_COUNT; ++i) {
+        MasterReverbParamId param = (MasterReverbParamId)i;
+        bool selected = app->master_mix_focus == MASTER_MIX_FOCUS_REVERB &&
+                        app->master_reverb_selected_param == param;
+        SDL_FRect row = { reverb.x + 12.0f, row_y - 4.0f, reverb.w - 24.0f, 17.0f };
+        if (selected) {
+            SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 52);
+            SDL_RenderFillRect(app->renderer, &row);
+            SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 230);
+            SDL_RenderRect(app->renderer, &row);
+        }
+        char value[32];
+        format_master_reverb_value(&reverb_target, param, value, sizeof(value));
+        SDL_SetRenderDrawColor(app->renderer, selected ? 255 : 218, selected ? 238 : 224, selected ? 178 : 232, 255);
+        SDL_RenderDebugTextFormat(app->renderer, reverb.x + 18.0f, row_y, "%s", audio_engine_master_reverb_param_label(param));
+        SDL_RenderDebugTextFormat(app->renderer, reverb.x + reverb.w - 96.0f, row_y, "%s", value);
+        row_y += 18.0f;
+    }
+    SDL_SetRenderDrawColor(app->renderer, 176, 184, 198, 225);
+    SDL_RenderDebugText(app->renderer, reverb.x + 18.0f, reverb.y + reverb.h - 26.0f,
+                        "Left/Right adjust   Enter/South enable   R/LS clears tail");
 
     render_master_mix_section(app, fx, MASTER_MIX_FOCUS_FX_CHAIN, fx_accent, "FX CHAIN");
     MasterFxChain chain;
@@ -4236,7 +4395,7 @@ static void app_render_master_mix(App *app) {
         SDL_RenderDebugTextFormat(app->renderer, fx.x + 18.0f, slot_y, "Slot %d: %s  %s", i + 1, label, state);
         slot_y += 18.0f;
     }
-    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, slot_y + 4.0f, "No unit changes audio until a real processor is added.");
+    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, slot_y + 4.0f, "Only Reverb 1 has a processor in this stage.");
 
     render_master_mix_section(app, midi, MASTER_MIX_FOCUS_MIDI_CONTROL, midi_accent, "MIDI / CONTROL");
     SDL_SetRenderDrawColor(app->renderer, 226, 232, 238, 235);
@@ -4527,6 +4686,7 @@ bool app_init(App *app){
     app->transport_bpm_manual = false;
     app->view_mode = APP_VIEW_WAVEFORM;
     app->master_mix_focus = MASTER_MIX_FOCUS_MASTER;
+    app->master_reverb_selected_param = MASTER_REVERB_PARAM_ENABLED;
     app_set_waveform_source_generated(app);
     app_clear_waveform_frame_grip(app);
     app->controls_legend_open = false;
@@ -4581,6 +4741,7 @@ bool app_init(App *app){
         app->audio.master_gain = 0.9f;
         app->audio.playback_mode = AUDIO_PLAYBACK_WAVEFORM;
         app->audio.active_analyzer_lane = -1;
+        audio_engine_init_master_fx(&app->audio);
     }
     audio_engine_set_timeline(&app->audio, app->roster, &app->roster_clip_count, &app->timeline);
     if(app->sample_count > 0) app_load_selected_sample(app);

@@ -225,6 +225,134 @@ static bool audio_lane_index_valid(int lane_index) {
     return lane_index >= 0 && lane_index < TIMELINE_MAX_LANES;
 }
 
+static float clamp_float(float value, float min_value, float max_value) {
+    if(value < min_value) return min_value;
+    if(value > max_value) return max_value;
+    return value;
+}
+
+static float zap_denormal(float value) {
+    return fabsf(value) < 1.0e-20f ? 0.0f : value;
+}
+
+static float one_pole_coeff(float hz, int sample_rate) {
+    if(sample_rate <= 0) sample_rate = 48000;
+    hz = clamp_float(hz, 1.0f, (float)sample_rate * 0.45f);
+    return 1.0f - expf(-6.28318530717958647692f * hz / (float)sample_rate);
+}
+
+static float master_reverb_param_min(MasterReverbParamId param) {
+    switch(param) {
+        case MASTER_REVERB_PARAM_ENABLED: return 0.0f;
+        case MASTER_REVERB_PARAM_SEND: return 0.0f;
+        case MASTER_REVERB_PARAM_RETURN: return 0.0f;
+        case MASTER_REVERB_PARAM_PREDELAY_MS: return 0.0f;
+        case MASTER_REVERB_PARAM_DECAY_SECONDS: return 0.35f;
+        case MASTER_REVERB_PARAM_SIZE: return 0.50f;
+        case MASTER_REVERB_PARAM_DIFFUSION: return 0.0f;
+        case MASTER_REVERB_PARAM_DAMPING: return 0.0f;
+        case MASTER_REVERB_PARAM_LOW_CUT_HZ: return 20.0f;
+        case MASTER_REVERB_PARAM_HIGH_CUT_HZ: return 1200.0f;
+        case MASTER_REVERB_PARAM_WIDTH: return 0.0f;
+        case MASTER_REVERB_PARAM_COUNT:
+        default: return 0.0f;
+    }
+}
+
+static float master_reverb_param_max(MasterReverbParamId param) {
+    switch(param) {
+        case MASTER_REVERB_PARAM_ENABLED: return 1.0f;
+        case MASTER_REVERB_PARAM_SEND: return 1.0f;
+        case MASTER_REVERB_PARAM_RETURN: return 1.0f;
+        case MASTER_REVERB_PARAM_PREDELAY_MS: return 200.0f;
+        case MASTER_REVERB_PARAM_DECAY_SECONDS: return 12.0f;
+        case MASTER_REVERB_PARAM_SIZE: return 1.50f;
+        case MASTER_REVERB_PARAM_DIFFUSION: return 1.0f;
+        case MASTER_REVERB_PARAM_DAMPING: return 1.0f;
+        case MASTER_REVERB_PARAM_LOW_CUT_HZ: return 1000.0f;
+        case MASTER_REVERB_PARAM_HIGH_CUT_HZ: return 18000.0f;
+        case MASTER_REVERB_PARAM_WIDTH: return 1.50f;
+        case MASTER_REVERB_PARAM_COUNT:
+        default: return 1.0f;
+    }
+}
+
+static MasterReverbParams master_reverb_default_params(void) {
+    MasterReverbParams params;
+    params.enabled = false;
+    params.send = 0.55f;
+    params.return_gain = 0.58f;
+    params.predelay_ms = 18.0f;
+    params.decay_seconds = 4.8f;
+    params.size = 1.18f;
+    params.diffusion = 0.86f;
+    params.damping = 0.32f;
+    params.low_cut_hz = 90.0f;
+    params.high_cut_hz = 11500.0f;
+    params.width = 1.25f;
+    return params;
+}
+
+static void master_reverb_set_param_unlocked(AudioEngine *a, MasterReverbParamId param, float value);
+
+static void master_reverb_update_derived(AudioEngine *a) {
+    if(!a) return;
+    MasterReverbState *state = &a->master_reverb_state;
+    const MasterReverbParams *params = &a->master_reverb_target;
+    int sample_rate = a->spec.freq > 0 ? a->spec.freq : 48000;
+    static const float base_delays[MASTER_REVERB_FDN_LINES] = {
+        1499.0f, 2111.0f, 2633.0f, 2971.0f,
+        3371.0f, 3793.0f, 4217.0f, 4789.0f
+    };
+    state->target_pre_delay_samples = clamp_float(params->predelay_ms * (float)sample_rate * 0.001f,
+                                                  0.0f,
+                                                  (float)(MASTER_REVERB_PREDELAY_MAX_FRAMES - 2));
+    for(int i = 0; i < MASTER_REVERB_FDN_LINES; ++i) {
+        float delay_samples = base_delays[i] * params->size;
+        delay_samples = clamp_float(delay_samples, 4.0f, (float)(MASTER_REVERB_DELAY_MAX_FRAMES - 3));
+        state->target_delay_samples[i] = delay_samples;
+        float delay_seconds = delay_samples / (float)sample_rate;
+        float feedback = powf(10.0f, (-3.0f * delay_seconds) / params->decay_seconds);
+        state->target_feedback_gain[i] = clamp_float(feedback, 0.05f, 0.985f);
+    }
+    state->target_low_cut_coeff = one_pole_coeff(params->low_cut_hz, sample_rate);
+    state->target_high_cut_coeff = one_pole_coeff(params->high_cut_hz, sample_rate);
+    float damping_cutoff = 16000.0f - params->damping * 14500.0f;
+    state->target_damping_coeff = one_pole_coeff(damping_cutoff, sample_rate);
+}
+
+static void master_reverb_clear_tail_unlocked(AudioEngine *a) {
+    if(!a) return;
+    MasterReverbState *state = &a->master_reverb_state;
+    memset(state->pre_delay, 0, sizeof(state->pre_delay));
+    memset(state->delay_lines, 0, sizeof(state->delay_lines));
+    memset(state->damping_state, 0, sizeof(state->damping_state));
+    state->pre_delay_write = 0;
+    memset(state->delay_write, 0, sizeof(state->delay_write));
+    state->low_cut_lp = 0.0f;
+    state->high_cut_lp_l = 0.0f;
+    state->high_cut_lp_r = 0.0f;
+    state->tail_cleared = true;
+}
+
+static void master_reverb_init(AudioEngine *a) {
+    if(!a) return;
+    a->master_reverb_target = master_reverb_default_params();
+    a->master_reverb_current = a->master_reverb_target;
+    memset(&a->master_reverb_state, 0, sizeof(a->master_reverb_state));
+    a->master_reverb_state.enabled_amount = 0.0f;
+    master_reverb_update_derived(a);
+    a->master_reverb_state.pre_delay_samples = a->master_reverb_state.target_pre_delay_samples;
+    a->master_reverb_state.low_cut_coeff = a->master_reverb_state.target_low_cut_coeff;
+    a->master_reverb_state.high_cut_coeff = a->master_reverb_state.target_high_cut_coeff;
+    a->master_reverb_state.damping_coeff = a->master_reverb_state.target_damping_coeff;
+    for(int i = 0; i < MASTER_REVERB_FDN_LINES; ++i) {
+        a->master_reverb_state.delay_samples[i] = a->master_reverb_state.target_delay_samples[i];
+        a->master_reverb_state.feedback_gain[i] = a->master_reverb_state.target_feedback_gain[i];
+    }
+    master_reverb_clear_tail_unlocked(a);
+}
+
 static void master_fx_chain_init(MasterFxChain *chain) {
     if(!chain) return;
     memset(chain, 0, sizeof(*chain));
@@ -233,23 +361,157 @@ static void master_fx_chain_init(MasterFxChain *chain) {
         chain->units[i].enabled = false;
         chain->units[i].bypassed = true;
     }
-    chain->unit_count = 0;
+    chain->units[0].type = MASTER_FX_UNIT_REVERB;
+    chain->units[0].enabled = false;
+    chain->units[0].bypassed = true;
+    chain->unit_count = 1;
 }
 
-static void master_fx_chain_process(const MasterFxChain *chain, float *left, float *right) {
-    if(!chain || !left || !right) return;
+void audio_engine_init_master_fx(AudioEngine *a) {
+    if(!a) return;
+    master_fx_chain_init(&a->master_fx_chain);
+    master_reverb_init(a);
+}
+
+static float read_fractional_delay(const float *buffer, int buffer_size, int write_index, float delay_samples) {
+    if(!buffer || buffer_size <= 1) return 0.0f;
+    if(delay_samples <= 0.5f) return 0.0f;
+    float read_pos = (float)write_index - delay_samples;
+    while(read_pos < 0.0f) read_pos += (float)buffer_size;
+    while(read_pos >= (float)buffer_size) read_pos -= (float)buffer_size;
+    int i0 = (int)floorf(read_pos);
+    int i1 = i0 + 1;
+    if(i1 >= buffer_size) i1 = 0;
+    float frac = read_pos - (float)i0;
+    return buffer[i0] + (buffer[i1] - buffer[i0]) * frac;
+}
+
+static void master_reverb_process(AudioEngine *a, float *left, float *right) {
+    if(!a || !left || !right) return;
+    MasterReverbParams *current = &a->master_reverb_current;
+    const MasterReverbParams *target = &a->master_reverb_target;
+    MasterReverbState *state = &a->master_reverb_state;
+    const int sample_rate = a->spec.freq > 0 ? a->spec.freq : 48000;
+    const float smooth = 1.0f - expf(-1.0f / ((float)sample_rate * 0.020f));
+    const float slow_smooth = 1.0f - expf(-1.0f / ((float)sample_rate * 0.060f));
+    const float enabled_target = target->enabled ? 1.0f : 0.0f;
+
+    state->enabled_amount += (enabled_target - state->enabled_amount) * smooth;
+    if(!target->enabled && state->enabled_amount < 0.0001f && state->tail_cleared) return;
+
+    current->send += (target->send - current->send) * smooth;
+    current->return_gain += (target->return_gain - current->return_gain) * smooth;
+    current->predelay_ms += (target->predelay_ms - current->predelay_ms) * slow_smooth;
+    current->decay_seconds += (target->decay_seconds - current->decay_seconds) * smooth;
+    current->size += (target->size - current->size) * slow_smooth;
+    current->diffusion += (target->diffusion - current->diffusion) * smooth;
+    current->damping += (target->damping - current->damping) * smooth;
+    current->low_cut_hz += (target->low_cut_hz - current->low_cut_hz) * smooth;
+    current->high_cut_hz += (target->high_cut_hz - current->high_cut_hz) * smooth;
+    current->width += (target->width - current->width) * smooth;
+    current->enabled = state->enabled_amount > 0.5f;
+
+    state->pre_delay_samples += (state->target_pre_delay_samples - state->pre_delay_samples) * slow_smooth;
+    state->low_cut_coeff += (state->target_low_cut_coeff - state->low_cut_coeff) * smooth;
+    state->high_cut_coeff += (state->target_high_cut_coeff - state->high_cut_coeff) * smooth;
+    state->damping_coeff += (state->target_damping_coeff - state->damping_coeff) * smooth;
+    for(int i = 0; i < MASTER_REVERB_FDN_LINES; ++i) {
+        state->delay_samples[i] += (state->target_delay_samples[i] - state->delay_samples[i]) * slow_smooth;
+        state->feedback_gain[i] += (state->target_feedback_gain[i] - state->feedback_gain[i]) * smooth;
+    }
+
+    float mono = (*left + *right) * 0.5f * current->send * state->enabled_amount;
+    if(state->pre_delay_samples <= 0.5f) {
+        state->pre_delay[state->pre_delay_write] = mono;
+        state->pre_delay_write = (state->pre_delay_write + 1) % MASTER_REVERB_PREDELAY_MAX_FRAMES;
+    } else {
+        float delayed = read_fractional_delay(state->pre_delay,
+                                             MASTER_REVERB_PREDELAY_MAX_FRAMES,
+                                             state->pre_delay_write,
+                                             state->pre_delay_samples);
+        state->pre_delay[state->pre_delay_write] = mono;
+        state->pre_delay_write = (state->pre_delay_write + 1) % MASTER_REVERB_PREDELAY_MAX_FRAMES;
+        mono = delayed;
+    }
+
+    state->low_cut_lp += state->low_cut_coeff * (mono - state->low_cut_lp);
+    state->low_cut_lp = zap_denormal(state->low_cut_lp);
+    float tank_input = mono - state->low_cut_lp;
+
+    float delayed[MASTER_REVERB_FDN_LINES];
+    float delayed_sum = 0.0f;
+    for(int i = 0; i < MASTER_REVERB_FDN_LINES; ++i) {
+        delayed[i] = read_fractional_delay(state->delay_lines[i],
+                                           MASTER_REVERB_DELAY_MAX_FRAMES,
+                                           state->delay_write[i],
+                                           state->delay_samples[i]);
+        delayed[i] = zap_denormal(delayed[i]);
+        delayed_sum += delayed[i];
+    }
+
+    static const float input_sign[MASTER_REVERB_FDN_LINES] = { 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f };
+    static const float left_sign[MASTER_REVERB_FDN_LINES] = { 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f };
+    static const float right_sign[MASTER_REVERB_FDN_LINES] = { 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f };
+    float wet_l = 0.0f;
+    float wet_r = 0.0f;
+    float householder_scale = 2.0f / (float)MASTER_REVERB_FDN_LINES;
+    float input_gain = 0.58f;
+    for(int i = 0; i < MASTER_REVERB_FDN_LINES; ++i) {
+        float householder = householder_scale * delayed_sum - delayed[i];
+        float diffused = delayed[i] + (householder - delayed[i]) * current->diffusion;
+        state->damping_state[i] += state->damping_coeff * (diffused - state->damping_state[i]);
+        state->damping_state[i] = zap_denormal(state->damping_state[i]);
+        float write_value = tank_input * input_gain * input_sign[i] +
+                            state->damping_state[i] * state->feedback_gain[i];
+        write_value = zap_denormal(write_value);
+        state->delay_lines[i][state->delay_write[i]] = write_value;
+        state->delay_write[i] = (state->delay_write[i] + 1) % MASTER_REVERB_DELAY_MAX_FRAMES;
+        wet_l += delayed[i] * left_sign[i];
+        wet_r += delayed[i] * right_sign[i];
+    }
+
+    wet_l *= 0.24f;
+    wet_r *= 0.24f;
+    state->high_cut_lp_l += state->high_cut_coeff * (wet_l - state->high_cut_lp_l);
+    state->high_cut_lp_r += state->high_cut_coeff * (wet_r - state->high_cut_lp_r);
+    state->high_cut_lp_l = zap_denormal(state->high_cut_lp_l);
+    state->high_cut_lp_r = zap_denormal(state->high_cut_lp_r);
+    wet_l = state->high_cut_lp_l;
+    wet_r = state->high_cut_lp_r;
+
+    float mid = (wet_l + wet_r) * 0.5f;
+    float side = (wet_l - wet_r) * 0.5f * current->width;
+    wet_l = zap_denormal(mid + side);
+    wet_r = zap_denormal(mid - side);
+
+    float wet_gain = current->return_gain * state->enabled_amount;
+    *left += wet_l * wet_gain;
+    *right += wet_r * wet_gain;
+    state->tail_cleared = false;
+    if(!target->enabled && state->enabled_amount < 0.0001f) {
+        master_reverb_clear_tail_unlocked(a);
+    }
+}
+
+static void master_fx_chain_process(AudioEngine *a, float *left, float *right) {
+    if(!a || !left || !right) return;
+    const MasterFxChain *chain = &a->master_fx_chain;
     int count = chain->unit_count;
     if(count < 0) count = 0;
     if(count > MASTER_FX_CHAIN_MAX_UNITS) count = MASTER_FX_CHAIN_MAX_UNITS;
     for(int i = 0; i < count; ++i) {
         const MasterFxUnit *unit = &chain->units[i];
-        if(unit->type == MASTER_FX_UNIT_EMPTY || !unit->enabled || unit->bypassed) continue;
+        if(unit->type == MASTER_FX_UNIT_EMPTY) continue;
         switch(unit->type) {
-            case MASTER_FX_UNIT_EMPTY:
             case MASTER_FX_UNIT_REVERB:
+                master_reverb_process(a, left, right);
+                break;
             case MASTER_FX_UNIT_LOW_HIGH_CUT:
             case MASTER_FX_UNIT_DELAY:
             case MASTER_FX_UNIT_SOFT_CLIP_LIMITER:
+                if(!unit->enabled || unit->bypassed) break;
+                break;
+            case MASTER_FX_UNIT_EMPTY:
             default:
                 break;
         }
@@ -461,7 +723,9 @@ static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right
     float m = transport_next_metronome_sample(a->transport, a->spec.freq);
     float final_left = (left + m) * a->master_gain;
     float final_right = (right + m) * a->master_gain;
-    master_fx_chain_process(&a->master_fx_chain, &final_left, &final_right);
+    if(a->playback_mode == AUDIO_PLAYBACK_TIMELINE) {
+        master_fx_chain_process(a, &final_left, &final_right);
+    }
     update_master_meter(a, final_left, final_right);
     *out_left = clamp_output(final_left);
     *out_right = clamp_output(final_right);
@@ -499,7 +763,7 @@ static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int addi
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport){
     memset(a,0,sizeof(*a)); a->clip=clip;a->transport=transport;a->master_gain=0.9f; a->playhead_frame=0; a->playback_mode=AUDIO_PLAYBACK_WAVEFORM; a->active_analyzer_lane=-1; a->lane_analyzer_active=false;
-    master_fx_chain_init(&a->master_fx_chain);
+    audio_engine_init_master_fx(a);
     a->spec.format=SDL_AUDIO_F32; a->spec.channels=2; a->spec.freq=48000;
     a->debug_stats.sample_rate = a->spec.freq;
     a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &a->spec, feed_audio, a);
@@ -670,12 +934,96 @@ void audio_engine_get_master_fx_chain(const AudioEngine *a, MasterFxChain *chain
 const char *audio_engine_master_fx_unit_label(MasterFxUnitType type) {
     switch(type) {
         case MASTER_FX_UNIT_EMPTY: return "Empty";
-        case MASTER_FX_UNIT_REVERB: return "Reverb";
+        case MASTER_FX_UNIT_REVERB: return "Reverb 1";
         case MASTER_FX_UNIT_LOW_HIGH_CUT: return "Low/High Cut";
         case MASTER_FX_UNIT_DELAY: return "Delay";
         case MASTER_FX_UNIT_SOFT_CLIP_LIMITER: return "Soft Clip / Limiter";
         default: return "Unknown";
     }
+}
+
+const char *audio_engine_master_reverb_param_label(MasterReverbParamId param) {
+    switch(param) {
+        case MASTER_REVERB_PARAM_ENABLED: return "Enabled";
+        case MASTER_REVERB_PARAM_SEND: return "Send";
+        case MASTER_REVERB_PARAM_RETURN: return "Return";
+        case MASTER_REVERB_PARAM_PREDELAY_MS: return "PreDelay";
+        case MASTER_REVERB_PARAM_DECAY_SECONDS: return "Decay";
+        case MASTER_REVERB_PARAM_SIZE: return "Size";
+        case MASTER_REVERB_PARAM_DIFFUSION: return "Diffusion";
+        case MASTER_REVERB_PARAM_DAMPING: return "Damping";
+        case MASTER_REVERB_PARAM_LOW_CUT_HZ: return "Low Cut";
+        case MASTER_REVERB_PARAM_HIGH_CUT_HZ: return "High Cut";
+        case MASTER_REVERB_PARAM_WIDTH: return "Width";
+        case MASTER_REVERB_PARAM_COUNT:
+        default: return "Unknown";
+    }
+}
+
+static void master_reverb_set_param_unlocked(AudioEngine *a, MasterReverbParamId param, float value) {
+    if(!a || param < 0 || param >= MASTER_REVERB_PARAM_COUNT) return;
+    MasterReverbParams *params = &a->master_reverb_target;
+    value = clamp_float(value, master_reverb_param_min(param), master_reverb_param_max(param));
+    switch(param) {
+        case MASTER_REVERB_PARAM_ENABLED:
+            params->enabled = value >= 0.5f;
+            a->master_fx_chain.units[0].type = MASTER_FX_UNIT_REVERB;
+            a->master_fx_chain.units[0].enabled = params->enabled;
+            a->master_fx_chain.units[0].bypassed = !params->enabled;
+            if(a->master_fx_chain.unit_count < 1) a->master_fx_chain.unit_count = 1;
+            if(params->enabled) a->master_reverb_state.tail_cleared = false;
+            break;
+        case MASTER_REVERB_PARAM_SEND: params->send = value; break;
+        case MASTER_REVERB_PARAM_RETURN: params->return_gain = value; break;
+        case MASTER_REVERB_PARAM_PREDELAY_MS: params->predelay_ms = value; break;
+        case MASTER_REVERB_PARAM_DECAY_SECONDS: params->decay_seconds = value; break;
+        case MASTER_REVERB_PARAM_SIZE: params->size = value; break;
+        case MASTER_REVERB_PARAM_DIFFUSION: params->diffusion = value; break;
+        case MASTER_REVERB_PARAM_DAMPING: params->damping = value; break;
+        case MASTER_REVERB_PARAM_LOW_CUT_HZ: params->low_cut_hz = value; break;
+        case MASTER_REVERB_PARAM_HIGH_CUT_HZ: params->high_cut_hz = value; break;
+        case MASTER_REVERB_PARAM_WIDTH: params->width = value; break;
+        case MASTER_REVERB_PARAM_COUNT:
+        default: break;
+    }
+    master_reverb_update_derived(a);
+}
+
+void audio_engine_get_master_reverb_params(const AudioEngine *a, MasterReverbParams *current, MasterReverbParams *target) {
+    if(current) *current = master_reverb_default_params();
+    if(target) *target = master_reverb_default_params();
+    if(!a) return;
+    AudioEngine *mutable_audio = (AudioEngine *)a;
+    if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
+    if(current) *current = a->master_reverb_current;
+    if(target) *target = a->master_reverb_target;
+    if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
+}
+
+void audio_engine_set_master_reverb_param(AudioEngine *a, MasterReverbParamId param, float value) {
+    if(!a) return;
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    master_reverb_set_param_unlocked(a, param, value);
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+}
+
+void audio_engine_set_master_reverb_enabled(AudioEngine *a, bool enabled) {
+    audio_engine_set_master_reverb_param(a, MASTER_REVERB_PARAM_ENABLED, enabled ? 1.0f : 0.0f);
+}
+
+void audio_engine_toggle_master_reverb(AudioEngine *a) {
+    if(!a) return;
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    bool enabled = !a->master_reverb_target.enabled;
+    master_reverb_set_param_unlocked(a, MASTER_REVERB_PARAM_ENABLED, enabled ? 1.0f : 0.0f);
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+}
+
+void audio_engine_clear_master_reverb_tail(AudioEngine *a) {
+    if(!a) return;
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    master_reverb_clear_tail_unlocked(a);
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
 }
 
 void audio_engine_get_debug_stats(const AudioEngine *a, AudioDebugStats *stats) {
