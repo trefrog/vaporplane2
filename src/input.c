@@ -468,7 +468,8 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
             if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_toggle_tape_control_mode(app);
             return true;
         case SDLK_0:
-            if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_reset_tape_speed(app);
+            if(mod & SDL_KMOD_SHIFT) app_timeline_fit_play_range_view(app);
+            else if(app->timeline_focus_zone == TIMELINE_FOCUS_TRANSPORT) app_timeline_reset_tape_speed(app);
             return true;
         case SDLK_R:
             if(app->timeline_focus_zone == TIMELINE_FOCUS_PLAY_RANGE) app_timeline_reset_play_range(app);
@@ -734,6 +735,11 @@ void input_update_gamepad(App *app, double dt){
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_context_menu_move(app, 1);
             if(south_pressed) app_timeline_context_menu_apply(app);
             if(east_pressed || start_pressed) app_timeline_close_context_menu(app);
+            return;
+        }
+
+        if(l2_shift && r2_shift && left_stick_pressed) {
+            app_timeline_fit_play_range_view(app);
             return;
         }
 

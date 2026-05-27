@@ -85,6 +85,7 @@ static void mix_preview(AudioEngine *a, float *left, float *right) {
     *right += roster_sample_at(clip, a->preview_frame, 1);
 
     double frame_step = a->spec.freq > 0 ? (double)clip->sample_rate / (double)a->spec.freq : 1.0;
+    frame_step *= (double)timeline_effective_tape_speed(a->timeline);
     if(frame_step <= 0.0) frame_step = 1.0;
     a->preview_frame += frame_step;
     if(a->preview_frame >= (double)clip->frame_count) a->preview_active = false;

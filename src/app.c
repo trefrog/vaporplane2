@@ -77,6 +77,54 @@ static const SDL_Color roster_palette[] = {
     { 235, 115, 190, 255 },
 };
 
+static int roster_palette_count(void) {
+    return (int)(sizeof(roster_palette) / sizeof(roster_palette[0]));
+}
+
+static SDL_Color roster_color_for_index(int index) {
+    int count = roster_palette_count();
+    if (count <= 0) return (SDL_Color){ 255, 255, 255, 255 };
+    if (index < 0) index = 0;
+    return roster_palette[index % count];
+}
+
+static bool colors_equal(SDL_Color a, SDL_Color b) {
+    return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
+static SDL_Color roster_color_avoiding_neighbors(SDL_Color preferred, const SDL_Color *prev, const SDL_Color *next) {
+    int count = roster_palette_count();
+    if (count <= 0) return preferred;
+    if ((!prev || !colors_equal(preferred, *prev)) &&
+        (!next || !colors_equal(preferred, *next))) {
+        return preferred;
+    }
+    for (int i = 0; i < count; ++i) {
+        SDL_Color candidate = roster_palette[i];
+        if (prev && colors_equal(candidate, *prev)) continue;
+        if (next && colors_equal(candidate, *next)) continue;
+        return candidate;
+    }
+    return preferred;
+}
+
+static SDL_Color roster_color_for_append(const App *app) {
+    int index = app ? app->roster_clip_count : 0;
+    SDL_Color preferred = roster_color_for_index(index);
+    const SDL_Color *prev = (app && app->roster_clip_count > 0) ? &app->roster[app->roster_clip_count - 1].color : NULL;
+    return roster_color_avoiding_neighbors(preferred, prev, NULL);
+}
+
+static void app_repair_roster_adjacent_colors(App *app) {
+    if (!app) return;
+    for (int i = 1; i < app->roster_clip_count; ++i) {
+        SDL_Color prev = app->roster[i - 1].color;
+        if (!colors_equal(app->roster[i].color, prev)) continue;
+        const SDL_Color *next = i + 1 < app->roster_clip_count ? &app->roster[i + 1].color : NULL;
+        app->roster[i].color = roster_color_avoiding_neighbors(roster_color_for_index(i), &prev, next);
+    }
+}
+
 typedef struct {
     SDL_Color deep;
     SDL_Color pastel;
@@ -1276,7 +1324,7 @@ void app_capture_current_loop_to_roster(App *app) {
     } else {
         next.downbeat_offset_frames = 0;
     }
-    next.color = roster_palette[app->roster_clip_count % (int)(sizeof(roster_palette) / sizeof(roster_palette[0]))];
+    next.color = roster_color_for_append(app);
 
     int roster_index = app->roster_clip_count;
     app->roster[roster_index] = next;
@@ -1634,7 +1682,6 @@ void app_timeline_select_play_range_handle(App *app, TimelineRangeHandle handle)
     app->timeline_play_range_handle = handle;
     app->timeline_focus_zone = TIMELINE_FOCUS_PLAY_RANGE;
     app_timeline_clear_context_menu(app);
-    if (app->timeline_play_range_adjusting) app_timeline_fit_play_range_anchors(app);
     app_set_status(app, handle == TIMELINE_RANGE_HANDLE_START ? "Play range start handle" : "Play range end handle");
 }
 
@@ -1666,7 +1713,6 @@ void app_timeline_nudge_play_range(App *app, int direction, bool by_bar) {
     }
     sync_timeline_play_range_no_lock(app);
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
-    app_timeline_fit_play_range_anchors(app);
 }
 
 void app_timeline_reset_play_range(App *app) {
@@ -1677,8 +1723,22 @@ void app_timeline_reset_play_range(App *app) {
     app->timeline.timeline_cursor_tick = app->timeline.play_range_start_tick;
     sync_timeline_play_range_no_lock(app);
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
-    if (app->timeline_play_range_adjusting) app_timeline_fit_play_range_anchors(app);
     app_set_status(app, "Play range reset");
+}
+
+void app_timeline_fit_play_range_view(App *app) {
+    if (!app || !app->timeline.initialized || app->timeline.length_ticks <= 0) {
+        if (app) app_set_status(app, "timeline empty");
+        return;
+    }
+    int64_t start = 0, end = 0;
+    timeline_effective_play_range(&app->timeline, &start, &end);
+    if (end <= start) {
+        app_set_status(app, "timeline empty");
+        return;
+    }
+    app_timeline_fit_play_range_anchors(app);
+    app_set_status(app, "Fit play range");
 }
 
 void app_timeline_select_roster_delta(App *app, int delta) {
@@ -1940,7 +2000,6 @@ void app_timeline_activate_focus(App *app) {
             break;
         case TIMELINE_FOCUS_PLAY_RANGE:
             app->timeline_play_range_adjusting = true;
-            app_timeline_fit_play_range_anchors(app);
             app_set_status(app, "Adjusting play range");
             break;
         case TIMELINE_FOCUS_TRACK_AREA:
@@ -2551,6 +2610,7 @@ void app_delete_selected_roster_clip(App *app) {
     if (app->roster_clip_count >= 0) {
         SDL_memset(&app->roster[app->roster_clip_count], 0, sizeof(app->roster[app->roster_clip_count]));
     }
+    app_repair_roster_adjacent_colors(app);
 
     if (app->roster_clip_count <= 0) {
         app->selected_roster_clip = -1;
@@ -2610,7 +2670,12 @@ void app_preview_selected_roster_clip(App *app) {
 
     RosterClip *clip = &app->roster[app->selected_roster_clip];
     if (audio_engine_preview_roster_clip(&app->audio, app->selected_roster_clip)) {
-        SDL_snprintf(app->status_text, sizeof(app->status_text), "Preview %s", clip->name);
+        float tape_speed = timeline_effective_tape_speed(&app->timeline);
+        if (fabsf(tape_speed - 1.0f) > 0.001f) {
+            SDL_snprintf(app->status_text, sizeof(app->status_text), "Preview %s @ %.3fx", clip->name, tape_speed);
+        } else {
+            SDL_snprintf(app->status_text, sizeof(app->status_text), "Preview %s", clip->name);
+        }
     } else {
         app_set_status(app, "Preview unavailable");
     }
