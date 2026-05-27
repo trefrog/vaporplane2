@@ -271,7 +271,20 @@ static bool timeline_has_instances(const MasterTimeline *timeline) {
 }
 
 static bool app_uses_timeline_transport(const App *app) {
-    return app->view_mode == APP_VIEW_TIMELINE || app->view_mode == APP_VIEW_LANE_INSPECTOR;
+    return app->view_mode == APP_VIEW_TIMELINE ||
+           app->view_mode == APP_VIEW_MASTER_MIX ||
+           app->view_mode == APP_VIEW_LANE_INSPECTOR;
+}
+
+static const char *master_mix_focus_label(MasterMixFocusSection section) {
+    switch (section) {
+        case MASTER_MIX_FOCUS_MASTER: return "MASTER";
+        case MASTER_MIX_FOCUS_REVERB: return "REVERB";
+        case MASTER_MIX_FOCUS_FX_CHAIN: return "FX CHAIN";
+        case MASTER_MIX_FOCUS_MIDI_CONTROL: return "MIDI / CONTROL";
+        case MASTER_MIX_FOCUS_COUNT:
+        default: return "MASTER";
+    }
 }
 
 static void reset_lane_analyzer_visual(App *app, int lane_index);
@@ -1555,6 +1568,10 @@ void app_toggle_view_mode(App *app) {
         app->tempo_lock_mode = false;
         app_timeline_clear_context_menu(app);
         sync_transport_from_app(app);
+    } else if (app->view_mode == APP_VIEW_TIMELINE) {
+        app->view_mode = APP_VIEW_MASTER_MIX;
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Master Mix");
     } else {
         audio_engine_set_active_lane_analyzer(&app->audio, -1);
         audio_engine_stop_timeline(&app->audio, true);
@@ -1564,6 +1581,22 @@ void app_toggle_view_mode(App *app) {
         app_timeline_clear_context_menu(app);
         sync_transport_from_app(app);
     }
+}
+
+void app_master_mix_return_to_timeline(App *app) {
+    if (!app || app->view_mode != APP_VIEW_MASTER_MIX) return;
+    app->view_mode = APP_VIEW_TIMELINE;
+    app_set_status(app, "Timeline");
+}
+
+void app_master_mix_cycle_focus(App *app, int direction) {
+    if (!app || direction == 0) return;
+    int focus = (int)app->master_mix_focus + direction;
+    while (focus < 0) focus += (int)MASTER_MIX_FOCUS_COUNT;
+    focus %= (int)MASTER_MIX_FOCUS_COUNT;
+    app->master_mix_focus = (MasterMixFocusSection)focus;
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Master Mix: %s",
+                 master_mix_focus_label(app->master_mix_focus));
 }
 
 void app_toggle_controls_legend(App *app) {
@@ -2982,7 +3015,7 @@ void app_select_sample_delta(App *app, int delta) {
 static void app_render_controls_legend(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
-    SDL_FRect panel = { 36.0f, 88.0f, 700.0f, 466.0f };
+    SDL_FRect panel = { 36.0f, 88.0f, 700.0f, 492.0f };
     if (panel.w > (float)w - 72.0f) panel.w = (float)w - 72.0f;
     if (panel.h > (float)h - 112.0f) panel.h = (float)h - 112.0f;
 
@@ -2996,7 +3029,7 @@ static void app_render_controls_legend(App *app) {
     float x = panel.x + 16.0f;
     float y = panel.y + 14.0f;
     SDL_RenderDebugText(app->renderer, x, y, "CONTROLS"); y += 22.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "F1 legend   F2 timeline/waveform   Tab sample picker in waveform"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "F1 legend   F2 waveform/timeline/master mix   Tab sample picker in waveform"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: Space play   M metronome   [/] BPM   T tempo lock"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "A/D loop start   J/L loop end   Shift = larger step"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Tab/Shift+Tab or bumpers cycle focus zones"); y += 16.0f;
@@ -3008,6 +3041,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Ruler: L/R beat cursor   C menu marks/removes tempo   [/] adjusts marked BPM"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Index: Up/Down lane   South opens Lane Inspector"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Lane Inspector: L/R palette   South mute   East timeline   R2 transport"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Master Mix: Tab/Up/Down focus   East timeline   Space/R2+South transport"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Play Range: Enter/South adjust   1/2 or West/North choose handle"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Track: L/R cursor   U/D lane cursor   South select/move   [/] velocity"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad track: L2+stick X glide   L2+D-pad L/R bars   L2+D-pad U/D velocity"); y += 16.0f;
@@ -3018,7 +3052,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform frame grip: hold L2 pins left edge   add R2 + D-pad L/R snaps beats"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "R2+South set loop to visible   L2+R2+South capture loop"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Waveform right stick picker   R2+Start timeline/waveform"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Waveform right stick picker   R2+Start cycles waveform/timeline/master"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform R2+North tempo lock   L2+R2+Back writes tempo JSON"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: South apply   L2+R2+South apply+roster   East/T cancel"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: R2+North snap downbeat   R2+East clear"); y += 16.0f;
@@ -3609,6 +3643,22 @@ static void app_render_timeline(App *app) {
         if (menu.y + menu.h > (float)h - menu_pad) menu.y = (float)h - menu_pad - menu.h;
         if (menu.x < menu_pad) menu.x = menu_pad;
         if (menu.y < menu_pad) menu.y = menu_pad;
+        if (app->debug_overlay_mode != APP_DEBUG_OVERLAY_OFF) {
+            SDL_FRect pad_rect = { 8.0f, (float)h - 104.0f, 224.0f, 96.0f };
+            bool overlaps_pad = menu.x < pad_rect.x + pad_rect.w + menu_pad &&
+                                menu.x + menu.w > pad_rect.x - menu_pad &&
+                                menu.y < pad_rect.y + pad_rect.h + menu_pad &&
+                                menu.y + menu.h > pad_rect.y - menu_pad;
+            if (overlaps_pad) {
+                float right_of_pad = pad_rect.x + pad_rect.w + menu_pad;
+                float above_pad = pad_rect.y - menu_pad - menu.h;
+                if (right_of_pad + menu.w <= (float)w - menu_pad) {
+                    menu.x = right_of_pad;
+                } else if (above_pad >= menu_pad) {
+                    menu.y = above_pad;
+                }
+            }
+        }
         SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
         SDL_FRect shadow = { menu.x + 12.0f, menu.y + 14.0f, menu.w + 20.0f, menu.h + 20.0f };
         SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 146);
@@ -4024,6 +4074,169 @@ static double app_amp_to_db(float amp) {
     return 20.0 * log10((double)amp);
 }
 
+static void render_master_mix_focus_outline(App *app, SDL_FRect rect, MasterMixFocusSection section) {
+    if (app->master_mix_focus != section) return;
+    SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+    SDL_RenderRect(app->renderer, &rect);
+    SDL_FRect inner = { rect.x + 2.0f, rect.y + 2.0f, rect.w - 4.0f, rect.h - 4.0f };
+    if (inner.w > 0.0f && inner.h > 0.0f) SDL_RenderRect(app->renderer, &inner);
+}
+
+static void render_master_mix_meter_bar(App *app,
+                                        SDL_FRect rect,
+                                        float value,
+                                        SDL_Color fill,
+                                        bool clip_active) {
+    if (value < 0.0f) value = 0.0f;
+    if (value > 1.25f) value = 1.25f;
+    float scaled = value / 1.25f;
+    SDL_SetRenderDrawColor(app->renderer, 25, 27, 36, 255);
+    SDL_RenderFillRect(app->renderer, &rect);
+
+    SDL_FRect safe = rect;
+    safe.w *= 1.0f / 1.25f;
+    SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, 18);
+    SDL_RenderFillRect(app->renderer, &safe);
+
+    SDL_FRect body = rect;
+    body.w *= scaled;
+    set_draw_color(app->renderer, clip_active ? (SDL_Color){ 255, 70, 78, 255 } : fill);
+    SDL_RenderFillRect(app->renderer, &body);
+
+    float unity_x = rect.x + rect.w * (1.0f / 1.25f);
+    SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 180);
+    SDL_RenderLine(app->renderer, unity_x, rect.y - 2.0f, unity_x, rect.y + rect.h + 2.0f);
+}
+
+static void render_master_mix_section(App *app,
+                                      SDL_FRect rect,
+                                      MasterMixFocusSection section,
+                                      SDL_Color accent,
+                                      const char *title) {
+    SDL_Color bg = color_mix(accent, (SDL_Color){ 10, 11, 17, 255 }, 0.84f);
+    bg.a = 226;
+    set_draw_color(app->renderer, bg);
+    SDL_RenderFillRect(app->renderer, &rect);
+    SDL_Color border = color_mix(accent, (SDL_Color){ 190, 198, 210, 255 }, 0.28f);
+    border.a = 220;
+    set_draw_color(app->renderer, border);
+    SDL_RenderRect(app->renderer, &rect);
+    set_draw_color(app->renderer, accent);
+    SDL_RenderDebugText(app->renderer, rect.x + 16.0f, rect.y + 14.0f, title);
+    render_master_mix_focus_outline(app, rect, section);
+}
+
+static void app_render_master_mix(App *app) {
+    int w = 0, h = 0;
+    SDL_GetRenderOutputSize(app->renderer, &w, &h);
+    SDL_SetRenderDrawColor(app->renderer, 8, 7, 13, 255);
+    SDL_RenderClear(app->renderer);
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+
+    SDL_Color master_accent = { 130, 238, 234, 255 };
+    SDL_Color reverb_accent = { 196, 166, 255, 255 };
+    SDL_Color fx_accent = { 255, 216, 132, 255 };
+    SDL_Color midi_accent = { 156, 236, 160, 255 };
+
+    float margin = 42.0f;
+    float top = 96.0f;
+    float gap = 18.0f;
+    float content_w = (float)w - margin * 2.0f;
+    if (content_w < 520.0f) content_w = 520.0f;
+    float content_h = (float)h - top - 64.0f;
+    if (content_h < 440.0f) content_h = 440.0f;
+
+    set_draw_color(app->renderer, master_accent);
+    render_debug_text_scaled(app->renderer, margin, 32.0f, 2.6f, "MASTER MIX");
+    SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 205);
+    SDL_RenderDebugText(app->renderer, margin, 68.0f, "Focused master bus home. Stage 1 is monitor and placeholders only.");
+
+    float master_h = content_h * 0.43f;
+    if (master_h < 182.0f) master_h = 182.0f;
+    if (master_h > 250.0f) master_h = 250.0f;
+    SDL_FRect master = { margin, top, content_w, master_h };
+    float lower_y = master.y + master.h + gap;
+    float lower_h = content_h - master.h - gap;
+    float col_w = (content_w - gap) * 0.5f;
+    SDL_FRect reverb = { margin, lower_y, col_w, lower_h * 0.52f - gap * 0.5f };
+    SDL_FRect fx = { margin + col_w + gap, lower_y, col_w, reverb.h };
+    SDL_FRect midi = { margin, reverb.y + reverb.h + gap, content_w, lower_h - reverb.h - gap };
+    if (midi.h < 86.0f) midi.h = 86.0f;
+
+    render_master_mix_section(app, master, MASTER_MIX_FOCUS_MASTER, master_accent, "MASTER");
+    MasterMeterState meter;
+    SDL_memset(&meter, 0, sizeof(meter));
+    audio_engine_get_master_meter(&app->audio, &meter);
+    bool clip_active = meter.clip_flash_seconds > 0.0f;
+    float peak = fmaxf(fabsf(meter.peak_l), fabsf(meter.peak_r));
+    double peak_db = app_amp_to_db(peak);
+    SDL_SetRenderDrawColor(app->renderer, 232, 240, 244, 255);
+    SDL_RenderDebugTextFormat(app->renderer, master.x + 22.0f, master.y + 46.0f,
+                              "LEVEL %.2f  read-only", app->audio.master_gain);
+    if (peak_db <= -89.9) {
+        SDL_RenderDebugText(app->renderer, master.x + 22.0f, master.y + 66.0f, "PEAK <-90 dB");
+    } else {
+        SDL_RenderDebugTextFormat(app->renderer, master.x + 22.0f, master.y + 66.0f,
+                                  "PEAK %+4.1f dB", peak_db);
+    }
+    SDL_SetRenderDrawColor(app->renderer,
+                           clip_active ? 255 : 178,
+                           clip_active ? 90 : 184,
+                           clip_active ? 100 : 194,
+                           235);
+    SDL_RenderDebugTextFormat(app->renderer, master.x + 22.0f, master.y + 86.0f,
+                              clip_active ? "CLIP HOLD  count %u" : "CLIP CLEAR  count %u",
+                              meter.clip_count);
+
+    float meter_x = master.x + 184.0f;
+    float meter_w = master.w - 224.0f;
+    if (meter_w < 220.0f) meter_w = 220.0f;
+    SDL_FRect left_bar = { meter_x, master.y + 50.0f, meter_w, 18.0f };
+    SDL_FRect right_bar = { meter_x, master.y + 82.0f, meter_w, 18.0f };
+    SDL_SetRenderDrawColor(app->renderer, 210, 218, 226, 230);
+    SDL_RenderDebugText(app->renderer, meter_x - 24.0f, left_bar.y + 3.0f, "L");
+    SDL_RenderDebugText(app->renderer, meter_x - 24.0f, right_bar.y + 3.0f, "R");
+    render_master_mix_meter_bar(app, left_bar, fabsf(meter.peak_l), master_accent, clip_active);
+    render_master_mix_meter_bar(app, right_bar, fabsf(meter.peak_r), master_accent, clip_active);
+
+    SDL_FRect gain_slot = { master.x + 22.0f, master.y + master.h - 66.0f, master.w - 44.0f, 36.0f };
+    SDL_SetRenderDrawColor(app->renderer, 14, 16, 22, 185);
+    SDL_RenderFillRect(app->renderer, &gain_slot);
+    SDL_SetRenderDrawColor(app->renderer, 82, 92, 108, 230);
+    SDL_RenderRect(app->renderer, &gain_slot);
+    SDL_SetRenderDrawColor(app->renderer, 208, 216, 226, 235);
+    SDL_RenderDebugText(app->renderer, gain_slot.x + 12.0f, gain_slot.y + 12.0f,
+                        "Master level is fixed in Stage 1. No gain or DSP changes are applied.");
+
+    render_master_mix_section(app, reverb, MASTER_MIX_FOCUS_REVERB, reverb_accent, "REVERB");
+    SDL_SetRenderDrawColor(app->renderer, 226, 232, 238, 235);
+    SDL_RenderDebugText(app->renderer, reverb.x + 18.0f, reverb.y + 48.0f, "Not installed");
+    SDL_SetRenderDrawColor(app->renderer, 176, 184, 198, 225);
+    SDL_RenderDebugText(app->renderer, reverb.x + 18.0f, reverb.y + 70.0f, "Stage 3 will add one shared master reverb.");
+    SDL_RenderDebugText(app->renderer, reverb.x + 18.0f, reverb.y + 90.0f, "No send, return, tone, or tail exists yet.");
+
+    render_master_mix_section(app, fx, MASTER_MIX_FOCUS_FX_CHAIN, fx_accent, "FX CHAIN");
+    SDL_SetRenderDrawColor(app->renderer, 226, 232, 238, 235);
+    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, fx.y + 48.0f, "Empty");
+    SDL_SetRenderDrawColor(app->renderer, 176, 184, 198, 225);
+    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, fx.y + 70.0f, "Stage 2 will add the no-op chain scaffold.");
+    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, fx.y + 90.0f, "No slots process audio in Stage 1.");
+
+    render_master_mix_section(app, midi, MASTER_MIX_FOCUS_MIDI_CONTROL, midi_accent, "MIDI / CONTROL");
+    SDL_SetRenderDrawColor(app->renderer, 226, 232, 238, 235);
+    SDL_RenderDebugText(app->renderer, midi.x + 18.0f, midi.y + 48.0f, "Future mapping surface");
+    SDL_SetRenderDrawColor(app->renderer, 176, 184, 198, 225);
+    SDL_RenderDebugText(app->renderer, midi.x + 18.0f, midi.y + 70.0f,
+                        "Stable parameters will land here after real master controls exist.");
+
+    SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 205);
+    SDL_RenderDebugTextFormat(app->renderer, margin, (float)h - 30.0f,
+                              "focus: %s   F2/R2+Start next view   Tab/Up/Down focus",
+                              master_mix_focus_label(app->master_mix_focus));
+
+    if (app->controls_legend_open) app_render_controls_legend(app);
+}
+
 static double app_gamepad_axis_value(SDL_Gamepad *gamepad, SDL_GamepadAxis axis) {
     if (!gamepad) return 0.0;
     double v = (double)SDL_GetGamepadAxis(gamepad, axis);
@@ -4128,7 +4341,7 @@ static void app_render_debug_overlay(App *app) {
     SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
     if (show_stats) {
         const float stats_w = 260.0f;
-        const float stats_h = 138.0f;
+        const float stats_h = 100.0f;
         SDL_FRect stats_panel = { (float)w - stats_w - pad, pad, stats_w, stats_h };
         if (stats_panel.x < pad) stats_panel.x = pad;
         set_draw_color(app->renderer, stats_bg);
@@ -4146,12 +4359,12 @@ static void app_render_debug_overlay(App *app) {
         if (audio_load_percent < 0.0) audio_load_percent = 0.0;
         set_draw_color(app->renderer, text);
         float y = stats_panel.y + 8.0f;
-        SDL_RenderDebugText(app->renderer, stats_panel.x + 8.0f, y, "PERF"); y += 12.0f;
-        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "FPS %5.1f   frame %4.1f/%4.1fms", app->debug_fps, app->debug_frame_ms_avg, app->debug_frame_ms_max); y += 12.0f;
-        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "audio cb %4.2f/%4.2fms", audio_stats.callback_ms_avg, audio_stats.callback_ms_max); y += 12.0f;
-        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "budget %4.2fms   load %4.1f%%", audio_stats.audio_budget_ms, audio_load_percent); y += 12.0f;
-        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "rate %d   buffer %d", audio_stats.sample_rate, audio_stats.buffer_frames); y += 12.0f;
-        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "over budget %u   clips %d", audio_stats.over_budget_count, audio_stats.active_clips); y += 12.0f;
+        SDL_RenderDebugText(app->renderer, stats_panel.x + 8.0f, y, "PERF"); y += 11.0f;
+        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "FPS %5.1f  frame %4.1f/%4.1fms", app->debug_fps, app->debug_frame_ms_avg, app->debug_frame_ms_max); y += 11.0f;
+        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "audio %4.2f/%4.2fms", audio_stats.callback_ms_avg, audio_stats.callback_ms_max); y += 11.0f;
+        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "budget %4.2fms  load %4.1f%%", audio_stats.audio_budget_ms, audio_load_percent); y += 11.0f;
+        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "rate %d  buf %d", audio_stats.sample_rate, audio_stats.buffer_frames); y += 11.0f;
+        SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "over %u  clips %d", audio_stats.over_budget_count, audio_stats.active_clips); y += 11.0f;
         if (peak_db <= -89.9) SDL_RenderDebugText(app->renderer, stats_panel.x + 8.0f, y, "peak <-90 dB");
         else SDL_RenderDebugTextFormat(app->renderer, stats_panel.x + 8.0f, y, "peak %+4.1f dB", peak_db);
     }
@@ -4191,7 +4404,8 @@ static void app_render_overlay(App *app) {
         SDL_RenderDebugText(app->renderer, 12, 66, "TEMPO LOCK MODE");
     }
     const char *view_label = app->view_mode == APP_VIEW_LANE_INSPECTOR ? "lane inspector" :
-                             (app->view_mode == APP_VIEW_TIMELINE ? "timeline" : "waveform");
+                             (app->view_mode == APP_VIEW_MASTER_MIX ? "master mix" :
+                              (app->view_mode == APP_VIEW_TIMELINE ? "timeline" : "waveform"));
     SDL_RenderDebugTextFormat(app->renderer, 12, 108, "view: %s  roster: %d",
                               view_label,
                               app->roster_clip_count);
@@ -4296,6 +4510,7 @@ bool app_init(App *app){
     app->transport_bpm = 120.0;
     app->transport_bpm_manual = false;
     app->view_mode = APP_VIEW_WAVEFORM;
+    app->master_mix_focus = MASTER_MIX_FOCUS_MASTER;
     app_set_waveform_source_generated(app);
     app_clear_waveform_frame_grip(app);
     app->controls_legend_open = false;
@@ -4385,6 +4600,8 @@ void app_run(App *app){
         waveform_view_update(&app->view, dt);
         if (app->view_mode == APP_VIEW_LANE_INSPECTOR) {
             app_render_lane_inspector(app);
+        } else if (app->view_mode == APP_VIEW_MASTER_MIX) {
+            app_render_master_mix(app);
         } else if (app->view_mode == APP_VIEW_TIMELINE) {
             app_render_timeline(app);
         } else {
@@ -4392,7 +4609,7 @@ void app_run(App *app){
             TempoLockParams *guide = app_get_active_tempo_params(app, &guide_params) ? &guide_params : NULL;
             waveform_render(app->renderer,&app->clip,&app->view,audio_engine_get_playhead_frame(&app->audio),guide);
         }
-        if (app->view_mode != APP_VIEW_LANE_INSPECTOR) app_render_overlay(app);
+        if (app->view_mode != APP_VIEW_LANE_INSPECTOR && app->view_mode != APP_VIEW_MASTER_MIX) app_render_overlay(app);
         app_render_debug_overlay(app);
         SDL_RenderPresent(app->renderer);
     }

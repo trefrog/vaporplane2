@@ -21,6 +21,7 @@
 - Timeline view has focus zones, a tick cursor, beat/bar grid, beat-snapped tempo markers, play range handles, and range playback.
 - Timeline sequencing uses 8 lanes with same-lane overlap blocking and cross-lane overlap allowed.
 - Timeline playback applies per-instance velocity and shows a compact master output meter/clipping indicator.
+- Master Mix is a third main view for the master bus meter and future reverb, FX chain, and MIDI/control sections.
 - First-pass Lane Inspector opens from the lane row number and shows lane identity, mute, post-lane analyzer, peak meter, and clip LED.
 - Timeline playback starts from the play range and stops/rewinds or loops at the range end.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
@@ -35,7 +36,7 @@ cmake --build build
 ## Controls
 - `Escape`: close active panel/mode, then press twice within 2s to quit
 - `F1`: show/hide controls legend
-- `F2`: toggle waveform/timeline view
+- `F2`: cycle waveform/timeline/master mix view
 - `Space`: play/pause
 - `M`: metronome on/off
 - `T`: enter/exit Tempo Lock mode
@@ -134,8 +135,15 @@ cmake --build build
 - Gamepad `R2 + East`: stop preview, stop timeline playback, and rewind to play range start.
 - Gamepad `R2 + West`: jump playhead and cursor to play range start without changing play state.
 - Gamepad `R2 + North`: toggle play range loop.
-- Gamepad `R2 + Start`: toggle waveform/timeline view.
+- Gamepad `R2 + Start`: cycle waveform/timeline/master mix view.
 - In `ROSTER`, gamepad right-stick click previews the selected roster clip without changing placement state.
+
+## Master Mix
+- Master Mix is reached with `F2` or gamepad `R2 + Start` as part of the main view cycle.
+- It shows the existing read-only master gain, peak meter, and clip state.
+- Reverb, FX Chain, and MIDI/Control sections are intentional placeholders only; they do not process audio yet.
+- Keyboard `Tab`/`Shift+Tab` or `Up`/`Down` changes focused section. Gamepad d-pad up/down or bumpers change focused section.
+- Keyboard `Esc` is consumed and does not enter the quit flow while on Master Mix. Gamepad East returns to Timeline.
 
 ## Lane Inspector
 - Opens from timeline `LANE INDEX` focus with `Enter` or South.
@@ -182,7 +190,7 @@ cmake --build build
 - Right trigger + South: set loop markers to the visible screen range
 - Right trigger + North: enter Tempo Lock mode; while active, snap downbeat to loop start
 - Right trigger + East: clear/de-apply Tempo Lock
-- Right trigger + Start: toggle waveform/timeline view
+- Right trigger + Start: cycle waveform/timeline/master mix view
 - Left stick click: reset loop to full sample
 - Right stick click: open sample selector in waveform view
 - In selector: d-pad up/down choose, south loads, east closes

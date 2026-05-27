@@ -532,6 +532,18 @@ static bool handle_lane_inspector_key(App *app, SDL_Keycode key, SDL_Keymod mod)
     }
 }
 
+static bool handle_master_mix_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
+    switch(key) {
+        case SDLK_ESCAPE: return true;
+        case SDLK_TAB: app_master_mix_cycle_focus(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1); return true;
+        case SDLK_UP: app_master_mix_cycle_focus(app, -1); return true;
+        case SDLK_DOWN: app_master_mix_cycle_focus(app, 1); return true;
+        case SDLK_SPACE: app_toggle_timeline_playback(app); return true;
+        case SDLK_M: toggle_metronome(app); return true;
+        default: return true;
+    }
+}
+
 static bool button_pressed(SDL_Gamepad *gamepad, SDL_GamepadButton button) {
     bool down = SDL_GetGamepadButton(gamepad, button);
     bool pressed = down && !previous_buttons[button];
@@ -596,6 +608,7 @@ bool input_handle_event(App *app, const SDL_Event *e){
     }
     if(e->key.key==SDLK_TAB) {
         if(app->view_mode == APP_VIEW_TIMELINE) app_timeline_cycle_focus(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1);
+        else if(app->view_mode == APP_VIEW_MASTER_MIX) app_master_mix_cycle_focus(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1);
         else if(app->view_mode == APP_VIEW_LANE_INSPECTOR) return true;
         else {
             if(!app->sample_selector_open) app_refresh_sample_list(app);
@@ -604,6 +617,7 @@ bool input_handle_event(App *app, const SDL_Event *e){
         return true;
     }
     if(app->view_mode == APP_VIEW_LANE_INSPECTOR) return handle_lane_inspector_key(app, e->key.key, mod);
+    if(app->view_mode == APP_VIEW_MASTER_MIX) return handle_master_mix_key(app, e->key.key, mod);
     if(app->view_mode == APP_VIEW_TIMELINE) return handle_timeline_key(app, e->key.key, mod);
     if(app->tempo_lock_mode) return handle_tempo_lock_key(app, e->key.key, mod);
     if(e->key.key==SDLK_U || (e->key.key==SDLK_T && (mod & SDL_KMOD_CTRL))) {
@@ -694,6 +708,23 @@ void input_update_gamepad(App *app, double dt){
 
     if(r2_shift && start_pressed && !app->waveform_frame_grip_active) {
         app_toggle_view_mode(app);
+        return;
+    }
+
+    if(app->view_mode == APP_VIEW_MASTER_MIX) {
+        if(r2_shift && south_pressed) {
+            app_toggle_timeline_playback(app);
+            return;
+        }
+        if(east_pressed) {
+            app_master_mix_return_to_timeline(app);
+            return;
+        }
+        if(back_pressed) toggle_metronome(app);
+        if(left_shoulder_pressed) app_master_mix_cycle_focus(app, -1);
+        if(right_shoulder_pressed) app_master_mix_cycle_focus(app, 1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_master_mix_cycle_focus(app, -1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_master_mix_cycle_focus(app, 1);
         return;
     }
 

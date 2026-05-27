@@ -26,8 +26,17 @@ typedef enum {
 typedef enum {
     APP_VIEW_WAVEFORM,
     APP_VIEW_TIMELINE,
+    APP_VIEW_MASTER_MIX,
     APP_VIEW_LANE_INSPECTOR
 } AppViewMode;
+
+typedef enum {
+    MASTER_MIX_FOCUS_MASTER,
+    MASTER_MIX_FOCUS_REVERB,
+    MASTER_MIX_FOCUS_FX_CHAIN,
+    MASTER_MIX_FOCUS_MIDI_CONTROL,
+    MASTER_MIX_FOCUS_COUNT
+} MasterMixFocusSection;
 
 typedef enum {
     APP_DEBUG_OVERLAY_OFF,
@@ -97,6 +106,7 @@ typedef struct App {
     AudioEngine audio;
     WaveformView view;
     AppViewMode view_mode;
+    MasterMixFocusSection master_mix_focus;
     WaveformSourceMode waveform_source_mode;
     int waveform_source_roster_index;
     char waveform_source_name[APP_SAMPLE_NAME_MAX];
@@ -197,6 +207,8 @@ void app_confirm_write_tempo_sidecar(App *app);
 void app_cancel_write_tempo_sidecar(App *app);
 void app_clear_waveform_frame_grip(App *app);
 void app_toggle_view_mode(App *app);
+void app_master_mix_return_to_timeline(App *app);
+void app_master_mix_cycle_focus(App *app, int direction);
 void app_toggle_controls_legend(App *app);
 void app_toggle_timeline_playback(App *app);
 void app_rewind_timeline(App *app);
