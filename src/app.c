@@ -1570,6 +1570,25 @@ void app_toggle_controls_legend(App *app) {
     app->controls_legend_open = !app->controls_legend_open;
 }
 
+void app_toggle_debug_overlay(App *app) {
+    if (!app) return;
+    switch (app->debug_overlay_mode) {
+        case APP_DEBUG_OVERLAY_GAMEPAD_STATS:
+            app->debug_overlay_mode = APP_DEBUG_OVERLAY_OFF;
+            app_set_status(app, "Debug overlay off");
+            break;
+        case APP_DEBUG_OVERLAY_OFF:
+            app->debug_overlay_mode = APP_DEBUG_OVERLAY_GAMEPAD;
+            app_set_status(app, "Debug overlay: gamepad");
+            break;
+        case APP_DEBUG_OVERLAY_GAMEPAD:
+        default:
+            app->debug_overlay_mode = APP_DEBUG_OVERLAY_GAMEPAD_STATS;
+            app_set_status(app, "Debug overlay: gamepad + stats");
+            break;
+    }
+}
+
 void app_toggle_timeline_playback(App *app) {
     if (!app_uses_timeline_transport(app)) return;
     if (!app->audio.stream) {
@@ -4000,6 +4019,155 @@ static void app_render_lane_inspector(App *app) {
     SDL_RenderDebugText(app->renderer, clip.x + 6.0f, clip.y + 12.0f, "CLIP");
 }
 
+static double app_amp_to_db(float amp) {
+    if (amp <= 0.000032f) return -90.0;
+    return 20.0 * log10((double)amp);
+}
+
+static double app_gamepad_axis_value(SDL_Gamepad *gamepad, SDL_GamepadAxis axis) {
+    if (!gamepad) return 0.0;
+    double v = (double)SDL_GetGamepadAxis(gamepad, axis);
+    if (fabs(v) < 8000.0) return 0.0;
+    return v / (v < 0.0 ? 32768.0 : 32767.0);
+}
+
+static void render_debug_button(App *app,
+                                SDL_FRect rect,
+                                const char *label,
+                                bool active,
+                                SDL_Color dim,
+                                SDL_Color hot,
+                                SDL_Color text) {
+    set_draw_color(app->renderer, active ? hot : dim);
+    SDL_RenderFillRect(app->renderer, &rect);
+    SDL_Color border = active ? color_mix(hot, (SDL_Color){ 220, 255, 250, 255 }, 0.25f) : color_mix(dim, text, 0.35f);
+    set_draw_color(app->renderer, border);
+    SDL_RenderRect(app->renderer, &rect);
+    set_draw_color(app->renderer, active ? (SDL_Color){ 10, 24, 26, 255 } : text);
+    SDL_RenderDebugText(app->renderer, rect.x + 4.0f, rect.y + 3.0f, label);
+}
+
+static void render_debug_axis(App *app,
+                              SDL_FRect rect,
+                              double x,
+                              double y,
+                              SDL_Color dim,
+                              SDL_Color hot) {
+    set_draw_color(app->renderer, dim);
+    SDL_RenderRect(app->renderer, &rect);
+    float cx = rect.x + rect.w * 0.5f;
+    float cy = rect.y + rect.h * 0.5f;
+    SDL_RenderLine(app->renderer, rect.x + rect.w * 0.5f, rect.y + 3.0f, rect.x + rect.w * 0.5f, rect.y + rect.h - 3.0f);
+    SDL_RenderLine(app->renderer, rect.x + 3.0f, rect.y + rect.h * 0.5f, rect.x + rect.w - 3.0f, rect.y + rect.h * 0.5f);
+    float px = cx + (float)x * (rect.w * 0.36f);
+    float py = cy + (float)y * (rect.h * 0.36f);
+    SDL_FRect puck = { px - 3.0f, py - 3.0f, 6.0f, 6.0f };
+    set_draw_color(app->renderer, (fabs(x) > 0.01 || fabs(y) > 0.01) ? hot : dim);
+    SDL_RenderFillRect(app->renderer, &puck);
+}
+
+static void render_debug_gamepad(App *app, SDL_FRect panel, SDL_Color text, SDL_Color dim, SDL_Color hot) {
+    set_draw_color(app->renderer, text);
+    SDL_RenderDebugText(app->renderer, panel.x + 10.0f, panel.y + 8.0f, app->gamepad ? "GAMEPAD" : "GAMEPAD: disconnected");
+    if (!app->gamepad) return;
+
+    SDL_Gamepad *pad = app->gamepad;
+    float y = panel.y + 30.0f;
+    render_debug_button(app, (SDL_FRect){ panel.x + 12.0f, y, 28.0f, 18.0f }, "L1", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ panel.x + 44.0f, y, 38.0f, 18.0f }, "L2", SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000, dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ panel.x + panel.w - 82.0f, y, 38.0f, 18.0f }, "R2", SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000, dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ panel.x + panel.w - 40.0f, y, 28.0f, 18.0f }, "R1", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER), dim, hot, text);
+
+    y += 28.0f;
+    render_debug_axis(app,
+                      (SDL_FRect){ panel.x + 20.0f, y, 42.0f, 42.0f },
+                      app_gamepad_axis_value(pad, SDL_GAMEPAD_AXIS_LEFTX),
+                      app_gamepad_axis_value(pad, SDL_GAMEPAD_AXIS_LEFTY),
+                      dim,
+                      hot);
+    render_debug_axis(app,
+                      (SDL_FRect){ panel.x + panel.w - 62.0f, y, 42.0f, 42.0f },
+                      app_gamepad_axis_value(pad, SDL_GAMEPAD_AXIS_RIGHTX),
+                      app_gamepad_axis_value(pad, SDL_GAMEPAD_AXIS_RIGHTY),
+                      dim,
+                      hot);
+
+    float dpad_x = panel.x + 92.0f;
+    render_debug_button(app, (SDL_FRect){ dpad_x + 20.0f, y, 18.0f, 18.0f }, "^", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_UP), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ dpad_x, y + 20.0f, 18.0f, 18.0f }, "<", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ dpad_x + 20.0f, y + 20.0f, 18.0f, 18.0f }, "v", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_DOWN), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ dpad_x + 40.0f, y + 20.0f, 18.0f, 18.0f }, ">", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT), dim, hot, text);
+
+    float face_x = panel.x + panel.w - 142.0f;
+    render_debug_button(app, (SDL_FRect){ face_x + 24.0f, y, 22.0f, 18.0f }, "Y", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_NORTH), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ face_x, y + 20.0f, 22.0f, 18.0f }, "X", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_WEST), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ face_x + 24.0f, y + 20.0f, 22.0f, 18.0f }, "A", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ face_x + 48.0f, y + 20.0f, 22.0f, 18.0f }, "B", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST), dim, hot, text);
+
+    y += 54.0f;
+    render_debug_button(app, (SDL_FRect){ panel.x + 96.0f, y, 42.0f, 18.0f }, "BACK", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ panel.x + 144.0f, y, 46.0f, 18.0f }, "START", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ panel.x + 20.0f, y, 34.0f, 18.0f }, "LS", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_STICK), dim, hot, text);
+    render_debug_button(app, (SDL_FRect){ panel.x + panel.w - 54.0f, y, 34.0f, 18.0f }, "RS", SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK), dim, hot, text);
+}
+
+static void app_render_debug_overlay(App *app) {
+    if (!app || app->debug_overlay_mode == APP_DEBUG_OVERLAY_OFF) return;
+
+    int w = 0, h = 0;
+    SDL_GetRenderOutputSize(app->renderer, &w, &h);
+    SDL_Color panel_bg = { 4, 12, 14, 206 };
+    SDL_Color panel_border = { 38, 82, 88, 190 };
+    SDL_Color text = { 82, 126, 132, 255 };
+    SDL_Color dim = { 28, 58, 63, 230 };
+    SDL_Color hot = { 86, 164, 164, 245 };
+    const float panel_w = 304.0f;
+    const float stats_h = 174.0f;
+    const float pad = 10.0f;
+    bool show_stats = app->debug_overlay_mode == APP_DEBUG_OVERLAY_GAMEPAD_STATS;
+    float gamepad_h = 124.0f;
+    float total_h = (show_stats ? stats_h + 8.0f : 0.0f) + gamepad_h;
+    SDL_FRect panel = { (float)w - panel_w - pad, pad, panel_w, total_h };
+    if (panel.x < pad) panel.x = pad;
+    if (panel.y + panel.h > (float)h - pad) panel.y = fmaxf(pad, (float)h - panel.h - pad);
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    set_draw_color(app->renderer, panel_bg);
+    SDL_RenderFillRect(app->renderer, &panel);
+    set_draw_color(app->renderer, panel_border);
+    SDL_RenderRect(app->renderer, &panel);
+
+    float y = panel.y + 10.0f;
+    if (show_stats) {
+        AudioDebugStats audio_stats;
+        MasterMeterState meter;
+        audio_engine_get_debug_stats(&app->audio, &audio_stats);
+        audio_engine_get_master_meter(&app->audio, &meter);
+        float peak = fmaxf(meter.peak_l, meter.peak_r);
+        double peak_db = app_amp_to_db(peak);
+        double audio_load_percent = audio_stats.audio_load * 100.0;
+        if (audio_load_percent < 0.0) audio_load_percent = 0.0;
+        set_draw_color(app->renderer, text);
+        SDL_RenderDebugText(app->renderer, panel.x + 10.0f, y, "PERF");
+        y += 16.0f;
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "FPS:              %5.1f", app->debug_fps); y += 13.0f;
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "Frame ms:         %5.1f avg / %5.1f max", app->debug_frame_ms_avg, app->debug_frame_ms_max); y += 13.0f;
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "Audio callback:   %5.2f avg / %5.2f max", audio_stats.callback_ms_avg, audio_stats.callback_ms_max); y += 13.0f;
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "Audio budget:     %5.2f ms", audio_stats.audio_budget_ms); y += 13.0f;
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "Audio load:       %5.1f%%", audio_load_percent); y += 13.0f;
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "Sample rate:      %5d", audio_stats.sample_rate); y += 13.0f;
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "Buffer frames:    %5d", audio_stats.buffer_frames); y += 13.0f;
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "Over budget:      %5u", audio_stats.over_budget_count); y += 13.0f;
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "Active clips:     %5d", audio_stats.active_clips); y += 13.0f;
+        if (peak_db <= -89.9) SDL_RenderDebugText(app->renderer, panel.x + 10.0f, y, "Master peak:      <-90 dB");
+        else SDL_RenderDebugTextFormat(app->renderer, panel.x + 10.0f, y, "Master peak:      %+5.1f dB", peak_db);
+        y = panel.y + stats_h + 8.0f;
+    }
+
+    SDL_FRect gamepad_panel = { panel.x, y, panel.w, gamepad_h };
+    render_debug_gamepad(app, gamepad_panel, text, dim, hot);
+}
+
 static void app_render_overlay(App *app) {
     SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
     const char *current = app->clip.file_path[0] ? app->clip.file_path : "generated";
@@ -4120,6 +4288,10 @@ bool app_init(App *app){
         if (app->gamepad) app->gamepad_id = SDL_GetGamepadID(app->gamepad);
     }
     SDL_free(gamepads);
+    app->debug_overlay_mode = APP_DEBUG_OVERLAY_GAMEPAD_STATS;
+    app->debug_frame_ms_avg = 0.0;
+    app->debug_frame_ms_max = 0.0;
+    app->debug_fps = 0.0;
     app_resolve_roster_export_dir(app);
     app_refresh_sample_list(app);
     clip_init_generated(&app->clip, 48000, 2.0f);
@@ -4198,11 +4370,21 @@ void app_close_gamepad(App *app) {
 void app_focus_loop_start(App *app){ app->view.target_center=(double)app->clip.loop_start_frame/(double)app->clip.frame_count; }
 void app_focus_loop_end(App *app){ app->view.target_center=(double)app->clip.loop_end_frame/(double)app->clip.frame_count; }
 
+static void app_debug_update_frame_stats(App *app, double dt) {
+    if (!app || dt <= 0.0) return;
+    double frame_ms = dt * 1000.0;
+    if (app->debug_frame_ms_avg <= 0.0) app->debug_frame_ms_avg = frame_ms;
+    else app->debug_frame_ms_avg = app->debug_frame_ms_avg * 0.92 + frame_ms * 0.08;
+    double decayed_max = app->debug_frame_ms_max * 0.985;
+    app->debug_frame_ms_max = frame_ms > decayed_max ? frame_ms : decayed_max;
+    app->debug_fps = app->debug_frame_ms_avg > 0.0 ? 1000.0 / app->debug_frame_ms_avg : 0.0;
+}
+
 void app_run(App *app){
     Uint64 prev=SDL_GetTicksNS();
     while(app->running){
         SDL_Event e; while(SDL_PollEvent(&e)) if(!input_handle_event(app,&e)) app->running=false;
-        Uint64 now=SDL_GetTicksNS(); double dt=(double)(now-prev)/1e9; prev=now; input_update_gamepad(app,dt);
+        Uint64 now=SDL_GetTicksNS(); double dt=(double)(now-prev)/1e9; prev=now; app_debug_update_frame_stats(app, dt); input_update_gamepad(app,dt);
         waveform_view_update(&app->view, dt);
         if (app->view_mode == APP_VIEW_LANE_INSPECTOR) {
             app_render_lane_inspector(app);
@@ -4214,6 +4396,7 @@ void app_run(App *app){
             waveform_render(app->renderer,&app->clip,&app->view,audio_engine_get_playhead_frame(&app->audio),guide);
         }
         if (app->view_mode != APP_VIEW_LANE_INSPECTOR) app_render_overlay(app);
+        app_render_debug_overlay(app);
         SDL_RenderPresent(app->renderer);
     }
 }

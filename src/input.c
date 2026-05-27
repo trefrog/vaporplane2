@@ -557,6 +557,10 @@ bool input_handle_event(App *app, const SDL_Event *e){
         SDL_memset(previous_buttons, 0, sizeof(previous_buttons));
     }
     if(e->type!=SDL_EVENT_KEY_DOWN) return true;
+    if(e->key.key==SDLK_F12) {
+        app_toggle_debug_overlay(app);
+        return true;
+    }
     if(e->key.key==SDLK_F1) {
         app_toggle_controls_legend(app);
         return true;

@@ -34,6 +34,17 @@ typedef struct {
 } LaneMonitorState;
 
 typedef struct {
+    double callback_ms_avg;
+    double callback_ms_max;
+    int buffer_frames;
+    int sample_rate;
+    double audio_budget_ms;
+    double audio_load;
+    unsigned int over_budget_count;
+    int active_clips;
+} AudioDebugStats;
+
+typedef struct {
     SDL_AudioStream *stream;
     SDL_AudioSpec spec;
     AudioClip *clip;
@@ -57,6 +68,7 @@ typedef struct {
     unsigned int lane_analyzer_sample_count;
     int active_analyzer_lane;
     bool lane_analyzer_active;
+    AudioDebugStats debug_stats;
 } AudioEngine;
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport);
@@ -73,6 +85,7 @@ void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick);
 bool audio_engine_timeline_is_playing(const AudioEngine *a);
 int64_t audio_engine_get_timeline_playhead_tick(const AudioEngine *a);
 void audio_engine_get_master_meter(const AudioEngine *a, MasterMeterState *meter);
+void audio_engine_get_debug_stats(const AudioEngine *a, AudioDebugStats *stats);
 void audio_engine_set_active_lane_analyzer(AudioEngine *a, int lane_index);
 void audio_engine_get_lane_monitor(const AudioEngine *a, int lane_index, LaneMonitorState *meter);
 void audio_engine_get_lane_analyzer_snapshot(const AudioEngine *a,

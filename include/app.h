@@ -30,6 +30,12 @@ typedef enum {
 } AppViewMode;
 
 typedef enum {
+    APP_DEBUG_OVERLAY_OFF,
+    APP_DEBUG_OVERLAY_GAMEPAD,
+    APP_DEBUG_OVERLAY_GAMEPAD_STATS
+} AppDebugOverlayMode;
+
+typedef enum {
     WAVEFORM_SOURCE_GENERATED,
     WAVEFORM_SOURCE_WAV,
     WAVEFORM_SOURCE_ROSTER
@@ -81,6 +87,10 @@ typedef struct App {
     SDL_Gamepad *gamepad;
     SDL_JoystickID gamepad_id;
     bool running;
+    AppDebugOverlayMode debug_overlay_mode;
+    double debug_frame_ms_avg;
+    double debug_frame_ms_max;
+    double debug_fps;
 
     AudioClip clip;
     Transport transport;
@@ -163,6 +173,7 @@ void app_shutdown(App *app);
 void app_close_gamepad(App *app);
 void app_focus_loop_start(App *app);
 void app_focus_loop_end(App *app);
+void app_toggle_debug_overlay(App *app);
 void app_refresh_sample_list(App *app);
 bool load_clip_from_path(App *app, const char *path);
 bool app_load_selected_sample(App *app);

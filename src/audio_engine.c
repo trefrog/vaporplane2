@@ -63,22 +63,22 @@ static float roster_sample_at(const RosterClip *clip, double frame, int channel)
     return (float)((1.0 - frac) * s0 + frac * s1);
 }
 
-static void mix_preview(AudioEngine *a, float *left, float *right) {
-    if(!a->preview_active || !a->roster || !a->roster_clip_count) return;
+static bool mix_preview(AudioEngine *a, float *left, float *right) {
+    if(!a->preview_active || !a->roster || !a->roster_clip_count) return false;
     int roster_count = *a->roster_clip_count;
     if(a->preview_roster_clip_index < 0 || a->preview_roster_clip_index >= roster_count) {
         a->preview_active = false;
-        return;
+        return false;
     }
 
     RosterClip *clip = &a->roster[a->preview_roster_clip_index];
     if(!clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0) {
         a->preview_active = false;
-        return;
+        return false;
     }
     if(a->preview_frame >= (double)clip->frame_count) {
         a->preview_active = false;
-        return;
+        return false;
     }
 
     *left += roster_sample_at(clip, a->preview_frame, 0);
@@ -89,6 +89,7 @@ static void mix_preview(AudioEngine *a, float *left, float *right) {
     if(frame_step <= 0.0) frame_step = 1.0;
     a->preview_frame += frame_step;
     if(a->preview_frame >= (double)clip->frame_count) a->preview_active = false;
+    return true;
 }
 
 static double timeline_declik_gain(double elapsed_seconds, double source_duration_seconds, double instance_duration_seconds, int output_rate) {
@@ -262,14 +263,14 @@ static void decay_lane_monitors(AudioEngine *a) {
     }
 }
 
-static void mix_timeline(AudioEngine *a, float *left, float *right) {
+static int mix_timeline(AudioEngine *a, float *left, float *right) {
     MasterTimeline *timeline = a->timeline;
     if(!timeline || !a->roster || !a->roster_clip_count || !timeline->playing ||
        timeline->length_ticks <= 0 || timeline_total_instance_count(timeline) <= 0 ||
        timeline->ticks_per_beat <= 0) {
         decay_lane_monitors(a);
         a->metronome_beat_valid = false;
-        return;
+        return 0;
     }
 
     int64_t range_start_tick = 0, range_end_tick = 0;
@@ -280,7 +281,7 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
         a->transport->playing = false;
         a->transport->metronome_env = 0.0f;
         a->metronome_beat_valid = false;
-        return;
+        return 0;
     }
     if(a->timeline_playhead_tick < (double)range_start_tick ||
        a->timeline_playhead_tick >= (double)range_end_tick) {
@@ -292,12 +293,13 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
     double ticks_per_second = timeline_ticks_per_second_at_tick(timeline, a->timeline_playhead_tick) *
                               (double)timeline_effective_tape_speed(timeline);
     double tick_step = ticks_per_second / (double)a->spec.freq;
-    if(tick_step <= 0.0) return;
+    if(tick_step <= 0.0) return 0;
 
     sync_transport_to_timeline(a);
     update_timeline_metronome(a, a->timeline_playhead_tick, tick_step);
 
     int roster_count = *a->roster_clip_count;
+    int active_count = 0;
     float lane_left[TIMELINE_MAX_LANES] = {0};
     float lane_right[TIMELINE_MAX_LANES] = {0};
     for(int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
@@ -329,6 +331,7 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
                 float instance_gain = velocity_to_gain(instance->midi_velocity) * lane_gain * (float)gain;
                 lane_left[lane_index] += roster_sample_at(clip, source_frame, 0) * instance_gain;
                 lane_right[lane_index] += roster_sample_at(clip, source_frame, 1) * instance_gain;
+                active_count++;
             }
         }
         update_lane_monitor(a, lane_index, lane_left[lane_index], lane_right[lane_index]);
@@ -355,6 +358,7 @@ static void mix_timeline(AudioEngine *a, float *left, float *right) {
     } else {
         timeline->playhead_tick = (int64_t)floor(a->timeline_playhead_tick);
     }
+    return active_count;
 }
 
 static void update_master_meter(AudioEngine *a, float left, float right) {
@@ -385,9 +389,11 @@ static float clamp_output(float sample) {
 
 static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right) {
     float left = 0.f, right = 0.f;
+    int active_clips = 0;
     if (a->playback_mode == AUDIO_PLAYBACK_TIMELINE) {
-        mix_timeline(a, &left, &right);
+        active_clips += mix_timeline(a, &left, &right);
     } else if (a->clip && a->clip->samples && a->clip->frame_count>1 && a->transport->playing) {
+        active_clips++;
         size_t loop_start=a->clip->loop_start_frame, loop_end=a->clip->loop_end_frame;
         if(loop_end > a->clip->frame_count) loop_end = a->clip->frame_count;
         if(loop_start + 1 >= loop_end) loop_start = 0;
@@ -418,7 +424,8 @@ static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right
     } else {
         a->metronome_beat_valid = false;
     }
-    mix_preview(a, &left, &right);
+    if(mix_preview(a, &left, &right)) active_clips++;
+    a->debug_stats.active_clips = active_clips;
     if(a->playback_mode == AUDIO_PLAYBACK_WAVEFORM) transport_update(a->transport, 1.0/(double)a->spec.freq);
     float m = transport_next_metronome_sample(a->transport, a->spec.freq);
     float final_left = (left + m) * a->master_gain;
@@ -433,6 +440,7 @@ static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int addi
     AudioEngine *a = (AudioEngine*)userdata;
     int frames = additional_amount / (int)(sizeof(float)*2);
     if(frames <= 0) return;
+    Uint64 callback_start = SDL_GetTicksNS();
     while(frames > 0) {
         int chunk_frames = frames > AUDIO_CALLBACK_CHUNK_FRAMES ? AUDIO_CALLBACK_CHUNK_FRAMES : frames;
         float mix[AUDIO_CALLBACK_CHUNK_FRAMES * 2];
@@ -442,11 +450,25 @@ static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int addi
         SDL_PutAudioStreamData(stream, mix, chunk_frames * (int)sizeof(float) * 2);
         frames -= chunk_frames;
     }
+    Uint64 callback_end = SDL_GetTicksNS();
+    int buffer_frames = additional_amount / (int)(sizeof(float) * 2);
+    double callback_ms = (double)(callback_end - callback_start) / 1000000.0;
+    double budget_ms = a->spec.freq > 0 ? ((double)buffer_frames / (double)a->spec.freq) * 1000.0 : 0.0;
+    if(a->debug_stats.callback_ms_avg <= 0.0) a->debug_stats.callback_ms_avg = callback_ms;
+    else a->debug_stats.callback_ms_avg = a->debug_stats.callback_ms_avg * 0.92 + callback_ms * 0.08;
+    double decayed_max = a->debug_stats.callback_ms_max * 0.985;
+    a->debug_stats.callback_ms_max = callback_ms > decayed_max ? callback_ms : decayed_max;
+    a->debug_stats.buffer_frames = buffer_frames;
+    a->debug_stats.sample_rate = a->spec.freq;
+    a->debug_stats.audio_budget_ms = budget_ms;
+    a->debug_stats.audio_load = budget_ms > 0.0 ? callback_ms / budget_ms : 0.0;
+    if(budget_ms > 0.0 && callback_ms > budget_ms) a->debug_stats.over_budget_count++;
 }
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport){
     memset(a,0,sizeof(*a)); a->clip=clip;a->transport=transport;a->master_gain=0.9f; a->playhead_frame=0; a->playback_mode=AUDIO_PLAYBACK_WAVEFORM; a->active_analyzer_lane=-1; a->lane_analyzer_active=false;
     a->spec.format=SDL_AUDIO_F32; a->spec.channels=2; a->spec.freq=48000;
+    a->debug_stats.sample_rate = a->spec.freq;
     a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &a->spec, feed_audio, a);
     if(!a->stream){ fprintf(stderr,"SDL_OpenAudioDeviceStream failed: %s\n",SDL_GetError()); return false; }
     if (!SDL_ResumeAudioStreamDevice(a->stream)){ fprintf(stderr,"SDL_ResumeAudioStreamDevice failed: %s\n",SDL_GetError()); return false; }
@@ -599,6 +621,17 @@ void audio_engine_get_master_meter(const AudioEngine *a, MasterMeterState *meter
     AudioEngine *mutable_audio = (AudioEngine *)a;
     if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
     *meter = a->meter;
+    if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
+}
+
+void audio_engine_get_debug_stats(const AudioEngine *a, AudioDebugStats *stats) {
+    if(!stats) return;
+    SDL_memset(stats, 0, sizeof(*stats));
+    if(!a) return;
+    AudioEngine *mutable_audio = (AudioEngine *)a;
+    if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
+    *stats = a->debug_stats;
+    if(stats->sample_rate <= 0) stats->sample_rate = a->spec.freq;
     if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
 }
 
