@@ -22,6 +22,7 @@
 - Timeline sequencing uses 8 lanes with same-lane overlap blocking and cross-lane overlap allowed.
 - Timeline playback applies per-instance velocity and shows a compact master output meter/clipping indicator.
 - Master Mix is a third main view for the master bus meter and future reverb, FX chain, and MIDI/control sections.
+- Master audio owns a fixed-size built-in FX chain scaffold; it is empty and pass-through, with no audible processing yet.
 - First-pass Lane Inspector opens from the lane row number and shows lane identity, mute, post-lane analyzer, peak meter, and clip LED.
 - Timeline playback starts from the play range and stops/rewinds or loops at the range end.
 - Keyboard controls and first-pass gamepad editing controls with R2 chord support.
@@ -141,7 +142,7 @@ cmake --build build
 ## Master Mix
 - Master Mix is reached with `F2` or gamepad `R2 + Start` as part of the main view cycle.
 - It shows the existing read-only master gain, peak meter, and clip state.
-- Reverb, FX Chain, and MIDI/Control sections are intentional placeholders only; they do not process audio yet.
+- FX Chain reflects the real empty master FX scaffold. Reverb and MIDI/Control remain intentional placeholders only.
 - Keyboard `Tab`/`Shift+Tab` or `Up`/`Down` changes focused section. Gamepad d-pad up/down or bumpers change focused section.
 - Keyboard `Esc` is consumed and does not enter the quit flow while on Master Mix. Gamepad East returns to Timeline.
 

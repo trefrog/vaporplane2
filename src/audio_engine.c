@@ -225,6 +225,37 @@ static bool audio_lane_index_valid(int lane_index) {
     return lane_index >= 0 && lane_index < TIMELINE_MAX_LANES;
 }
 
+static void master_fx_chain_init(MasterFxChain *chain) {
+    if(!chain) return;
+    memset(chain, 0, sizeof(*chain));
+    for(int i = 0; i < MASTER_FX_CHAIN_MAX_UNITS; ++i) {
+        chain->units[i].type = MASTER_FX_UNIT_EMPTY;
+        chain->units[i].enabled = false;
+        chain->units[i].bypassed = true;
+    }
+    chain->unit_count = 0;
+}
+
+static void master_fx_chain_process(const MasterFxChain *chain, float *left, float *right) {
+    if(!chain || !left || !right) return;
+    int count = chain->unit_count;
+    if(count < 0) count = 0;
+    if(count > MASTER_FX_CHAIN_MAX_UNITS) count = MASTER_FX_CHAIN_MAX_UNITS;
+    for(int i = 0; i < count; ++i) {
+        const MasterFxUnit *unit = &chain->units[i];
+        if(unit->type == MASTER_FX_UNIT_EMPTY || !unit->enabled || unit->bypassed) continue;
+        switch(unit->type) {
+            case MASTER_FX_UNIT_EMPTY:
+            case MASTER_FX_UNIT_REVERB:
+            case MASTER_FX_UNIT_LOW_HIGH_CUT:
+            case MASTER_FX_UNIT_DELAY:
+            case MASTER_FX_UNIT_SOFT_CLIP_LIMITER:
+            default:
+                break;
+        }
+    }
+}
+
 static void write_lane_analyzer_sample(AudioEngine *a, int lane_index, float left, float right) {
     if(!a->lane_analyzer_active || a->active_analyzer_lane != lane_index) return;
     float mono = (left + right) * 0.5f;
@@ -430,6 +461,7 @@ static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right
     float m = transport_next_metronome_sample(a->transport, a->spec.freq);
     float final_left = (left + m) * a->master_gain;
     float final_right = (right + m) * a->master_gain;
+    master_fx_chain_process(&a->master_fx_chain, &final_left, &final_right);
     update_master_meter(a, final_left, final_right);
     *out_left = clamp_output(final_left);
     *out_right = clamp_output(final_right);
@@ -467,6 +499,7 @@ static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int addi
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport){
     memset(a,0,sizeof(*a)); a->clip=clip;a->transport=transport;a->master_gain=0.9f; a->playhead_frame=0; a->playback_mode=AUDIO_PLAYBACK_WAVEFORM; a->active_analyzer_lane=-1; a->lane_analyzer_active=false;
+    master_fx_chain_init(&a->master_fx_chain);
     a->spec.format=SDL_AUDIO_F32; a->spec.channels=2; a->spec.freq=48000;
     a->debug_stats.sample_rate = a->spec.freq;
     a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &a->spec, feed_audio, a);
@@ -622,6 +655,27 @@ void audio_engine_get_master_meter(const AudioEngine *a, MasterMeterState *meter
     if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
     *meter = a->meter;
     if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
+}
+
+void audio_engine_get_master_fx_chain(const AudioEngine *a, MasterFxChain *chain) {
+    if(!chain) return;
+    master_fx_chain_init(chain);
+    if(!a) return;
+    AudioEngine *mutable_audio = (AudioEngine *)a;
+    if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
+    *chain = a->master_fx_chain;
+    if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
+}
+
+const char *audio_engine_master_fx_unit_label(MasterFxUnitType type) {
+    switch(type) {
+        case MASTER_FX_UNIT_EMPTY: return "Empty";
+        case MASTER_FX_UNIT_REVERB: return "Reverb";
+        case MASTER_FX_UNIT_LOW_HIGH_CUT: return "Low/High Cut";
+        case MASTER_FX_UNIT_DELAY: return "Delay";
+        case MASTER_FX_UNIT_SOFT_CLIP_LIMITER: return "Soft Clip / Limiter";
+        default: return "Unknown";
+    }
 }
 
 void audio_engine_get_debug_stats(const AudioEngine *a, AudioDebugStats *stats) {

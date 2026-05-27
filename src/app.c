@@ -4149,7 +4149,7 @@ static void app_render_master_mix(App *app) {
     set_draw_color(app->renderer, master_accent);
     render_debug_text_scaled(app->renderer, margin, 32.0f, 2.6f, "MASTER MIX");
     SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 205);
-    SDL_RenderDebugText(app->renderer, margin, 68.0f, "Focused master bus home. Stage 1 is monitor and placeholders only.");
+    SDL_RenderDebugText(app->renderer, margin, 68.0f, "Focused master bus home. Stage 2 has an empty built-in FX chain.");
 
     float master_h = content_h * 0.43f;
     if (master_h < 182.0f) master_h = 182.0f;
@@ -4216,11 +4216,27 @@ static void app_render_master_mix(App *app) {
     SDL_RenderDebugText(app->renderer, reverb.x + 18.0f, reverb.y + 90.0f, "No send, return, tone, or tail exists yet.");
 
     render_master_mix_section(app, fx, MASTER_MIX_FOCUS_FX_CHAIN, fx_accent, "FX CHAIN");
+    MasterFxChain chain;
+    audio_engine_get_master_fx_chain(&app->audio, &chain);
+    int chain_count = chain.unit_count;
+    if (chain_count < 0) chain_count = 0;
+    if (chain_count > MASTER_FX_CHAIN_MAX_UNITS) chain_count = MASTER_FX_CHAIN_MAX_UNITS;
     SDL_SetRenderDrawColor(app->renderer, 226, 232, 238, 235);
-    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, fx.y + 48.0f, "Empty");
+    SDL_RenderDebugTextFormat(app->renderer, fx.x + 18.0f, fx.y + 48.0f,
+                              "Built-in chain ready   units %d/%d",
+                              chain_count,
+                              MASTER_FX_CHAIN_MAX_UNITS);
     SDL_SetRenderDrawColor(app->renderer, 176, 184, 198, 225);
-    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, fx.y + 70.0f, "Stage 2 will add the no-op chain scaffold.");
-    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, fx.y + 90.0f, "No slots process audio in Stage 1.");
+    float slot_y = fx.y + 74.0f;
+    int visible_slots = chain_count > 0 ? chain_count : 1;
+    for (int i = 0; i < visible_slots && i < MASTER_FX_CHAIN_MAX_UNITS; ++i) {
+        const MasterFxUnit *unit = i < chain_count ? &chain.units[i] : NULL;
+        const char *label = unit ? audio_engine_master_fx_unit_label(unit->type) : "Empty";
+        const char *state = unit ? (unit->enabled && !unit->bypassed ? "active" : "bypassed") : "empty";
+        SDL_RenderDebugTextFormat(app->renderer, fx.x + 18.0f, slot_y, "Slot %d: %s  %s", i + 1, label, state);
+        slot_y += 18.0f;
+    }
+    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, slot_y + 4.0f, "No unit changes audio until a real processor is added.");
 
     render_master_mix_section(app, midi, MASTER_MIX_FOCUS_MIDI_CONTROL, midi_accent, "MIDI / CONTROL");
     SDL_SetRenderDrawColor(app->renderer, 226, 232, 238, 235);

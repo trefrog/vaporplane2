@@ -8,11 +8,31 @@
 
 #define LANE_ANALYZER_BUCKETS 64
 #define LANE_ANALYZER_WINDOW_SIZE 1024
+#define MASTER_FX_CHAIN_MAX_UNITS 4
 
 typedef enum {
     AUDIO_PLAYBACK_WAVEFORM,
     AUDIO_PLAYBACK_TIMELINE
 } AudioPlaybackMode;
+
+typedef enum {
+    MASTER_FX_UNIT_EMPTY,
+    MASTER_FX_UNIT_REVERB,
+    MASTER_FX_UNIT_LOW_HIGH_CUT,
+    MASTER_FX_UNIT_DELAY,
+    MASTER_FX_UNIT_SOFT_CLIP_LIMITER
+} MasterFxUnitType;
+
+typedef struct {
+    MasterFxUnitType type;
+    bool enabled;
+    bool bypassed;
+} MasterFxUnit;
+
+typedef struct {
+    MasterFxUnit units[MASTER_FX_CHAIN_MAX_UNITS];
+    int unit_count;
+} MasterFxChain;
 
 typedef struct {
     float peak_l;
@@ -61,6 +81,7 @@ typedef struct {
     int preview_roster_clip_index;
     double preview_frame;
     float master_gain;
+    MasterFxChain master_fx_chain;
     MasterMeterState meter;
     LaneMonitorState lane_meters[TIMELINE_MAX_LANES];
     float lane_analyzer_samples[LANE_ANALYZER_WINDOW_SIZE];
@@ -85,6 +106,8 @@ void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick);
 bool audio_engine_timeline_is_playing(const AudioEngine *a);
 int64_t audio_engine_get_timeline_playhead_tick(const AudioEngine *a);
 void audio_engine_get_master_meter(const AudioEngine *a, MasterMeterState *meter);
+void audio_engine_get_master_fx_chain(const AudioEngine *a, MasterFxChain *chain);
+const char *audio_engine_master_fx_unit_label(MasterFxUnitType type);
 void audio_engine_get_debug_stats(const AudioEngine *a, AudioDebugStats *stats);
 void audio_engine_set_active_lane_analyzer(AudioEngine *a, int lane_index);
 void audio_engine_get_lane_monitor(const AudioEngine *a, int lane_index, LaneMonitorState *meter);
