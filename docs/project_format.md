@@ -21,6 +21,16 @@ This document describes the intended format shape only. Vaporplane does not impl
 
 MIDI is not the whole project. JSON sidecars are authoritative for Vaporplane-specific data that MIDI cannot naturally represent.
 
+## Stable Identity Layers
+
+Vaporplane project identity has three stable layers:
+
+- `sample_id`: a bundled WAV/audio asset in `samples/`.
+- `roster_clip_id`: a blessed loop/cut derived from a sample.
+- `clip_instance_id`: a timeline placement of a roster clip.
+
+Gremlin rule: runtime array order, roster order, MIDI note pitch, and MIDI channel are not permanent identity. Stable IDs in `project.json` are identity.
+
 ## project.json
 
 `project.json` should stay compact. It identifies the project, names the bundle files, and maps stable Vaporplane IDs to bundled assets and MIDI events.
@@ -32,7 +42,8 @@ Expected responsibilities:
 - PPQN used by `timeline.mid`.
 - Relative references to `timeline.mid` and `surfaces.json`.
 - `sample_id -> samples/*.wav` mappings.
-- `clip_instance_id -> sample_id` mappings.
+- `roster_clip_id -> sample_id` mappings.
+- `clip_instance_id -> roster_clip_id` mappings.
 - MIDI event locator metadata for mapping note events back to `clip_instance_id`.
 
 MIDI event locator metadata may include:
@@ -47,7 +58,7 @@ MIDI event locator metadata may include:
 
 Duplicated timing fields in `project.json` are identity and validation aids only. They are not a second timeline. If timing conflicts with `timeline.mid`, the MIDI file remains the intended musical timing authority.
 
-MIDI note pitch may be arbitrary or sequential, and can be used as a clip/sample slot reference for MIDI compatibility. It is not the permanent identity of a sample or clip. Stable identity lives in `project.json` through `sample_id` and `clip_instance_id`.
+MIDI note pitch may be arbitrary or sequential, and can be used as a clip/sample slot reference for MIDI compatibility. It is not the permanent identity of a sample or clip. Stable identity lives in `project.json` through `sample_id`, `roster_clip_id`, and `clip_instance_id`.
 
 Example shape:
 
@@ -66,10 +77,19 @@ Example shape:
       "path": "samples/sample_001.wav"
     }
   ],
+  "roster_clips": [
+    {
+      "roster_clip_id": "roster_001",
+      "sample_id": "sample_001",
+      "name": "sample_001_cut_a",
+      "source_start_frame": 1024,
+      "source_end_frame": 193024
+    }
+  ],
   "clip_instances": [
     {
       "clip_instance_id": "clip_001",
-      "sample_id": "sample_001",
+      "roster_clip_id": "roster_001",
       "midi_locator": {
         "track": 1,
         "channel": 1,
@@ -110,7 +130,7 @@ Expected responsibilities:
 - Master page values such as master gain and future clip-protection values.
 - FX chain unit list.
 - FX unit stable parameter IDs.
-- FX unit current parameter values.
+- FX unit current parameter values in parameter-native units.
 - Future external MIDI CC bindings.
 - Timeline CC envelope mappings from MIDI CC lanes to stable Vaporplane parameter IDs.
 
@@ -159,7 +179,7 @@ Example shape:
       "channel": 1,
       "cc": 20,
       "parameter_id": "master.fx.reverb_1.send",
-      "value_range": "normalized_0_1"
+      "cc_value_range": "7bit_normalized_0_1"
     }
   ],
   "external_cc_bindings": [
@@ -168,7 +188,7 @@ Example shape:
       "channel": 1,
       "cc": 74,
       "parameter_id": "master.fx.reverb_1.high_cut_hz",
-      "value_range": "normalized_0_1"
+      "cc_value_range": "7bit_normalized_0_1"
     }
   ]
 }
@@ -193,11 +213,10 @@ External controller binding identity is scoped, where possible, by:
 device/profile + channel + CC
 ```
 
-Initial CC values are assumed to be `0..127`. They map to normalized `0.0..1.0` parameter targets before being converted to parameter-specific units. For example, the same normalized CC range can target a reverb send amount, decay time, or filter cutoff, with the final unit conversion defined by the destination parameter.
+Initial CC values are 7-bit inputs in the range `0..127`. They map to normalized `0.0..1.0` parameter targets before being converted to parameter-specific units. Stored parameter values in `surfaces.json` may use parameter-native units such as seconds, hertz, decibels, booleans, or normalized amounts.
 
 ## samples/
 
 The `samples/` directory contains bundled WAV files. `project.json` maps stable `sample_id` values to paths inside this directory.
 
 This stage does not define audio conversion rules. Future save/export code may copy existing WAVs directly, render captured in-memory clips to WAV, or add conversion policy, but that is outside this scaffold.
-
