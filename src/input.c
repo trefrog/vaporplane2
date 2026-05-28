@@ -485,7 +485,9 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
                 if(mod & SDL_KMOD_SHIFT) app_pan_timeline_view(app, -0.12);
                 else app_timeline_nudge_edit_ghost(app, -1);
             } else if(app->timeline_play_range_adjusting) app_timeline_nudge_play_range(app, -1, false);
-            else if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER || app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA) {
+            else if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER ||
+                    app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA ||
+                    app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) {
                 if(mod & SDL_KMOD_SHIFT) app_pan_timeline_view(app, -0.12);
                 else app_timeline_move_cursor(app, -1);
             }
@@ -495,7 +497,9 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
                 if(mod & SDL_KMOD_SHIFT) app_pan_timeline_view(app, 0.12);
                 else app_timeline_nudge_edit_ghost(app, 1);
             } else if(app->timeline_play_range_adjusting) app_timeline_nudge_play_range(app, 1, false);
-            else if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER || app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA) {
+            else if(app->timeline_focus_zone == TIMELINE_FOCUS_RULER ||
+                    app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA ||
+                    app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) {
                 if(mod & SDL_KMOD_SHIFT) app_pan_timeline_view(app, 0.12);
                 else app_timeline_move_cursor(app, 1);
             }
@@ -829,8 +833,14 @@ void input_update_gamepad(App *app, double dt){
         if(south_pressed) app_timeline_activate_focus(app);
         if(east_pressed) app_timeline_cancel_focus(app);
         if(app->timeline_edit_mode != TIMELINE_EDIT_NONE) {
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_timeline_nudge_edit_ghost(app, -1);
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_timeline_nudge_edit_ghost(app, 1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
+                if(r2_shift) app_timeline_nudge_edit_ghost_by_bar(app, -1);
+                else app_timeline_nudge_edit_ghost(app, -1);
+            }
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
+                if(r2_shift) app_timeline_nudge_edit_ghost_by_bar(app, 1);
+                else app_timeline_nudge_edit_ghost(app, 1);
+            }
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_nudge_edit_lane(app, -1);
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_nudge_edit_lane(app, 1);
             return;
@@ -884,6 +894,14 @@ void input_update_gamepad(App *app, double dt){
             }
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_select_roster_delta(app, -1);
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_select_roster_delta(app, 1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
+                if(r2_shift) app_timeline_move_cursor_by_bar(app, -1);
+                else app_timeline_move_cursor(app, -1);
+            }
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
+                if(r2_shift) app_timeline_move_cursor_by_bar(app, 1);
+                else app_timeline_move_cursor(app, 1);
+            }
             return;
         }
 

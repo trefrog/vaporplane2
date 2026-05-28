@@ -249,6 +249,7 @@ void app_timeline_select_roster_delta(App *app, int delta);
 void app_timeline_select_lane_delta(App *app, int delta);
 void app_timeline_move_cursor_by_bar(App *app, int direction);
 void app_timeline_nudge_edit_ghost(App *app, int direction);
+void app_timeline_nudge_edit_ghost_by_bar(App *app, int direction);
 void app_timeline_nudge_edit_lane(App *app, int direction);
 void app_timeline_adjust_selected_instance_velocity(App *app, int delta);
 void app_pan_timeline_view(App *app, double fraction);

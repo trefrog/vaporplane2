@@ -1930,6 +1930,23 @@ void app_timeline_nudge_edit_ghost(App *app, int direction) {
     else app_set_timeline_edit_status(app);
 }
 
+void app_timeline_nudge_edit_ghost_by_bar(App *app, int direction) {
+    if (direction == 0 || app->timeline_edit_mode == TIMELINE_EDIT_NONE) return;
+    int beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
+    int64_t bar_ticks = timeline_snap_ticks(&app->timeline) * (int64_t)beats_per_bar;
+    if (bar_ticks < 1) bar_ticks = 1;
+    timeline_nudge_tick_with_seams(&app->timeline,
+                                   &app->timeline_edit_ghost_start_tick,
+                                   &app->timeline_edit_ghost_seam_side,
+                                   direction,
+                                   bar_ticks,
+                                   false);
+    timeline_clamp_ghost_start(app);
+    timeline_update_ghost_valid(app);
+    if (!app->timeline_edit_ghost_valid) app_set_status(app, "overlap blocked");
+    else app_set_timeline_edit_status(app);
+}
+
 void app_timeline_nudge_edit_lane(App *app, int direction) {
     if (direction == 0 || app->timeline_edit_mode == TIMELINE_EDIT_NONE) return;
     app->timeline_edit_ghost_lane = clamp_int(app->timeline_edit_ghost_lane + direction, 0, TIMELINE_MAX_LANES - 1);

@@ -113,18 +113,18 @@ cmake --build build
 - `TRACK AREA` menus include instance actions when an instance is selected.
 - `ROSTER` menus include `Open waveform`, `Place free`, `Place pulse`, `Insert pulse`, `Export WAV`, and confirmed `Delete roster clip`.
 - In timeline view, left stick pans horizontally and zooms vertically across focus zones; hold L2 for 3x faster viewport movement.
-- In `RULER` or `TRACK AREA`: `Left/Right` move cursor by one beat; tempo seams take two presses to cross; `Shift+Left/Right` pans.
+- In `RULER`, `TRACK AREA`, or `ROSTER`: `Left/Right` move cursor by the current snap unit; tempo seams take two presses to cross; `Shift+Left/Right` pans.
 - In `RULER`, `[` / `]` adjusts the tempo event at the cursor by `0.5` BPM.
 - In `RULER`, gamepad `R2 + d-pad up/down` adjusts the tempo event at the cursor by `1.0` BPM, and `R2 + d-pad left/right` adjusts by `0.1` BPM.
 - In `LANE INDEX`: `Up/Down` chooses lane `1..8`, and `Enter`/South opens the Lane Inspector for that lane.
 - In `PLAY RANGE`: `Enter` enters adjustment, `1` selects start handle, `2` selects end handle, `Left/Right` nudges the selected handle, `R` resets to full timeline; armed handles render with a padded outline and the timeline view keeps both anchors visible while adjusting.
 - In `TRACK AREA`: `Up/Down` moves the lane cursor, and `Enter`/South selects the instance under the cursor in that lane; pressing it again enters `MOVE INSTANCE`.
 - In `TRACK AREA`, gamepad `L2 + left stick X` glides the cursor horizontally with hold acceleration.
-- In `RULER` or `TRACK AREA`, gamepad `L2 + d-pad left/right` or `R2 + d-pad left/right` moves the cursor by one bar and may skip tempo seam barriers.
+- In `RULER` or `TRACK AREA`, gamepad `L2 + d-pad left/right` or `R2 + d-pad left/right` moves the cursor by one bar and may skip tempo seam barriers. In `ROSTER`, d-pad left/right moves the cursor by snap units and `R2 + d-pad left/right` moves it by one bar.
 - In `TRACK AREA`, `[` / `]` decreases/increases selected instance velocity. Gamepad `L2 + d-pad up/down` also adjusts velocity.
-- In `MOVE INSTANCE`: d-pad or arrow left/right moves a lifted ghost by snap units, d-pad or arrow up/down moves it between lanes, South/Enter confirms, East/Escape cancels and keeps the original lane/start tick.
-- In `ROSTER`: `Up/Down` selects a roster row; South/Enter arms it, and pressing again enters `PLACE CLIP` at the snapped cursor.
-- In `PLACE CLIP`: d-pad or arrow left/right moves a lifted ghost by snap units and respects tempo seams, d-pad or arrow up/down chooses lane 1..8, South/Enter confirms, East/Escape cancels.
+- In `MOVE INSTANCE`: d-pad or arrow left/right moves a lifted ghost by snap units, gamepad `R2 + d-pad left/right` hops it by one bar, d-pad or arrow up/down moves it between lanes, South/Enter confirms, East/Escape cancels and keeps the original lane/start tick.
+- In `ROSTER`: `Up/Down` selects a roster row; `Left/Right` moves the timeline cursor without disarming it; South/Enter arms it, and pressing again enters `PLACE CLIP` at the snapped cursor on the selected timeline lane.
+- In `PLACE CLIP`: d-pad or arrow left/right moves a lifted ghost by snap units and respects tempo seams, gamepad `R2 + d-pad left/right` hops it by one bar, d-pad or arrow up/down chooses lane 1..8, South/Enter confirms, East/Escape cancels.
 - `Place free` does not alter ruler tempo. `Place pulse` writes/conforms a tempo event at the placement tick from the roster clip source BPM. `Insert pulse` shifts later timeline material and later tempo events before placing the source pulse.
 - Moving shows the original instance as a dim origin block until the ghost is dropped.
 - Armed roster rows, selected instances, valid ghosts, and invalid overlap ghosts use distinct depth-ready 2D cues.
@@ -202,9 +202,9 @@ cmake --build build
 - In timeline view: left stick pans/zooms, L2 accelerates viewport movement, bumpers cycle focus, South activates focus, East cancels, R2+face buttons control transport
 - In timeline lane-index focus: d-pad up/down chooses a lane, South opens Lane Inspector
 - In Lane Inspector: South toggles mute, East returns to timeline, R2+face buttons control timeline transport
-- In timeline move/place: d-pad left/right moves by snap units and d-pad up/down chooses lane
+- In timeline move/place: d-pad left/right moves by snap units, R2+d-pad left/right hops by one bar, and d-pad up/down chooses lane
 - In timeline track focus: L2 + left stick X glides the cursor, L2/R2 + d-pad left/right moves by bar, and L2 + d-pad up/down adjusts selected instance velocity
-- In timeline roster focus: right stick click previews the selected roster clip
+- In timeline roster focus: d-pad left/right moves the cursor, R2+d-pad left/right hops by bar, and right stick click previews the selected roster clip
 
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.
