@@ -219,4 +219,4 @@ Initial CC values are 7-bit inputs in the range `0..127`. They map to normalized
 
 The `samples/` directory contains bundled WAV files. `project.json` maps stable `sample_id` values to paths inside this directory.
 
-This stage does not define audio conversion rules. Future save/export code may copy existing WAVs directly, render captured in-memory clips to WAV, or add conversion policy, but that is outside this scaffold.
+Project bundle save V1 writes roster clips as canonical bundled WAV assets: 48 kHz, stereo, 32-bit float. These bundled WAVs are authoritative for future playback. Source lineage in `project.json` is provenance only and is not required to reconstruct playback.

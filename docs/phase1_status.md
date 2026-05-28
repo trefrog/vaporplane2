@@ -21,6 +21,7 @@
 - Timeline view has focus zones, a tick cursor, beat/bar grid, beat-snapped tempo markers, play range handles, and range playback.
 - Timeline sequencing uses 8 lanes with same-lane overlap blocking and cross-lane overlap allowed.
 - Timeline playback applies per-instance velocity and shows a compact master output meter/clipping indicator.
+- Timeline Project menu can save a self-contained `.vapor/` bundle under `exports/projects/`; project load is shown as a future placeholder.
 - Master Mix is a third main view for the master bus meter and future reverb, FX chain, and MIDI/control sections.
 - Master audio owns a fixed-size built-in FX chain with one real built-in unit, `Reverb 1`, disabled by default.
 - `Reverb 1` defaults to a more assertive long-room character when enabled, with depth/rate modulation available to soften metallic ringing; startup playback remains dry.
@@ -37,7 +38,7 @@ cmake --build build
 ```
 
 ## Controls
-- `Escape`: close active panel/mode, then press twice within 2s to quit
+- `Escape`: close active panel/mode; from Waveform or Master Mix return to Timeline; in Timeline idle state, open the Project menu
 - `F1`: show/hide controls legend
 - `F2`: cycle waveform/timeline/master mix view
 - `Space`: play/pause
@@ -105,8 +106,9 @@ cmake --build build
 - Keyboard `Tab` / `Shift+Tab`: cycle focus forward/back.
 - Keyboard `Space`: play/pause timeline transport.
 - Keyboard `Enter`: activate focused zone.
-- Keyboard `Escape`: exit play-range adjustment, otherwise guarded quit.
+- Keyboard `Escape`: exit play-range adjustment or lifted edits; otherwise opens the Timeline Project menu, including before any clips are captured.
 - Keyboard `C` or gamepad Start/Plus opens a focus-aware context menu.
+- Project menu includes `Save project...`, `Open project...` placeholder, and `Quit`.
 - Context menus are vertical overlay lists with a drop shadow: Up/Down changes the highlighted item, South/Enter applies it, and East/Escape backs out.
 - `RULER` menus include `Mark tempo` and, when the cursor is on a removable tempo event, `Remove tempo`.
 - `RULER` and `TRACK AREA` menus include `Insert bar`, which inserts one full bar before the cursor's containing bar.
@@ -146,7 +148,7 @@ cmake --build build
 - It shows the existing read-only master gain, peak meter, and clip state.
 - FX Chain reflects `Slot 1: Reverb 1`. Reverb controls are real, including modulation depth/rate; MIDI/Control remains an intentional placeholder.
 - Keyboard `Tab`/`Shift+Tab` and gamepad bumpers change focused section; outside `REVERB`, Up/Down also changes section focus.
-- Keyboard `Esc` is consumed and does not enter the quit flow while on Master Mix. Gamepad East returns to Timeline.
+- Keyboard `Esc` and gamepad East return from Master Mix to Timeline.
 - In `REVERB`, keyboard `Up`/`Down` or gamepad d-pad up/down selects a `Reverb 1` parameter; `Left`/`Right` or d-pad left/right adjusts it; `Shift`/L2 uses fine steps.
 - `Enter`/South toggles `Reverb 1` when `Enabled` is selected, and `R`/left-stick click clears the reverb tail.
 

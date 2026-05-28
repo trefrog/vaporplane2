@@ -90,6 +90,13 @@ typedef enum {
     TIMELINE_CONTEXT_ITEM_CANCEL
 } TimelineContextMenuItem;
 
+typedef enum {
+    PROJECT_MENU_ITEM_SAVE,
+    PROJECT_MENU_ITEM_OPEN,
+    PROJECT_MENU_ITEM_QUIT,
+    PROJECT_MENU_ITEM_COUNT
+} ProjectMenuItem;
+
 typedef struct App {
     SDL_Window *window;
     SDL_Renderer *renderer;
@@ -151,6 +158,8 @@ typedef struct App {
     TimelineRangeHandle timeline_play_range_handle;
     bool timeline_play_range_adjusting;
     bool timeline_context_menu_open;
+    bool project_menu_open;
+    int project_menu_selected;
     TimelineContextMenuScope timeline_context_menu_scope;
     int timeline_context_menu_selected;
     TimelineInstanceRef timeline_context_menu_instance;
@@ -227,6 +236,11 @@ void app_timeline_open_context_menu(App *app);
 void app_timeline_close_context_menu(App *app);
 void app_timeline_context_menu_move(App *app, int delta);
 void app_timeline_context_menu_apply(App *app);
+void app_project_menu_open(App *app);
+void app_project_menu_close(App *app);
+void app_project_menu_move(App *app, int delta);
+void app_project_menu_apply(App *app);
+bool app_save_project_bundle(App *app, const char *bundle_path);
 void app_timeline_insert_bar_at_cursor(App *app);
 void app_timeline_mark_tempo_at_cursor(App *app);
 void app_timeline_remove_tempo_at_cursor(App *app);

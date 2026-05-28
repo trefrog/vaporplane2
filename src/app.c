@@ -1,6 +1,9 @@
 #include "app.h"
 #include "input.h"
+#include "project_format.h"
+#include <limits.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -699,6 +702,18 @@ static const char *timeline_context_item_label(TimelineContextMenuItem item) {
         default: return "Cancel";
     }
 }
+
+static const char *project_menu_item_label(ProjectMenuItem item) {
+    switch (item) {
+        case PROJECT_MENU_ITEM_SAVE: return "Save project...";
+        case PROJECT_MENU_ITEM_OPEN: return "Open project...";
+        case PROJECT_MENU_ITEM_QUIT: return "Quit";
+        case PROJECT_MENU_ITEM_COUNT:
+        default: return "Project";
+    }
+}
+
+static bool app_save_project_bundle_default(App *app);
 
 static void timeline_effective_play_range(const MasterTimeline *timeline, int64_t *start, int64_t *end) {
     int64_t length = timeline->length_ticks > 0 ? timeline->length_ticks : 0;
@@ -2212,6 +2227,10 @@ void app_timeline_activate_focus(App *app) {
 }
 
 void app_timeline_cancel_focus(App *app) {
+    if (app->project_menu_open) {
+        app_project_menu_close(app);
+        return;
+    }
     if (app->timeline_context_menu_open) {
         app_timeline_close_context_menu(app);
         return;
@@ -2228,12 +2247,63 @@ void app_timeline_cancel_focus(App *app) {
     app_set_status(app, "Timeline focus idle");
 }
 
+void app_project_menu_open(App *app) {
+    if (!app || app->view_mode != APP_VIEW_TIMELINE) return;
+    if (app->timeline_edit_mode != TIMELINE_EDIT_NONE || app->timeline_play_range_adjusting) {
+        app_timeline_cancel_focus(app);
+        return;
+    }
+    app_timeline_clear_context_menu(app);
+    app->project_menu_open = true;
+    app->project_menu_selected = 0;
+    app_set_status(app, "Project menu");
+}
+
+void app_project_menu_close(App *app) {
+    if (!app) return;
+    app->project_menu_open = false;
+    app->project_menu_selected = 0;
+    app_set_status(app, "Project menu closed");
+}
+
+void app_project_menu_move(App *app, int delta) {
+    if (!app || !app->project_menu_open || delta == 0) return;
+    int selected = app->project_menu_selected + delta;
+    while (selected < 0) selected += (int)PROJECT_MENU_ITEM_COUNT;
+    selected %= (int)PROJECT_MENU_ITEM_COUNT;
+    app->project_menu_selected = selected;
+}
+
+void app_project_menu_apply(App *app) {
+    if (!app || !app->project_menu_open) return;
+    ProjectMenuItem item = (ProjectMenuItem)clamp_int(app->project_menu_selected, 0, PROJECT_MENU_ITEM_COUNT - 1);
+    switch (item) {
+        case PROJECT_MENU_ITEM_SAVE:
+            if (app_save_project_bundle_default(app)) {
+                app->project_menu_open = false;
+                app->project_menu_selected = 0;
+            }
+            break;
+        case PROJECT_MENU_ITEM_OPEN:
+            app_set_status(app, "Project load is not installed yet");
+            break;
+        case PROJECT_MENU_ITEM_QUIT:
+            app->running = false;
+            break;
+        case PROJECT_MENU_ITEM_COUNT:
+        default:
+            break;
+    }
+}
+
 void app_timeline_open_context_menu(App *app) {
     if (app->view_mode != APP_VIEW_TIMELINE) return;
     if (app->timeline_edit_mode != TIMELINE_EDIT_NONE || app->timeline_play_range_adjusting) {
         app_set_status(app, "Finish current edit first");
         return;
     }
+    app->project_menu_open = false;
+    app->project_menu_selected = 0;
     app_timeline_clear_context_menu(app);
     if (app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) {
         if (app->selected_roster_clip < 0 || app->selected_roster_clip >= app->roster_clip_count) {
@@ -2617,6 +2687,613 @@ void app_timeline_remove_selected_instance(App *app) {
 
 static bool write_fourcc(SDL_IOStream *io, const char text[4]) {
     return SDL_WriteIO(io, text, 4) == 4;
+}
+
+static bool io_write_text(SDL_IOStream *io, const char *text) {
+    if (!io || !text) return false;
+    size_t len = SDL_strlen(text);
+    return SDL_WriteIO(io, text, len) == len;
+}
+
+static bool io_printf(SDL_IOStream *io, const char *fmt, ...) {
+    if (!io || !fmt) return false;
+    char buffer[1024];
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    if (written < 0 || (size_t)written >= sizeof(buffer)) return false;
+    return SDL_WriteIO(io, buffer, (size_t)written) == (size_t)written;
+}
+
+static bool json_write_string(SDL_IOStream *io, const char *text) {
+    if (!io) return false;
+    if (!io_write_text(io, "\"")) return false;
+    const unsigned char *p = (const unsigned char *)(text ? text : "");
+    while (*p) {
+        unsigned char c = *p++;
+        switch (c) {
+            case '\"': if (!io_write_text(io, "\\\"")) return false; break;
+            case '\\': if (!io_write_text(io, "\\\\")) return false; break;
+            case '\b': if (!io_write_text(io, "\\b")) return false; break;
+            case '\f': if (!io_write_text(io, "\\f")) return false; break;
+            case '\n': if (!io_write_text(io, "\\n")) return false; break;
+            case '\r': if (!io_write_text(io, "\\r")) return false; break;
+            case '\t': if (!io_write_text(io, "\\t")) return false; break;
+            default:
+                if (c < 0x20) {
+                    if (!io_printf(io, "\\u%04x", (unsigned int)c)) return false;
+                } else {
+                    if (SDL_WriteIO(io, &c, 1) != 1) return false;
+                }
+                break;
+        }
+    }
+    return io_write_text(io, "\"");
+}
+
+static bool path_exists_any(const char *path) {
+    SDL_PathInfo info;
+    return path && path[0] && SDL_GetPathInfo(path, &info);
+}
+
+static bool ensure_directory(const char *path) {
+    if (path_is_directory(path)) return true;
+    return path && path[0] && SDL_CreateDirectory(path);
+}
+
+static void project_bundle_name_from_path(const char *path, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    const char *base = path_basename(path);
+    SDL_strlcpy(out, base, out_size);
+    size_t len = SDL_strlen(out);
+    size_t suffix_len = SDL_strlen(VAPORPLANE_PROJECT_BUNDLE_SUFFIX);
+    if (len > suffix_len && SDL_strcasecmp(out + len - suffix_len, VAPORPLANE_PROJECT_BUNDLE_SUFFIX) == 0) {
+        out[len - suffix_len] = '\0';
+    }
+    if (!out[0]) SDL_strlcpy(out, "vaporplane_project", out_size);
+}
+
+static bool project_sample_filename(int roster_index, char *out, size_t out_size) {
+    return out && out_size > 0 &&
+           SDL_snprintf(out, out_size, "sample_%03d.wav", roster_index + 1) > 0;
+}
+
+static bool project_sample_relative_path(int roster_index, char *out, size_t out_size) {
+    char filename[32];
+    if (!project_sample_filename(roster_index, filename, sizeof(filename))) return false;
+    path_join(out, out_size, VAPORPLANE_PROJECT_SAMPLES_DIRNAME, filename);
+    return out && out[0];
+}
+
+static bool write_project_float_wav(const RosterClip *clip, const char *path) {
+    if (!clip || !path || !clip->samples || clip->frame_count == 0 ||
+        clip->channels <= 0 || clip->sample_rate <= 0) {
+        return false;
+    }
+    Uint64 input_bytes64 = (Uint64)clip->frame_count * (Uint64)clip->channels * sizeof(float);
+    if (input_bytes64 > (Uint64)INT_MAX) return false;
+
+    SDL_AudioSpec src = {
+        .format = SDL_AUDIO_F32,
+        .channels = clip->channels,
+        .freq = clip->sample_rate
+    };
+    SDL_AudioSpec dst = {
+        .format = SDL_AUDIO_F32,
+        .channels = VAPORPLANE_PROJECT_CHANNELS,
+        .freq = VAPORPLANE_PROJECT_SAMPLE_RATE
+    };
+    Uint8 *converted = NULL;
+    int converted_len = 0;
+    if (!SDL_ConvertAudioSamples(&src,
+                                  (const Uint8 *)clip->samples,
+                                  (int)input_bytes64,
+                                  &dst,
+                                  &converted,
+                                  &converted_len)) {
+        return false;
+    }
+    if (converted_len <= 0 || (converted_len % (int)(sizeof(float) * VAPORPLANE_PROJECT_CHANNELS)) != 0) {
+        SDL_free(converted);
+        return false;
+    }
+
+    Uint64 data_size = (Uint64)converted_len;
+    if (data_size > 0xffffffffu) {
+        SDL_free(converted);
+        return false;
+    }
+
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io) {
+        SDL_free(converted);
+        return false;
+    }
+
+    Uint16 block_align = (Uint16)(VAPORPLANE_PROJECT_CHANNELS * (VAPORPLANE_PROJECT_WAV_BITS_PER_SAMPLE / 8));
+    Uint32 byte_rate = (Uint32)(VAPORPLANE_PROJECT_SAMPLE_RATE * block_align);
+    bool ok = true;
+    ok = ok && write_fourcc(io, "RIFF");
+    ok = ok && SDL_WriteU32LE(io, 36u + (Uint32)data_size);
+    ok = ok && write_fourcc(io, "WAVE");
+    ok = ok && write_fourcc(io, "fmt ");
+    ok = ok && SDL_WriteU32LE(io, 16);
+    ok = ok && SDL_WriteU16LE(io, 3);
+    ok = ok && SDL_WriteU16LE(io, (Uint16)VAPORPLANE_PROJECT_CHANNELS);
+    ok = ok && SDL_WriteU32LE(io, (Uint32)VAPORPLANE_PROJECT_SAMPLE_RATE);
+    ok = ok && SDL_WriteU32LE(io, byte_rate);
+    ok = ok && SDL_WriteU16LE(io, block_align);
+    ok = ok && SDL_WriteU16LE(io, (Uint16)VAPORPLANE_PROJECT_WAV_BITS_PER_SAMPLE);
+    ok = ok && write_fourcc(io, "data");
+    ok = ok && SDL_WriteU32LE(io, (Uint32)data_size);
+    ok = ok && SDL_WriteIO(io, converted, (size_t)converted_len) == (size_t)converted_len;
+
+    ok = SDL_CloseIO(io) && ok;
+    SDL_free(converted);
+    return ok;
+}
+
+typedef struct {
+    Uint8 *data;
+    size_t size;
+    size_t capacity;
+    bool ok;
+} MidiBuffer;
+
+static bool midi_buffer_reserve(MidiBuffer *buffer, size_t extra) {
+    if (!buffer || !buffer->ok) return false;
+    if (extra > SIZE_MAX - buffer->size) {
+        buffer->ok = false;
+        return false;
+    }
+    size_t needed = buffer->size + extra;
+    if (needed <= buffer->capacity) return true;
+    size_t next_capacity = buffer->capacity ? buffer->capacity * 2 : 256;
+    while (next_capacity < needed) {
+        if (next_capacity > SIZE_MAX / 2) {
+            next_capacity = needed;
+            break;
+        }
+        next_capacity *= 2;
+    }
+    Uint8 *next = (Uint8 *)SDL_realloc(buffer->data, next_capacity);
+    if (!next) {
+        buffer->ok = false;
+        return false;
+    }
+    buffer->data = next;
+    buffer->capacity = next_capacity;
+    return true;
+}
+
+static bool midi_buffer_u8(MidiBuffer *buffer, Uint8 value) {
+    if (!midi_buffer_reserve(buffer, 1)) return false;
+    buffer->data[buffer->size++] = value;
+    return true;
+}
+
+static bool midi_buffer_varlen(MidiBuffer *buffer, Uint32 value) {
+    Uint8 bytes[5];
+    int count = 0;
+    bytes[count++] = (Uint8)(value & 0x7f);
+    while ((value >>= 7) != 0 && count < 5) {
+        bytes[count++] = (Uint8)((value & 0x7f) | 0x80);
+    }
+    for (int i = count - 1; i >= 0; --i) {
+        if (!midi_buffer_u8(buffer, bytes[i])) return false;
+    }
+    return true;
+}
+
+static bool midi_buffer_meta_end(MidiBuffer *buffer) {
+    return midi_buffer_varlen(buffer, 0) &&
+           midi_buffer_u8(buffer, 0xff) &&
+           midi_buffer_u8(buffer, 0x2f) &&
+           midi_buffer_u8(buffer, 0x00);
+}
+
+static bool midi_write_be16(SDL_IOStream *io, Uint16 value) {
+    return SDL_WriteU8(io, (Uint8)((value >> 8) & 0xff)) &&
+           SDL_WriteU8(io, (Uint8)(value & 0xff));
+}
+
+static bool midi_write_be32(SDL_IOStream *io, Uint32 value) {
+    return SDL_WriteU8(io, (Uint8)((value >> 24) & 0xff)) &&
+           SDL_WriteU8(io, (Uint8)((value >> 16) & 0xff)) &&
+           SDL_WriteU8(io, (Uint8)((value >> 8) & 0xff)) &&
+           SDL_WriteU8(io, (Uint8)(value & 0xff));
+}
+
+static bool midi_write_track(SDL_IOStream *io, const MidiBuffer *track) {
+    if (!io || !track || !track->ok || track->size > 0xffffffffu) return false;
+    return write_fourcc(io, "MTrk") &&
+           midi_write_be32(io, (Uint32)track->size) &&
+           SDL_WriteIO(io, track->data, track->size) == track->size;
+}
+
+static Uint32 midi_delta_from_ticks(int64_t from_tick, int64_t to_tick) {
+    if (to_tick <= from_tick) return 0;
+    int64_t delta = to_tick - from_tick;
+    if (delta > 0x0fffffff) return 0x0fffffff;
+    return (Uint32)delta;
+}
+
+static bool midi_build_tempo_track(const MasterTimeline *timeline, MidiBuffer *track) {
+    if (!timeline || !track) return false;
+    track->ok = true;
+    int count = timeline_valid_tempo_event_count(timeline);
+    if (count <= 0) count = 1;
+    int64_t last_tick = 0;
+    for (int i = 0; i < count; ++i) {
+        int64_t tick = i < timeline->tempo_event_count ? timeline->tempo_events[i].tick : 0;
+        double bpm = i < timeline->tempo_event_count ? timeline->tempo_events[i].bpm : timeline_base_bpm(timeline);
+        if (tick < 0) tick = 0;
+        if (bpm <= 0.0) bpm = TIMELINE_DEFAULT_BPM;
+        Uint32 mpqn = (Uint32)llround(60000000.0 / bpm);
+        if (mpqn < 1) mpqn = 1;
+        if (!midi_buffer_varlen(track, midi_delta_from_ticks(last_tick, tick)) ||
+            !midi_buffer_u8(track, 0xff) ||
+            !midi_buffer_u8(track, 0x51) ||
+            !midi_buffer_u8(track, 0x03) ||
+            !midi_buffer_u8(track, (Uint8)((mpqn >> 16) & 0xff)) ||
+            !midi_buffer_u8(track, (Uint8)((mpqn >> 8) & 0xff)) ||
+            !midi_buffer_u8(track, (Uint8)(mpqn & 0xff))) {
+            return false;
+        }
+        last_tick = tick;
+    }
+    return midi_buffer_meta_end(track);
+}
+
+typedef struct {
+    int64_t tick;
+    bool note_on;
+    Uint8 channel;
+    Uint8 note;
+    Uint8 velocity;
+} ProjectMidiNoteEvent;
+
+static int compare_midi_note_events(const void *a, const void *b) {
+    const ProjectMidiNoteEvent *ea = (const ProjectMidiNoteEvent *)a;
+    const ProjectMidiNoteEvent *eb = (const ProjectMidiNoteEvent *)b;
+    if (ea->tick < eb->tick) return -1;
+    if (ea->tick > eb->tick) return 1;
+    if (ea->note_on != eb->note_on) return ea->note_on ? 1 : -1;
+    if (ea->note < eb->note) return -1;
+    if (ea->note > eb->note) return 1;
+    return 0;
+}
+
+static bool midi_build_lane_track(const TimelineLane *lane, MidiBuffer *track) {
+    if (!lane || !track) return false;
+    track->ok = true;
+    ProjectMidiNoteEvent events[APP_MAX_TIMELINE_INSTANCES_PER_LANE * 2];
+    int event_count = 0;
+    for (int i = 0; i < lane->instance_count && event_count + 1 < (int)(sizeof(events) / sizeof(events[0])); ++i) {
+        const TimelineInstance *instance = &lane->instances[i];
+        if (instance->duration_ticks <= 0) continue;
+        int64_t start = instance->start_tick >= 0 ? instance->start_tick : 0;
+        int64_t end = start + instance->duration_ticks;
+        Uint8 channel = (Uint8)clamp_int(instance->midi_channel, 0, 15);
+        Uint8 note = (Uint8)clamp_int(instance->midi_note, 0, 127);
+        Uint8 velocity = (Uint8)clamp_int(instance->midi_velocity, 1, 127);
+        events[event_count++] = (ProjectMidiNoteEvent){ start, true, channel, note, velocity };
+        events[event_count++] = (ProjectMidiNoteEvent){ end, false, channel, note, 0 };
+    }
+    qsort(events, (size_t)event_count, sizeof(events[0]), compare_midi_note_events);
+    int64_t last_tick = 0;
+    for (int i = 0; i < event_count; ++i) {
+        ProjectMidiNoteEvent *event = &events[i];
+        Uint8 status = (Uint8)((event->note_on ? 0x90 : 0x80) | (event->channel & 0x0f));
+        if (!midi_buffer_varlen(track, midi_delta_from_ticks(last_tick, event->tick)) ||
+            !midi_buffer_u8(track, status) ||
+            !midi_buffer_u8(track, event->note) ||
+            !midi_buffer_u8(track, event->velocity)) {
+            return false;
+        }
+        last_tick = event->tick;
+    }
+    return midi_buffer_meta_end(track);
+}
+
+static void midi_buffer_destroy(MidiBuffer *buffer) {
+    if (!buffer) return;
+    SDL_free(buffer->data);
+    SDL_memset(buffer, 0, sizeof(*buffer));
+}
+
+static bool write_project_timeline_mid(const App *app, const char *path) {
+    if (!app || !path) return false;
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io) return false;
+
+    bool ok = true;
+    const int track_count = 1 + TIMELINE_MAX_LANES;
+    Uint16 ppqn = (Uint16)clamp_int(app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat : app->transport.ppqn,
+                                    1,
+                                    32767);
+    ok = ok && write_fourcc(io, "MThd");
+    ok = ok && midi_write_be32(io, 6);
+    ok = ok && midi_write_be16(io, 1);
+    ok = ok && midi_write_be16(io, (Uint16)track_count);
+    ok = ok && midi_write_be16(io, ppqn);
+
+    MidiBuffer track = {0};
+    if (ok) {
+        ok = midi_build_tempo_track(&app->timeline, &track) && midi_write_track(io, &track);
+        midi_buffer_destroy(&track);
+    }
+    for (int lane_index = 0; ok && lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        SDL_memset(&track, 0, sizeof(track));
+        ok = midi_build_lane_track(&app->timeline.lanes[lane_index], &track) && midi_write_track(io, &track);
+        midi_buffer_destroy(&track);
+    }
+
+    ok = SDL_CloseIO(io) && ok;
+    return ok;
+}
+
+static bool write_project_surfaces_json(const App *app, const char *path) {
+    if (!app || !path) return false;
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io) return false;
+    MasterFxChain chain;
+    MasterReverbParams reverb;
+    audio_engine_get_master_fx_chain(&app->audio, &chain);
+    audio_engine_get_master_reverb_params(&app->audio, NULL, &reverb);
+
+    bool ok = true;
+    ok = ok && io_printf(io, "{\n");
+    ok = ok && io_printf(io, "  \"format\": \"%s\",\n", VAPORPLANE_SURFACES_FORMAT_NAME);
+    ok = ok && io_printf(io, "  \"version\": %d,\n", VAPORPLANE_SURFACES_FORMAT_VERSION);
+    ok = ok && io_printf(io, "  \"master\": {\n");
+    ok = ok && io_printf(io, "    \"gain\": %.6f,\n", app->audio.master_gain);
+    ok = ok && io_printf(io, "    \"clip_protection\": { \"enabled\": false }\n");
+    ok = ok && io_printf(io, "  },\n");
+    ok = ok && io_printf(io, "  \"fx_chain\": [\n");
+    for (int i = 0; ok && i < chain.unit_count && i < MASTER_FX_CHAIN_MAX_UNITS; ++i) {
+        const MasterFxUnit *unit = &chain.units[i];
+        if (i > 0) ok = ok && io_printf(io, ",\n");
+        ok = ok && io_printf(io, "    {\n");
+        ok = ok && io_printf(io, "      \"unit_id\": ");
+        ok = ok && json_write_string(io, unit->type == MASTER_FX_UNIT_REVERB ? "reverb_1" : audio_engine_master_fx_unit_label(unit->type));
+        ok = ok && io_printf(io, ",\n");
+        ok = ok && io_printf(io, "      \"type\": ");
+        ok = ok && json_write_string(io, unit->type == MASTER_FX_UNIT_REVERB ? "reverb" : audio_engine_master_fx_unit_label(unit->type));
+        ok = ok && io_printf(io, ",\n");
+        ok = ok && io_printf(io, "      \"enabled\": %s,\n", unit->enabled ? "true" : "false");
+        ok = ok && io_printf(io, "      \"bypassed\": %s,\n", unit->bypassed ? "true" : "false");
+        ok = ok && io_printf(io, "      \"parameters\": {");
+        if (unit->type == MASTER_FX_UNIT_REVERB) {
+            ok = ok && io_printf(io, "\n");
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.enabled\": %s,\n", reverb.enabled ? "true" : "false");
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.send\": %.6f,\n", reverb.send);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.return\": %.6f,\n", reverb.return_gain);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.predelay_ms\": %.6f,\n", reverb.predelay_ms);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.decay\": %.6f,\n", reverb.decay_seconds);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.size\": %.6f,\n", reverb.size);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.diffusion\": %.6f,\n", reverb.diffusion);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.damping\": %.6f,\n", reverb.damping);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.low_cut_hz\": %.6f,\n", reverb.low_cut_hz);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.high_cut_hz\": %.6f,\n", reverb.high_cut_hz);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.width\": %.6f,\n", reverb.width);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.mod_depth_ms\": %.6f,\n", reverb.mod_depth_ms);
+            ok = ok && io_printf(io, "        \"master.fx.reverb_1.mod_rate_hz\": %.6f\n", reverb.mod_rate_hz);
+            ok = ok && io_printf(io, "      }\n");
+        } else {
+            ok = ok && io_printf(io, " }\n");
+        }
+        ok = ok && io_printf(io, "    }");
+    }
+    ok = ok && io_printf(io, "\n  ],\n");
+    ok = ok && io_printf(io, "  \"timeline_cc_envelopes\": [],\n");
+    ok = ok && io_printf(io, "  \"external_cc_bindings\": []\n");
+    ok = ok && io_printf(io, "}\n");
+
+    ok = SDL_CloseIO(io) && ok;
+    return ok;
+}
+
+static bool write_project_manifest_json(const App *app, const char *bundle_path, const char *path) {
+    if (!app || !path) return false;
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io) return false;
+    char project_name[APP_SAMPLE_NAME_MAX];
+    project_bundle_name_from_path(bundle_path, project_name, sizeof(project_name));
+    int ppqn = app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat : app->transport.ppqn;
+    if (ppqn <= 0) ppqn = 960;
+
+    bool ok = true;
+    ok = ok && io_printf(io, "{\n");
+    ok = ok && io_printf(io, "  \"format\": \"%s\",\n", VAPORPLANE_PROJECT_FORMAT_NAME);
+    ok = ok && io_printf(io, "  \"version\": %d,\n", VAPORPLANE_PROJECT_FORMAT_VERSION);
+    ok = ok && io_printf(io, "  \"project_id\": ");
+    ok = ok && json_write_string(io, project_name);
+    ok = ok && io_printf(io, ",\n  \"name\": ");
+    ok = ok && json_write_string(io, project_name);
+    ok = ok && io_printf(io, ",\n  \"ppqn\": %d,\n", ppqn);
+    ok = ok && io_printf(io, "  \"timeline\": \"%s\",\n", VAPORPLANE_PROJECT_TIMELINE_FILENAME);
+    ok = ok && io_printf(io, "  \"surfaces\": \"%s\",\n", VAPORPLANE_PROJECT_SURFACES_FILENAME);
+
+    ok = ok && io_printf(io, "  \"samples\": [\n");
+    for (int i = 0; ok && i < app->roster_clip_count; ++i) {
+        char rel_path[CLIP_MAX_PATH];
+        project_sample_relative_path(i, rel_path, sizeof(rel_path));
+        ok = ok && io_printf(io, "    { \"sample_id\": \"sample_%03d\", \"path\": ", i + 1);
+        ok = ok && json_write_string(io, rel_path);
+        ok = ok && io_printf(io, " }%s\n", i + 1 < app->roster_clip_count ? "," : "");
+    }
+    ok = ok && io_printf(io, "  ],\n");
+
+    ok = ok && io_printf(io, "  \"roster_clips\": [\n");
+    for (int i = 0; ok && i < app->roster_clip_count; ++i) {
+        const RosterClip *clip = &app->roster[i];
+        ok = ok && io_printf(io, "    {\n");
+        ok = ok && io_printf(io, "      \"roster_clip_id\": \"roster_%03d\",\n", i + 1);
+        ok = ok && io_printf(io, "      \"sample_id\": \"sample_%03d\",\n", i + 1);
+        ok = ok && io_printf(io, "      \"name\": ");
+        ok = ok && json_write_string(io, clip->name);
+        ok = ok && io_printf(io, ",\n");
+        ok = ok && io_printf(io, "      \"source_bpm\": %.6f,\n", clip->source_bpm);
+        ok = ok && io_printf(io, "      \"beats_per_bar\": %d,\n", clip->beats_per_bar);
+        ok = ok && io_printf(io, "      \"beat_unit\": %d,\n", clip->beat_unit);
+        ok = ok && io_printf(io, "      \"target_bars\": %.6f,\n", clip->target_bars);
+        ok = ok && io_printf(io, "      \"target_beats\": %.6f,\n", clip->target_beats);
+        ok = ok && io_printf(io, "      \"downbeat_offset_frames\": %llu,\n", (unsigned long long)clip->downbeat_offset_frames);
+        ok = ok && io_printf(io, "      \"source_lineage\": {\n");
+        ok = ok && io_printf(io, "        \"path\": ");
+        ok = ok && json_write_string(io, clip->source_path);
+        ok = ok && io_printf(io, ",\n");
+        ok = ok && io_printf(io, "        \"start_frame\": %llu,\n", (unsigned long long)clip->source_loop_start_frame);
+        ok = ok && io_printf(io, "        \"end_frame\": %llu,\n", (unsigned long long)clip->source_loop_end_frame);
+        ok = ok && io_printf(io, "        \"sample_rate\": %d\n", clip->sample_rate);
+        ok = ok && io_printf(io, "      }\n");
+        ok = ok && io_printf(io, "    }%s\n", i + 1 < app->roster_clip_count ? "," : "");
+    }
+    ok = ok && io_printf(io, "  ],\n");
+
+    ok = ok && io_printf(io, "  \"clip_instances\": [\n");
+    int total_instances = 0;
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        const TimelineLane *lane = &app->timeline.lanes[lane_index];
+        for (int instance_index = 0; instance_index < lane->instance_count; ++instance_index) {
+            int roster_index = lane->instances[instance_index].roster_clip_index;
+            if (roster_index >= 0 && roster_index < app->roster_clip_count) total_instances++;
+        }
+    }
+    int written_instances = 0;
+    int occurrence = 0;
+    for (int lane_index = 0; ok && lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        const TimelineLane *lane = &app->timeline.lanes[lane_index];
+        for (int instance_index = 0; ok && instance_index < lane->instance_count; ++instance_index) {
+            const TimelineInstance *instance = &lane->instances[instance_index];
+            if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
+            ++written_instances;
+            ok = ok && io_printf(io, "    {\n");
+            ok = ok && io_printf(io, "      \"clip_instance_id\": \"clip_%03d\",\n", written_instances);
+            ok = ok && io_printf(io, "      \"roster_clip_id\": \"roster_%03d\",\n", instance->roster_clip_index + 1);
+            ok = ok && io_printf(io, "      \"midi_locator\": {\n");
+            ok = ok && io_printf(io, "        \"track\": %d,\n", lane_index + 1);
+            ok = ok && io_printf(io, "        \"channel\": %d,\n", clamp_int(instance->midi_channel, 0, 15) + 1);
+            ok = ok && io_printf(io, "        \"note\": %d,\n", clamp_int(instance->midi_note, 0, 127));
+            ok = ok && io_printf(io, "        \"start_tick\": %lld,\n", (long long)instance->start_tick);
+            ok = ok && io_printf(io, "        \"duration_ticks\": %lld,\n", (long long)instance->duration_ticks);
+            ok = ok && io_printf(io, "        \"velocity\": %d,\n", clamp_int(instance->midi_velocity, 1, 127));
+            ok = ok && io_printf(io, "        \"occurrence\": %d\n", occurrence++);
+            ok = ok && io_printf(io, "      }\n");
+            ok = ok && io_printf(io, "    }%s\n", written_instances < total_instances ? "," : "");
+        }
+    }
+    ok = ok && io_printf(io, "  ]\n");
+    ok = ok && io_printf(io, "}\n");
+
+    ok = SDL_CloseIO(io) && ok;
+    return ok;
+}
+
+bool app_save_project_bundle(App *app, const char *bundle_path) {
+    if (!app || !bundle_path || !bundle_path[0]) {
+        if (app) app_set_status(app, "No project path");
+        return false;
+    }
+    if (path_exists_any(bundle_path)) {
+        app_set_status(app, "Project bundle already exists");
+        return false;
+    }
+    if (!ensure_directory(bundle_path)) {
+        app_set_status(app, "Could not create project bundle");
+        return false;
+    }
+
+    char samples_dir[CLIP_MAX_PATH];
+    path_join(samples_dir, sizeof(samples_dir), bundle_path, VAPORPLANE_PROJECT_SAMPLES_DIRNAME);
+    if (!ensure_directory(samples_dir)) {
+        app_set_status(app, "Could not create project samples folder");
+        return false;
+    }
+
+    for (int i = 0; i < app->roster_clip_count; ++i) {
+        char filename[32];
+        char sample_path[CLIP_MAX_PATH];
+        project_sample_filename(i, filename, sizeof(filename));
+        path_join(sample_path, sizeof(sample_path), samples_dir, filename);
+        if (!write_project_float_wav(&app->roster[i], sample_path)) {
+            app_set_status(app, "Could not write project sample WAV");
+            return false;
+        }
+    }
+
+    char timeline_path[CLIP_MAX_PATH];
+    char surfaces_path[CLIP_MAX_PATH];
+    char project_path[CLIP_MAX_PATH];
+    char project_tmp_path[CLIP_MAX_PATH];
+    path_join(timeline_path, sizeof(timeline_path), bundle_path, VAPORPLANE_PROJECT_TIMELINE_FILENAME);
+    path_join(surfaces_path, sizeof(surfaces_path), bundle_path, VAPORPLANE_PROJECT_SURFACES_FILENAME);
+    path_join(project_path, sizeof(project_path), bundle_path, VAPORPLANE_PROJECT_MANIFEST_FILENAME);
+    SDL_snprintf(project_tmp_path, sizeof(project_tmp_path), "%s.tmp", project_path);
+
+    if (!write_project_timeline_mid(app, timeline_path)) {
+        app_set_status(app, "Could not write project timeline MIDI");
+        return false;
+    }
+    if (!write_project_surfaces_json(app, surfaces_path)) {
+        app_set_status(app, "Could not write project surfaces");
+        return false;
+    }
+    if (!write_project_manifest_json(app, bundle_path, project_tmp_path)) {
+        app_set_status(app, "Could not write project manifest");
+        SDL_RemovePath(project_tmp_path);
+        return false;
+    }
+    if (!SDL_RenamePath(project_tmp_path, project_path)) {
+        app_set_status(app, "Could not finalize project manifest");
+        SDL_RemovePath(project_tmp_path);
+        return false;
+    }
+
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Saved %s", bundle_path);
+    return true;
+}
+
+static bool resolve_project_export_dir(char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    char exports_dir[CLIP_MAX_PATH];
+    const char *base = SDL_GetBasePath();
+    if (base && base[0]) {
+        path_join(exports_dir, sizeof(exports_dir), base, "exports");
+        if (ensure_directory(exports_dir)) {
+            path_join(out, out_size, exports_dir, "projects");
+            if (ensure_directory(out)) return true;
+        }
+    }
+    SDL_strlcpy(exports_dir, "exports", sizeof(exports_dir));
+    if (!ensure_directory(exports_dir)) return false;
+    path_join(out, out_size, exports_dir, "projects");
+    return ensure_directory(out);
+}
+
+static bool unique_project_bundle_path(char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    char dir[CLIP_MAX_PATH];
+    if (!resolve_project_export_dir(dir, sizeof(dir))) return false;
+    char leaf[64];
+    for (int i = 1; i <= 999; ++i) {
+        SDL_snprintf(leaf, sizeof(leaf), "vaporplane_project_%03d%s", i, VAPORPLANE_PROJECT_BUNDLE_SUFFIX);
+        path_join(out, out_size, dir, leaf);
+        if (!path_exists_any(out)) return true;
+    }
+    out[0] = '\0';
+    return false;
+}
+
+static bool app_save_project_bundle_default(App *app) {
+    char path[CLIP_MAX_PATH];
+    if (!unique_project_bundle_path(path, sizeof(path))) {
+        app_set_status(app, "Could not create project save path");
+        return false;
+    }
+    return app_save_project_bundle(app, path);
 }
 
 static bool write_roster_clip_wav(const RosterClip *clip, const char *path) {
@@ -3152,7 +3829,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "A/D loop start   J/L loop end   Shift = larger step"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Tab/Shift+Tab or bumpers cycle focus zones"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space play/pause   Enter/South activate focus   East cancel"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline: C/Start menu   Up/Down choose   South apply   East backs out"); y += 16.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Esc: Timeline / Project menu   C/Start context menu   Up/Down choose   South apply"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Timeline stick: Left/Right pan   Up/Down zoom   L2 turbo"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Transport focus: [/] or D-pad L/R tape   R2 fine BPM   T or D-pad U/D mode"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Transport focus: 0 or left stick resets tape speed"); y += 16.0f;
@@ -3304,6 +3981,58 @@ static void render_master_meter(App *app, SDL_FRect rect) {
     }
 }
 
+static void render_project_menu(App *app, float anchor_x, float anchor_y, int w, int h) {
+    if (!app || !app->project_menu_open) return;
+    const int item_count = (int)PROJECT_MENU_ITEM_COUNT;
+    SDL_FRect menu = {
+        anchor_x + 18.0f,
+        anchor_y + 34.0f,
+        300.0f,
+        58.0f + (float)item_count * 22.0f
+    };
+    float menu_pad = 18.0f;
+    if (menu.x + menu.w > (float)w - menu_pad) menu.x = (float)w - menu_pad - menu.w;
+    if (menu.y + menu.h > (float)h - menu_pad) menu.y = (float)h - menu_pad - menu.h;
+    if (menu.x < menu_pad) menu.x = menu_pad;
+    if (menu.y < menu_pad) menu.y = menu_pad;
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_FRect shadow = { menu.x + 12.0f, menu.y + 14.0f, menu.w + 20.0f, menu.h + 20.0f };
+    SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 146);
+    SDL_RenderFillRect(app->renderer, &shadow);
+    SDL_FRect soft_shadow = { menu.x + 4.0f, menu.y + 6.0f, menu.w + 12.0f, menu.h + 12.0f };
+    SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 96);
+    SDL_RenderFillRect(app->renderer, &soft_shadow);
+    SDL_SetRenderDrawColor(app->renderer, 12, 13, 20, 238);
+    SDL_RenderFillRect(app->renderer, &menu);
+    SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 255);
+    SDL_RenderRect(app->renderer, &menu);
+    SDL_SetRenderDrawColor(app->renderer, 230, 238, 242, 255);
+    SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 10.0f, "PROJECT");
+    SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 28.0f, "bundle");
+
+    float item_y = menu.y + 50.0f;
+    for (int i = 0; i < item_count; ++i) {
+        ProjectMenuItem item = (ProjectMenuItem)i;
+        SDL_FRect row = { menu.x + 8.0f, item_y - 4.0f, menu.w - 16.0f, 20.0f };
+        bool selected = i == app->project_menu_selected;
+        bool disabled = item == PROJECT_MENU_ITEM_OPEN;
+        if (selected) {
+            SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 52);
+            SDL_RenderFillRect(app->renderer, &row);
+            SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 255);
+            SDL_RenderRect(app->renderer, &row);
+        }
+        if (disabled) {
+            SDL_SetRenderDrawColor(app->renderer, selected ? 176 : 124, selected ? 192 : 136, selected ? 204 : 150, 255);
+        } else {
+            SDL_SetRenderDrawColor(app->renderer, selected ? 226 : 210, selected ? 252 : 218, selected ? 246 : 226, 255);
+        }
+        SDL_RenderDebugText(app->renderer, menu.x + 18.0f, item_y, project_menu_item_label(item));
+        item_y += 22.0f;
+    }
+}
+
 static void app_render_timeline(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
@@ -3349,6 +4078,7 @@ static void app_render_timeline(App *app) {
         SDL_RenderDebugText(app->renderer, 24, 158, "No captured loops yet.");
         SDL_RenderDebugText(app->renderer, 24, 176, "Use L2+R2+South to capture the selected loop into the roster.");
         render_focus_outline(app, transport_rect, TIMELINE_FOCUS_TRANSPORT);
+        render_project_menu(app, timeline_x, timeline_y, w, h);
         return;
     }
 
@@ -3812,6 +4542,8 @@ static void app_render_timeline(App *app) {
             item_y += 22.0f;
         }
     }
+
+    render_project_menu(app, timeline_x, timeline_y, w, h);
 }
 
 static void render_debug_text_scaled(SDL_Renderer *renderer, float x, float y, float scale, const char *text) {

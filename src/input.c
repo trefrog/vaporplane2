@@ -5,7 +5,6 @@
 static void nudge(size_t *v, long d, size_t minv, size_t maxv){ long nv=(long)(*v)+d; if(nv<(long)minv)nv=(long)minv; if(nv>(long)maxv)nv=(long)maxv; *v=(size_t)nv; }
 static int gamepad_edit_target = 0;
 static bool previous_buttons[SDL_GAMEPAD_BUTTON_COUNT];
-static Uint64 quit_confirm_until_ns = 0;
 static int tempo_bpm_dpad_direction = 0;
 static bool tempo_bpm_dpad_coarse = false;
 static double tempo_bpm_dpad_repeat_timer = 0.0;
@@ -51,17 +50,6 @@ static void toggle_metronome(App *app) {
         return;
     }
     app->transport.metronome_enabled = !app->transport.metronome_enabled;
-}
-
-static bool confirm_quit(App *app) {
-    Uint64 now = SDL_GetTicksNS();
-    if (quit_confirm_until_ns && now <= quit_confirm_until_ns) {
-        quit_confirm_until_ns = 0;
-        return true;
-    }
-    quit_confirm_until_ns = now + SDL_NS_PER_SECOND * 2;
-    SDL_strlcpy(app->status_text, "Press Escape again to quit", sizeof(app->status_text));
-    return false;
 }
 
 static void jump_to_loop_start(App *app) {
@@ -426,6 +414,24 @@ static bool handle_tempo_lock_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
 }
 
 static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
+    if(app->project_menu_open) {
+        switch(key) {
+            case SDLK_ESCAPE:
+                app_project_menu_close(app);
+                return true;
+            case SDLK_RETURN:
+                app_project_menu_apply(app);
+                return true;
+            case SDLK_UP:
+                app_project_menu_move(app, -1);
+                return true;
+            case SDLK_DOWN:
+                app_project_menu_move(app, 1);
+                return true;
+            default:
+                return true;
+        }
+    }
     if(app->timeline_context_menu_open) {
         switch(key) {
             case SDLK_ESCAPE:
@@ -447,7 +453,8 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
     switch(key) {
         case SDLK_ESCAPE:
             if(app->timeline_play_range_adjusting) app_timeline_cancel_focus(app);
-            else if(confirm_quit(app)) return false;
+            else if(app->timeline_edit_mode != TIMELINE_EDIT_NONE) app_timeline_cancel_focus(app);
+            else app_project_menu_open(app);
             return true;
         case SDLK_RETURN: app_timeline_activate_focus(app); return true;
         case SDLK_SPACE: app_toggle_timeline_playback(app); return true;
@@ -539,7 +546,7 @@ static bool handle_lane_inspector_key(App *app, SDL_Keycode key, SDL_Keymod mod)
 static bool handle_master_mix_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
     bool fine = (mod & SDL_KMOD_SHIFT) != 0;
     switch(key) {
-        case SDLK_ESCAPE: return true;
+        case SDLK_ESCAPE: app_master_mix_return_to_timeline(app); return true;
         case SDLK_TAB: app_master_mix_cycle_focus(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1); return true;
         case SDLK_UP:
             if(app->master_mix_focus == MASTER_MIX_FOCUS_REVERB) app_master_reverb_select_param_delta(app, -1);
@@ -658,7 +665,7 @@ bool input_handle_event(App *app, const SDL_Event *e){
                 app->controls_legend_open = false;
                 break;
             }
-            if(confirm_quit(app)) return false;
+            app_toggle_view_mode(app);
             break;
         case SDLK_SPACE: toggle_playing(app); break;
         case SDLK_M: toggle_metronome(app); break;
@@ -795,6 +802,14 @@ void input_update_gamepad(App *app, double dt){
             if(west_pressed) app_timeline_jump_to_play_range_start(app);
             if(north_pressed) app_timeline_toggle_play_range_loop(app);
             if(south_pressed || east_pressed || west_pressed || north_pressed) return;
+        }
+
+        if(app->project_menu_open) {
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_project_menu_move(app, -1);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_project_menu_move(app, 1);
+            if(south_pressed) app_project_menu_apply(app);
+            if(east_pressed || start_pressed) app_project_menu_close(app);
+            return;
         }
 
         if(app->timeline_context_menu_open) {
