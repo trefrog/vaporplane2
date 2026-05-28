@@ -30,6 +30,8 @@ typedef enum {
     MASTER_REVERB_PARAM_LOW_CUT_HZ,
     MASTER_REVERB_PARAM_HIGH_CUT_HZ,
     MASTER_REVERB_PARAM_WIDTH,
+    MASTER_REVERB_PARAM_MOD_DEPTH_MS,
+    MASTER_REVERB_PARAM_MOD_RATE_HZ,
     MASTER_REVERB_PARAM_COUNT
 } MasterReverbParamId;
 
@@ -64,6 +66,8 @@ typedef struct {
     float low_cut_hz;
     float high_cut_hz;
     float width;
+    float mod_depth_ms;
+    float mod_rate_hz;
 } MasterReverbParams;
 
 typedef struct {
@@ -88,6 +92,7 @@ typedef struct {
     float damping_coeff;
     float target_damping_coeff;
     float enabled_amount;
+    float mod_phase;
     bool tail_cleared;
 } MasterReverbState;
 

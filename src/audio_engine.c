@@ -254,6 +254,8 @@ static float master_reverb_param_min(MasterReverbParamId param) {
         case MASTER_REVERB_PARAM_LOW_CUT_HZ: return 20.0f;
         case MASTER_REVERB_PARAM_HIGH_CUT_HZ: return 1200.0f;
         case MASTER_REVERB_PARAM_WIDTH: return 0.0f;
+        case MASTER_REVERB_PARAM_MOD_DEPTH_MS: return 0.0f;
+        case MASTER_REVERB_PARAM_MOD_RATE_HZ: return 0.02f;
         case MASTER_REVERB_PARAM_COUNT:
         default: return 0.0f;
     }
@@ -272,6 +274,8 @@ static float master_reverb_param_max(MasterReverbParamId param) {
         case MASTER_REVERB_PARAM_LOW_CUT_HZ: return 1000.0f;
         case MASTER_REVERB_PARAM_HIGH_CUT_HZ: return 18000.0f;
         case MASTER_REVERB_PARAM_WIDTH: return 1.50f;
+        case MASTER_REVERB_PARAM_MOD_DEPTH_MS: return 12.0f;
+        case MASTER_REVERB_PARAM_MOD_RATE_HZ: return 2.50f;
         case MASTER_REVERB_PARAM_COUNT:
         default: return 1.0f;
     }
@@ -290,6 +294,8 @@ static MasterReverbParams master_reverb_default_params(void) {
     params.low_cut_hz = 90.0f;
     params.high_cut_hz = 11500.0f;
     params.width = 1.25f;
+    params.mod_depth_ms = 1.80f;
+    params.mod_rate_hz = 0.18f;
     return params;
 }
 
@@ -332,6 +338,7 @@ static void master_reverb_clear_tail_unlocked(AudioEngine *a) {
     state->low_cut_lp = 0.0f;
     state->high_cut_lp_l = 0.0f;
     state->high_cut_lp_r = 0.0f;
+    state->mod_phase = 0.0f;
     state->tail_cleared = true;
 }
 
@@ -409,6 +416,8 @@ static void master_reverb_process(AudioEngine *a, float *left, float *right) {
     current->low_cut_hz += (target->low_cut_hz - current->low_cut_hz) * smooth;
     current->high_cut_hz += (target->high_cut_hz - current->high_cut_hz) * smooth;
     current->width += (target->width - current->width) * smooth;
+    current->mod_depth_ms += (target->mod_depth_ms - current->mod_depth_ms) * smooth;
+    current->mod_rate_hz += (target->mod_rate_hz - current->mod_rate_hz) * smooth;
     current->enabled = state->enabled_amount > 0.5f;
 
     state->pre_delay_samples += (state->target_pre_delay_samples - state->pre_delay_samples) * slow_smooth;
@@ -440,11 +449,28 @@ static void master_reverb_process(AudioEngine *a, float *left, float *right) {
 
     float delayed[MASTER_REVERB_FDN_LINES];
     float delayed_sum = 0.0f;
+    float mod_depth_samples = current->mod_depth_ms * (float)sample_rate * 0.001f;
+    if(mod_depth_samples > 0.0001f) {
+        state->mod_phase += current->mod_rate_hz / (float)sample_rate;
+        while(state->mod_phase >= 1.0f) state->mod_phase -= 1.0f;
+        while(state->mod_phase < 0.0f) state->mod_phase += 1.0f;
+    }
+    static const float mod_phase_offset[MASTER_REVERB_FDN_LINES] = {
+        0.00f, 0.13f, 0.29f, 0.41f,
+        0.53f, 0.67f, 0.79f, 0.91f
+    };
     for(int i = 0; i < MASTER_REVERB_FDN_LINES; ++i) {
+        float delay_read = state->delay_samples[i];
+        if(mod_depth_samples > 0.0001f) {
+            float phase = state->mod_phase + mod_phase_offset[i];
+            phase -= floorf(phase);
+            delay_read += sinf(6.28318530717958647692f * phase) * mod_depth_samples;
+            delay_read = clamp_float(delay_read, 4.0f, (float)(MASTER_REVERB_DELAY_MAX_FRAMES - 3));
+        }
         delayed[i] = read_fractional_delay(state->delay_lines[i],
                                            MASTER_REVERB_DELAY_MAX_FRAMES,
                                            state->delay_write[i],
-                                           state->delay_samples[i]);
+                                           delay_read);
         delayed[i] = zap_denormal(delayed[i]);
         delayed_sum += delayed[i];
     }
@@ -955,6 +981,8 @@ const char *audio_engine_master_reverb_param_label(MasterReverbParamId param) {
         case MASTER_REVERB_PARAM_LOW_CUT_HZ: return "Low Cut";
         case MASTER_REVERB_PARAM_HIGH_CUT_HZ: return "High Cut";
         case MASTER_REVERB_PARAM_WIDTH: return "Width";
+        case MASTER_REVERB_PARAM_MOD_DEPTH_MS: return "Mod Depth";
+        case MASTER_REVERB_PARAM_MOD_RATE_HZ: return "Mod Rate";
         case MASTER_REVERB_PARAM_COUNT:
         default: return "Unknown";
     }
@@ -983,6 +1011,8 @@ static void master_reverb_set_param_unlocked(AudioEngine *a, MasterReverbParamId
         case MASTER_REVERB_PARAM_LOW_CUT_HZ: params->low_cut_hz = value; break;
         case MASTER_REVERB_PARAM_HIGH_CUT_HZ: params->high_cut_hz = value; break;
         case MASTER_REVERB_PARAM_WIDTH: params->width = value; break;
+        case MASTER_REVERB_PARAM_MOD_DEPTH_MS: params->mod_depth_ms = value; break;
+        case MASTER_REVERB_PARAM_MOD_RATE_HZ: params->mod_rate_hz = value; break;
         case MASTER_REVERB_PARAM_COUNT:
         default: break;
     }

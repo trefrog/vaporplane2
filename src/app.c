@@ -1613,6 +1613,8 @@ static float app_master_reverb_param_value(const MasterReverbParams *params, Mas
         case MASTER_REVERB_PARAM_LOW_CUT_HZ: return params->low_cut_hz;
         case MASTER_REVERB_PARAM_HIGH_CUT_HZ: return params->high_cut_hz;
         case MASTER_REVERB_PARAM_WIDTH: return params->width;
+        case MASTER_REVERB_PARAM_MOD_DEPTH_MS: return params->mod_depth_ms;
+        case MASTER_REVERB_PARAM_MOD_RATE_HZ: return params->mod_rate_hz;
         case MASTER_REVERB_PARAM_COUNT:
         default: return 0.0f;
     }
@@ -1626,6 +1628,10 @@ static float app_master_reverb_param_step(MasterReverbParamId param, bool fine) 
         case MASTER_REVERB_PARAM_DIFFUSION:
         case MASTER_REVERB_PARAM_DAMPING:
         case MASTER_REVERB_PARAM_WIDTH:
+            return fine ? 0.01f : 0.05f;
+        case MASTER_REVERB_PARAM_MOD_DEPTH_MS:
+            return fine ? 0.10f : 0.50f;
+        case MASTER_REVERB_PARAM_MOD_RATE_HZ:
             return fine ? 0.01f : 0.05f;
         case MASTER_REVERB_PARAM_PREDELAY_MS:
             return fine ? 1.0f : 5.0f;
@@ -4241,6 +4247,12 @@ static void format_master_reverb_value(const MasterReverbParams *params,
         case MASTER_REVERB_PARAM_LOW_CUT_HZ:
         case MASTER_REVERB_PARAM_HIGH_CUT_HZ:
             SDL_snprintf(out, out_size, "%.0f Hz", value);
+            break;
+        case MASTER_REVERB_PARAM_MOD_DEPTH_MS:
+            SDL_snprintf(out, out_size, "%.1f ms", value);
+            break;
+        case MASTER_REVERB_PARAM_MOD_RATE_HZ:
+            SDL_snprintf(out, out_size, "%.2f Hz", value);
             break;
         case MASTER_REVERB_PARAM_SEND:
         case MASTER_REVERB_PARAM_RETURN:
