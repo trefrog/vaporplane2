@@ -1,6 +1,7 @@
 #include "app.h"
 #include "input.h"
 #include "project_format.h"
+#include <ctype.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -714,6 +715,7 @@ static const char *project_menu_item_label(ProjectMenuItem item) {
 }
 
 static bool app_save_project_bundle_default(App *app);
+static bool app_load_project_bundle_default(App *app);
 
 static void timeline_effective_play_range(const MasterTimeline *timeline, int64_t *start, int64_t *end) {
     int64_t length = timeline->length_ticks > 0 ? timeline->length_ticks : 0;
@@ -2285,7 +2287,10 @@ void app_project_menu_apply(App *app) {
             }
             break;
         case PROJECT_MENU_ITEM_OPEN:
-            app_set_status(app, "Project load is not installed yet");
+            if (app_load_project_bundle_default(app)) {
+                app->project_menu_open = false;
+                app->project_menu_selected = 0;
+            }
             break;
         case PROJECT_MENU_ITEM_QUIT:
             app->running = false;
@@ -3141,6 +3146,10 @@ static bool write_project_manifest_json(const App *app, const char *bundle_path,
         ok = ok && io_printf(io, "      \"target_bars\": %.6f,\n", clip->target_bars);
         ok = ok && io_printf(io, "      \"target_beats\": %.6f,\n", clip->target_beats);
         ok = ok && io_printf(io, "      \"downbeat_offset_frames\": %llu,\n", (unsigned long long)clip->downbeat_offset_frames);
+        ok = ok && io_printf(io, "      \"midi_binding\": {\n");
+        ok = ok && io_printf(io, "        \"channel\": %d,\n", clamp_int(clip->midi_channel, 0, 15) + 1);
+        ok = ok && io_printf(io, "        \"note\": %d\n", clamp_int(clip->midi_note, 0, 127));
+        ok = ok && io_printf(io, "      },\n");
         ok = ok && io_printf(io, "      \"source_lineage\": {\n");
         ok = ok && io_printf(io, "        \"path\": ");
         ok = ok && json_write_string(io, clip->source_path);
@@ -3150,40 +3159,6 @@ static bool write_project_manifest_json(const App *app, const char *bundle_path,
         ok = ok && io_printf(io, "        \"sample_rate\": %d\n", clip->sample_rate);
         ok = ok && io_printf(io, "      }\n");
         ok = ok && io_printf(io, "    }%s\n", i + 1 < app->roster_clip_count ? "," : "");
-    }
-    ok = ok && io_printf(io, "  ],\n");
-
-    ok = ok && io_printf(io, "  \"clip_instances\": [\n");
-    int total_instances = 0;
-    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
-        const TimelineLane *lane = &app->timeline.lanes[lane_index];
-        for (int instance_index = 0; instance_index < lane->instance_count; ++instance_index) {
-            int roster_index = lane->instances[instance_index].roster_clip_index;
-            if (roster_index >= 0 && roster_index < app->roster_clip_count) total_instances++;
-        }
-    }
-    int written_instances = 0;
-    int occurrence = 0;
-    for (int lane_index = 0; ok && lane_index < TIMELINE_MAX_LANES; ++lane_index) {
-        const TimelineLane *lane = &app->timeline.lanes[lane_index];
-        for (int instance_index = 0; ok && instance_index < lane->instance_count; ++instance_index) {
-            const TimelineInstance *instance = &lane->instances[instance_index];
-            if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
-            ++written_instances;
-            ok = ok && io_printf(io, "    {\n");
-            ok = ok && io_printf(io, "      \"clip_instance_id\": \"clip_%03d\",\n", written_instances);
-            ok = ok && io_printf(io, "      \"roster_clip_id\": \"roster_%03d\",\n", instance->roster_clip_index + 1);
-            ok = ok && io_printf(io, "      \"midi_locator\": {\n");
-            ok = ok && io_printf(io, "        \"track\": %d,\n", lane_index + 1);
-            ok = ok && io_printf(io, "        \"channel\": %d,\n", clamp_int(instance->midi_channel, 0, 15) + 1);
-            ok = ok && io_printf(io, "        \"note\": %d,\n", clamp_int(instance->midi_note, 0, 127));
-            ok = ok && io_printf(io, "        \"start_tick\": %lld,\n", (long long)instance->start_tick);
-            ok = ok && io_printf(io, "        \"duration_ticks\": %lld,\n", (long long)instance->duration_ticks);
-            ok = ok && io_printf(io, "        \"velocity\": %d,\n", clamp_int(instance->midi_velocity, 1, 127));
-            ok = ok && io_printf(io, "        \"occurrence\": %d\n", occurrence++);
-            ok = ok && io_printf(io, "      }\n");
-            ok = ok && io_printf(io, "    }%s\n", written_instances < total_instances ? "," : "");
-        }
     }
     ok = ok && io_printf(io, "  ]\n");
     ok = ok && io_printf(io, "}\n");
@@ -3294,6 +3269,773 @@ static bool app_save_project_bundle_default(App *app) {
         return false;
     }
     return app_save_project_bundle(app, path);
+}
+
+typedef struct {
+    char sample_id[32];
+    char path[CLIP_MAX_PATH];
+} ProjectSampleMapEntry;
+
+typedef struct {
+    char roster_clip_id[32];
+    RosterClip clip;
+    int midi_channel;
+    int midi_note;
+    bool has_midi_binding;
+} ProjectRosterLoadEntry;
+
+typedef struct {
+    RosterClip roster[APP_MAX_ROSTER_CLIPS];
+    int roster_clip_count;
+    int midi_binding_to_roster[16][128];
+    MasterTimeline timeline;
+    float master_gain;
+    bool has_master_gain;
+    MasterReverbParams reverb_params;
+    bool reverb_param_present[MASTER_REVERB_PARAM_COUNT];
+} ProjectLoadState;
+
+static void project_load_state_init(ProjectLoadState *state) {
+    SDL_memset(state, 0, sizeof(*state));
+    for (int ch = 0; ch < 16; ++ch) {
+        for (int note = 0; note < 128; ++note) {
+            state->midi_binding_to_roster[ch][note] = -1;
+        }
+    }
+    state->master_gain = 0.9f;
+    state->timeline.ticks_per_beat = 960;
+    state->timeline.timeline_bpm = TIMELINE_DEFAULT_BPM;
+    state->timeline.timeline_beats_per_bar = 4;
+    state->timeline.timeline_beat_unit = 4;
+    state->timeline.tape_speed = TIMELINE_TAPE_SPEED_DEFAULT;
+    timeline_init_lanes(&state->timeline);
+}
+
+static void project_load_state_destroy(ProjectLoadState *state) {
+    if (!state) return;
+    for (int i = 0; i < state->roster_clip_count; ++i) {
+        roster_clip_destroy(&state->roster[i]);
+    }
+    SDL_memset(state, 0, sizeof(*state));
+}
+
+static const char *range_strstr(const char *start, const char *end, const char *needle) {
+    if (!start || !end || !needle || start > end) return NULL;
+    size_t needle_len = SDL_strlen(needle);
+    if (needle_len == 0) return start;
+    for (const char *p = start; p + needle_len <= end; ++p) {
+        if (SDL_memcmp(p, needle, needle_len) == 0) return p;
+    }
+    return NULL;
+}
+
+static const char *json_key_value(const char *start, const char *end, const char *key) {
+    char needle[128];
+    SDL_snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = range_strstr(start, end, needle);
+    if (!p) return NULL;
+    p += SDL_strlen(needle);
+    while (p < end && isspace((unsigned char)*p)) ++p;
+    if (p >= end || *p != ':') return NULL;
+    ++p;
+    while (p < end && isspace((unsigned char)*p)) ++p;
+    return p < end ? p : NULL;
+}
+
+static bool json_get_int_range(const char *start, const char *end, const char *key, int *out) {
+    const char *p = json_key_value(start, end, key);
+    if (!p) return false;
+    char *parse_end = NULL;
+    long value = strtol(p, &parse_end, 10);
+    if (parse_end == p || parse_end > end) return false;
+    if (out) *out = (int)value;
+    return true;
+}
+
+static bool json_get_int64_range(const char *start, const char *end, const char *key, int64_t *out) {
+    const char *p = json_key_value(start, end, key);
+    if (!p) return false;
+    char *parse_end = NULL;
+    long long value = strtoll(p, &parse_end, 10);
+    if (parse_end == p || parse_end > end) return false;
+    if (out) *out = (int64_t)value;
+    return true;
+}
+
+static bool json_get_double_range(const char *start, const char *end, const char *key, double *out) {
+    const char *p = json_key_value(start, end, key);
+    if (!p) return false;
+    char *parse_end = NULL;
+    double value = strtod(p, &parse_end);
+    if (parse_end == p || parse_end > end) return false;
+    if (out) *out = value;
+    return true;
+}
+
+static bool json_get_bool_range(const char *start, const char *end, const char *key, bool *out) {
+    const char *p = json_key_value(start, end, key);
+    if (!p) return false;
+    if (p + 4 <= end && SDL_memcmp(p, "true", 4) == 0) {
+        if (out) *out = true;
+        return true;
+    }
+    if (p + 5 <= end && SDL_memcmp(p, "false", 5) == 0) {
+        if (out) *out = false;
+        return true;
+    }
+    return false;
+}
+
+static bool json_get_string_range(const char *start, const char *end, const char *key, char *out, size_t out_size) {
+    const char *p = json_key_value(start, end, key);
+    if (!p || p >= end || *p != '"' || !out || out_size == 0) return false;
+    ++p;
+    size_t write = 0;
+    while (p < end && *p != '"') {
+        char c = *p++;
+        if (c == '\\' && p < end) {
+            char esc = *p++;
+            switch (esc) {
+                case '"': c = '"'; break;
+                case '\\': c = '\\'; break;
+                case '/': c = '/'; break;
+                case 'b': c = '\b'; break;
+                case 'f': c = '\f'; break;
+                case 'n': c = '\n'; break;
+                case 'r': c = '\r'; break;
+                case 't': c = '\t'; break;
+                default: c = esc; break;
+            }
+        }
+        if (write + 1 < out_size) out[write++] = c;
+    }
+    if (p >= end || *p != '"') return false;
+    out[write] = '\0';
+    return true;
+}
+
+static bool json_find_compound_range(const char *start, const char *end, const char *key, char open, char close, const char **out_start, const char **out_end) {
+    const char *p = json_key_value(start, end, key);
+    if (!p || p >= end || *p != open) return false;
+    const char *compound_start = p;
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (; p < end; ++p) {
+        char c = *p;
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        } else if (c == open) {
+            depth++;
+        } else if (c == close) {
+            depth--;
+            if (depth == 0) {
+                if (out_start) *out_start = compound_start;
+                if (out_end) *out_end = p + 1;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool json_find_array_range(const char *start, const char *end, const char *key, const char **out_start, const char **out_end) {
+    return json_find_compound_range(start, end, key, '[', ']', out_start, out_end);
+}
+
+static bool json_find_object_range(const char *start, const char *end, const char *key, const char **out_start, const char **out_end) {
+    return json_find_compound_range(start, end, key, '{', '}', out_start, out_end);
+}
+
+static bool json_next_object(const char **cursor, const char *end, const char **out_start, const char **out_end) {
+    const char *p = *cursor;
+    while (p < end && *p != '{') ++p;
+    if (p >= end) {
+        *cursor = end;
+        return false;
+    }
+    const char *object_start = p;
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (; p < end; ++p) {
+        char c = *p;
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') in_string = true;
+        else if (c == '{') depth++;
+        else if (c == '}') {
+            depth--;
+            if (depth == 0) {
+                *out_start = object_start;
+                *out_end = p + 1;
+                *cursor = p + 1;
+                return true;
+            }
+        }
+    }
+    *cursor = end;
+    return false;
+}
+
+static bool load_text_file(const char *path, char **out_text, size_t *out_size) {
+    size_t size = 0;
+    void *bytes = SDL_LoadFile(path, &size);
+    if (!bytes) return false;
+    char *text = (char *)SDL_malloc(size + 1);
+    if (!text) {
+        SDL_free(bytes);
+        return false;
+    }
+    SDL_memcpy(text, bytes, size);
+    text[size] = '\0';
+    SDL_free(bytes);
+    if (out_text) *out_text = text;
+    else SDL_free(text);
+    if (out_size) *out_size = size;
+    return true;
+}
+
+static int project_sample_index_by_id(const ProjectSampleMapEntry *samples, int count, const char *sample_id) {
+    for (int i = 0; i < count; ++i) {
+        if (SDL_strcmp(samples[i].sample_id, sample_id) == 0) return i;
+    }
+    return -1;
+}
+
+static int project_roster_index_by_id(const ProjectRosterLoadEntry *entries, int count, const char *roster_clip_id) {
+    for (int i = 0; i < count; ++i) {
+        if (SDL_strcmp(entries[i].roster_clip_id, roster_clip_id) == 0) return i;
+    }
+    return -1;
+}
+
+static void project_roster_entries_destroy(ProjectRosterLoadEntry *entries, int count) {
+    if (!entries) return;
+    for (int i = 0; i < count; ++i) {
+        roster_clip_destroy(&entries[i].clip);
+    }
+}
+
+static bool load_roster_wav_for_project(const char *bundle_path, const char *relative_path, RosterClip *clip) {
+    char path[CLIP_MAX_PATH];
+    path_join(path, sizeof(path), bundle_path, relative_path);
+    AudioClip loaded;
+    if (!clip_init_from_wav(&loaded, path)) return false;
+    clip->sample_rate = loaded.sample_rate;
+    clip->channels = loaded.channels;
+    clip->frame_count = loaded.frame_count;
+    clip->samples = loaded.samples;
+    loaded.samples = NULL;
+    clip->source_loop_start_frame = 0;
+    clip->source_loop_end_frame = clip->frame_count;
+    SDL_strlcpy(clip->source_path, path, sizeof(clip->source_path));
+    clip_destroy(&loaded);
+    return true;
+}
+
+static bool parse_project_manifest(const char *bundle_path, const char *json, ProjectLoadState *state) {
+    const char *json_end = json + SDL_strlen(json);
+    int version = 0;
+    if (!json_get_int_range(json, json_end, "version", &version) || version < 1 || version > VAPORPLANE_PROJECT_FORMAT_VERSION) {
+        return false;
+    }
+    int ppqn = 960;
+    json_get_int_range(json, json_end, "ppqn", &ppqn);
+    state->timeline.ticks_per_beat = clamp_int(ppqn, 1, 32767);
+
+    ProjectSampleMapEntry samples[APP_MAX_ROSTER_CLIPS];
+    int sample_count = 0;
+    const char *array_start = NULL;
+    const char *array_end = NULL;
+    if (!json_find_array_range(json, json_end, "samples", &array_start, &array_end)) return false;
+    const char *cursor = array_start + 1;
+    const char *object_start = NULL;
+    const char *object_end = NULL;
+    while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
+        if (sample_count >= APP_MAX_ROSTER_CLIPS) return false;
+        if (!json_get_string_range(object_start, object_end, "sample_id", samples[sample_count].sample_id, sizeof(samples[sample_count].sample_id)) ||
+            !json_get_string_range(object_start, object_end, "path", samples[sample_count].path, sizeof(samples[sample_count].path))) {
+            return false;
+        }
+        sample_count++;
+    }
+
+    ProjectRosterLoadEntry entries[APP_MAX_ROSTER_CLIPS];
+    SDL_memset(entries, 0, sizeof(entries));
+    int roster_count = 0;
+    if (!json_find_array_range(json, json_end, "roster_clips", &array_start, &array_end)) return false;
+    cursor = array_start + 1;
+    while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
+        if (roster_count >= APP_MAX_ROSTER_CLIPS) {
+            project_roster_entries_destroy(entries, roster_count);
+            return false;
+        }
+        ProjectRosterLoadEntry *entry = &entries[roster_count];
+        char sample_id[32];
+        if (!json_get_string_range(object_start, object_end, "roster_clip_id", entry->roster_clip_id, sizeof(entry->roster_clip_id)) ||
+            !json_get_string_range(object_start, object_end, "sample_id", sample_id, sizeof(sample_id))) {
+            project_roster_entries_destroy(entries, roster_count);
+            return false;
+        }
+        int sample_index = project_sample_index_by_id(samples, sample_count, sample_id);
+        if (sample_index < 0) {
+            project_roster_entries_destroy(entries, roster_count);
+            return false;
+        }
+        RosterClip *clip = &entry->clip;
+        if (!load_roster_wav_for_project(bundle_path, samples[sample_index].path, clip)) {
+            project_roster_entries_destroy(entries, roster_count);
+            return false;
+        }
+        if (!json_get_string_range(object_start, object_end, "name", clip->name, sizeof(clip->name))) {
+            SDL_strlcpy(clip->name, entry->roster_clip_id, sizeof(clip->name));
+        }
+        double value = 0.0;
+        if (json_get_double_range(object_start, object_end, "source_bpm", &value)) clip->source_bpm = value;
+        else clip->source_bpm = TIMELINE_DEFAULT_BPM;
+        int int_value = 0;
+        if (json_get_int_range(object_start, object_end, "beats_per_bar", &int_value)) clip->beats_per_bar = int_value;
+        else clip->beats_per_bar = 4;
+        if (json_get_int_range(object_start, object_end, "beat_unit", &int_value)) clip->beat_unit = int_value;
+        else clip->beat_unit = 4;
+        if (json_get_double_range(object_start, object_end, "target_bars", &value)) clip->target_bars = value;
+        else clip->target_bars = 4.0;
+        if (json_get_double_range(object_start, object_end, "target_beats", &value)) clip->target_beats = value;
+        else clip->target_beats = clip->target_bars * (double)clip->beats_per_bar;
+        int64_t frame_value = 0;
+        if (json_get_int64_range(object_start, object_end, "downbeat_offset_frames", &frame_value) && frame_value >= 0) {
+            clip->downbeat_offset_frames = (size_t)frame_value;
+        }
+        const char *lineage_start = NULL;
+        const char *lineage_end = NULL;
+        if (json_find_object_range(object_start, object_end, "source_lineage", &lineage_start, &lineage_end)) {
+            json_get_string_range(lineage_start, lineage_end, "path", clip->source_path, sizeof(clip->source_path));
+            if (json_get_int64_range(lineage_start, lineage_end, "start_frame", &frame_value) && frame_value >= 0) {
+                clip->source_loop_start_frame = (size_t)frame_value;
+            }
+            if (json_get_int64_range(lineage_start, lineage_end, "end_frame", &frame_value) && frame_value >= 0) {
+                clip->source_loop_end_frame = (size_t)frame_value;
+            }
+        }
+        entry->midi_channel = 0;
+        entry->midi_note = clamp_int(60 + roster_count, 0, 127);
+        const char *binding_start = NULL;
+        const char *binding_end = NULL;
+        if (json_find_object_range(object_start, object_end, "midi_binding", &binding_start, &binding_end)) {
+            int channel = 1;
+            int note = 60 + roster_count;
+            json_get_int_range(binding_start, binding_end, "channel", &channel);
+            json_get_int_range(binding_start, binding_end, "note", &note);
+            entry->midi_channel = clamp_int(channel - 1, 0, 15);
+            entry->midi_note = clamp_int(note, 0, 127);
+            entry->has_midi_binding = true;
+        }
+        clip->midi_channel = entry->midi_channel;
+        clip->midi_note = entry->midi_note;
+        clip->midi_velocity = 100;
+        clip->color = roster_color_for_index(roster_count);
+        roster_count++;
+    }
+
+    if (version == 1 && json_find_array_range(json, json_end, "clip_instances", &array_start, &array_end)) {
+        cursor = array_start + 1;
+        while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
+            char roster_clip_id[32];
+            if (!json_get_string_range(object_start, object_end, "roster_clip_id", roster_clip_id, sizeof(roster_clip_id))) continue;
+            int roster_index = project_roster_index_by_id(entries, roster_count, roster_clip_id);
+            if (roster_index < 0 || entries[roster_index].has_midi_binding) continue;
+            const char *locator_start = NULL;
+            const char *locator_end = NULL;
+            if (json_find_object_range(object_start, object_end, "midi_locator", &locator_start, &locator_end)) {
+                int channel = 1;
+                int note = 60 + roster_index;
+                json_get_int_range(locator_start, locator_end, "channel", &channel);
+                json_get_int_range(locator_start, locator_end, "note", &note);
+                entries[roster_index].midi_channel = clamp_int(channel - 1, 0, 15);
+                entries[roster_index].midi_note = clamp_int(note, 0, 127);
+                entries[roster_index].has_midi_binding = true;
+                entries[roster_index].clip.midi_channel = entries[roster_index].midi_channel;
+                entries[roster_index].clip.midi_note = entries[roster_index].midi_note;
+            }
+        }
+    }
+
+    for (int i = 0; i < roster_count; ++i) {
+        ProjectRosterLoadEntry *entry = &entries[i];
+        int ch = clamp_int(entry->midi_channel, 0, 15);
+        int note = clamp_int(entry->midi_note, 0, 127);
+        if (state->midi_binding_to_roster[ch][note] < 0) {
+            state->midi_binding_to_roster[ch][note] = i;
+        }
+        state->roster[i] = entry->clip;
+        SDL_memset(&entry->clip, 0, sizeof(entry->clip));
+    }
+    state->roster_clip_count = roster_count;
+    return roster_count > 0;
+}
+
+static bool midi_read_be16_mem(const Uint8 *data, size_t size, size_t *pos, Uint16 *out) {
+    if (*pos + 2 > size) return false;
+    *out = (Uint16)(((Uint16)data[*pos] << 8) | data[*pos + 1]);
+    *pos += 2;
+    return true;
+}
+
+static bool midi_read_be32_mem(const Uint8 *data, size_t size, size_t *pos, Uint32 *out) {
+    if (*pos + 4 > size) return false;
+    *out = ((Uint32)data[*pos] << 24) | ((Uint32)data[*pos + 1] << 16) | ((Uint32)data[*pos + 2] << 8) | (Uint32)data[*pos + 3];
+    *pos += 4;
+    return true;
+}
+
+static bool midi_read_varlen_mem(const Uint8 *data, size_t size, size_t *pos, Uint32 *out) {
+    Uint32 value = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (*pos >= size) return false;
+        Uint8 byte = data[(*pos)++];
+        value = (value << 7) | (Uint32)(byte & 0x7f);
+        if ((byte & 0x80) == 0) {
+            *out = value;
+            return true;
+        }
+    }
+    return false;
+}
+
+typedef struct {
+    bool active;
+    int64_t start_tick;
+    Uint8 velocity;
+} MidiOpenNote;
+
+static bool project_add_tempo_event(ProjectLoadState *state, int64_t tick, double bpm) {
+    if (state->timeline.tempo_event_count >= TIMELINE_MAX_TEMPO_EVENTS) return false;
+    return timeline_set_tempo_event_no_lock(&state->timeline, tick, bpm);
+}
+
+static bool parse_project_midi_track(ProjectLoadState *state, const Uint8 *data, size_t size, int track_index) {
+    size_t pos = 0;
+    int64_t tick = 0;
+    Uint8 running_status = 0;
+    MidiOpenNote open_notes[16][128];
+    SDL_memset(open_notes, 0, sizeof(open_notes));
+    while (pos < size) {
+        Uint32 delta = 0;
+        if (!midi_read_varlen_mem(data, size, &pos, &delta)) return false;
+        tick += (int64_t)delta;
+        if (pos >= size) return false;
+        Uint8 status = data[pos];
+        bool consumed_status = false;
+        if (status < 0x80) {
+            if (running_status == 0) return false;
+            status = running_status;
+        } else {
+            pos++;
+            consumed_status = true;
+            if (status < 0xf0) running_status = status;
+        }
+        if (status == 0xff) {
+            if (pos >= size) return false;
+            Uint8 meta = data[pos++];
+            Uint32 length = 0;
+            if (!midi_read_varlen_mem(data, size, &pos, &length) || pos + length > size) return false;
+            if (meta == 0x51 && length == 3) {
+                Uint32 mpqn = ((Uint32)data[pos] << 16) | ((Uint32)data[pos + 1] << 8) | (Uint32)data[pos + 2];
+                if (mpqn > 0) {
+                    double bpm = 60000000.0 / (double)mpqn;
+                    if (!project_add_tempo_event(state, tick, bpm)) return false;
+                }
+            } else if (meta == 0x2f) {
+                return true;
+            }
+            pos += length;
+            continue;
+        }
+        if (status == 0xf0 || status == 0xf7) {
+            Uint32 length = 0;
+            if (!midi_read_varlen_mem(data, size, &pos, &length) || pos + length > size) return false;
+            pos += length;
+            continue;
+        }
+        Uint8 type = status & 0xf0;
+        Uint8 channel = status & 0x0f;
+        int data_bytes = (type == 0xc0 || type == 0xd0) ? 1 : 2;
+        if (pos + (size_t)data_bytes > size) return false;
+        Uint8 d1 = data[pos++];
+        Uint8 d2 = data_bytes == 2 ? data[pos++] : 0;
+        (void)consumed_status;
+        if (track_index <= 0 || track_index > TIMELINE_MAX_LANES) continue;
+        int lane_index = track_index - 1;
+        if (type == 0x90 && d2 > 0) {
+            open_notes[channel][d1].active = true;
+            open_notes[channel][d1].start_tick = tick;
+            open_notes[channel][d1].velocity = d2;
+        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
+            MidiOpenNote *open = &open_notes[channel][d1];
+            if (!open->active) continue;
+            int64_t duration = tick - open->start_tick;
+            open->active = false;
+            if (duration <= 0) continue;
+            int roster_index = state->midi_binding_to_roster[channel][d1];
+            if (roster_index < 0 || roster_index >= state->roster_clip_count) continue;
+            TimelineLane *lane = &state->timeline.lanes[lane_index];
+            if (lane->instance_count >= APP_MAX_TIMELINE_INSTANCES_PER_LANE) return false;
+            TimelineInstance *instance = &lane->instances[lane->instance_count++];
+            instance->roster_clip_index = roster_index;
+            instance->start_tick = open->start_tick;
+            instance->duration_ticks = duration;
+            instance->midi_channel = channel;
+            instance->midi_note = d1;
+            instance->midi_velocity = clamp_int(open->velocity, 1, 127);
+            int64_t end_tick = open->start_tick + duration;
+            if (end_tick > state->timeline.length_ticks) state->timeline.length_ticks = end_tick;
+        }
+    }
+    return true;
+}
+
+static bool parse_project_timeline_mid(const char *path, ProjectLoadState *state) {
+    size_t size = 0;
+    Uint8 *data = (Uint8 *)SDL_LoadFile(path, &size);
+    if (!data) return false;
+    bool ok = false;
+    size_t pos = 0;
+    Uint32 header_length = 0;
+    Uint16 format = 0, track_count = 0, division = 0;
+    if (size < 14 || SDL_memcmp(data, "MThd", 4) != 0) goto done;
+    pos = 4;
+    if (!midi_read_be32_mem(data, size, &pos, &header_length) || header_length < 6 || pos + header_length > size) goto done;
+    if (!midi_read_be16_mem(data, size, &pos, &format) ||
+        !midi_read_be16_mem(data, size, &pos, &track_count) ||
+        !midi_read_be16_mem(data, size, &pos, &division)) {
+        goto done;
+    }
+    if (format > 1 || (division & 0x8000) != 0) goto done;
+    state->timeline.ticks_per_beat = clamp_int((int)division, 1, 32767);
+    pos = 8 + header_length;
+    state->timeline.tempo_event_count = 0;
+    for (int track = 0; track < track_count; ++track) {
+        Uint32 track_length = 0;
+        if (pos + 8 > size || SDL_memcmp(data + pos, "MTrk", 4) != 0) goto done;
+        pos += 4;
+        if (!midi_read_be32_mem(data, size, &pos, &track_length) || pos + track_length > size) goto done;
+        if (!parse_project_midi_track(state, data + pos, track_length, track)) goto done;
+        pos += track_length;
+    }
+    if (state->timeline.tempo_event_count <= 0) {
+        if (!project_add_tempo_event(state, 0, TIMELINE_DEFAULT_BPM)) goto done;
+    }
+    state->timeline.timeline_bpm = timeline_base_bpm(&state->timeline);
+    state->timeline.initialized = timeline_has_instances(&state->timeline);
+    state->timeline.playhead_tick = 0;
+    state->timeline.timeline_cursor_tick = 0;
+    state->timeline.timeline_cursor_seam_side = TIMELINE_SEAM_NONE;
+    state->timeline.play_range_start_tick = 0;
+    state->timeline.play_range_end_tick = state->timeline.length_ticks;
+    state->timeline.play_range_loop_enabled = false;
+    state->timeline.play_range_custom = false;
+    state->timeline.view_center_tick = state->timeline.length_ticks > 0 ? (double)state->timeline.length_ticks * 0.5 : (double)state->timeline.ticks_per_beat * 2.0;
+    state->timeline.view_span_ticks = state->timeline.length_ticks > 0 ? (double)state->timeline.length_ticks : (double)state->timeline.ticks_per_beat * 4.0;
+    ok = true;
+done:
+    SDL_free(data);
+    return ok;
+}
+
+static void parse_project_surfaces(const char *json, ProjectLoadState *state) {
+    const char *end = json + SDL_strlen(json);
+    double value = 0.0;
+    bool bool_value = false;
+    if (json_get_double_range(json, end, "gain", &value)) {
+        state->master_gain = (float)value;
+        state->has_master_gain = true;
+    }
+    if (json_get_bool_range(json, end, "master.fx.reverb_1.enabled", &bool_value)) {
+        state->reverb_params.enabled = bool_value;
+        state->reverb_param_present[MASTER_REVERB_PARAM_ENABLED] = true;
+    }
+    struct {
+        const char *key;
+        MasterReverbParamId param;
+        float *target;
+    } params[] = {
+        { "master.fx.reverb_1.send", MASTER_REVERB_PARAM_SEND, &state->reverb_params.send },
+        { "master.fx.reverb_1.return", MASTER_REVERB_PARAM_RETURN, &state->reverb_params.return_gain },
+        { "master.fx.reverb_1.predelay_ms", MASTER_REVERB_PARAM_PREDELAY_MS, &state->reverb_params.predelay_ms },
+        { "master.fx.reverb_1.decay", MASTER_REVERB_PARAM_DECAY_SECONDS, &state->reverb_params.decay_seconds },
+        { "master.fx.reverb_1.size", MASTER_REVERB_PARAM_SIZE, &state->reverb_params.size },
+        { "master.fx.reverb_1.diffusion", MASTER_REVERB_PARAM_DIFFUSION, &state->reverb_params.diffusion },
+        { "master.fx.reverb_1.damping", MASTER_REVERB_PARAM_DAMPING, &state->reverb_params.damping },
+        { "master.fx.reverb_1.low_cut_hz", MASTER_REVERB_PARAM_LOW_CUT_HZ, &state->reverb_params.low_cut_hz },
+        { "master.fx.reverb_1.high_cut_hz", MASTER_REVERB_PARAM_HIGH_CUT_HZ, &state->reverb_params.high_cut_hz },
+        { "master.fx.reverb_1.width", MASTER_REVERB_PARAM_WIDTH, &state->reverb_params.width },
+        { "master.fx.reverb_1.mod_depth_ms", MASTER_REVERB_PARAM_MOD_DEPTH_MS, &state->reverb_params.mod_depth_ms },
+        { "master.fx.reverb_1.mod_rate_hz", MASTER_REVERB_PARAM_MOD_RATE_HZ, &state->reverb_params.mod_rate_hz },
+    };
+    for (size_t i = 0; i < sizeof(params) / sizeof(params[0]); ++i) {
+        if (json_get_double_range(json, end, params[i].key, &value)) {
+            *params[i].target = (float)value;
+            state->reverb_param_present[params[i].param] = true;
+        }
+    }
+}
+
+static bool stage_project_bundle(const char *bundle_path, ProjectLoadState *state) {
+    char project_path[CLIP_MAX_PATH];
+    char timeline_path[CLIP_MAX_PATH];
+    char surfaces_path[CLIP_MAX_PATH];
+    path_join(project_path, sizeof(project_path), bundle_path, VAPORPLANE_PROJECT_MANIFEST_FILENAME);
+    path_join(timeline_path, sizeof(timeline_path), bundle_path, VAPORPLANE_PROJECT_TIMELINE_FILENAME);
+    path_join(surfaces_path, sizeof(surfaces_path), bundle_path, VAPORPLANE_PROJECT_SURFACES_FILENAME);
+    char *project_json = NULL;
+    char *surfaces_json = NULL;
+    if (!load_text_file(project_path, &project_json, NULL)) return false;
+    bool ok = parse_project_manifest(bundle_path, project_json, state);
+    SDL_free(project_json);
+    if (!ok) return false;
+    ok = parse_project_timeline_mid(timeline_path, state);
+    if (!ok) return false;
+    if (!load_text_file(surfaces_path, &surfaces_json, NULL)) return false;
+    audio_engine_get_master_reverb_params(NULL, NULL, &state->reverb_params);
+    parse_project_surfaces(surfaces_json, state);
+    SDL_free(surfaces_json);
+    return true;
+}
+
+static bool find_newest_project_bundle(char *out, size_t out_size) {
+    char dir[CLIP_MAX_PATH];
+    if (!resolve_project_export_dir(dir, sizeof(dir))) return false;
+    int count = 0;
+    char **matches = SDL_GlobDirectory(dir, "*.vapor", 0, &count);
+    if (!matches || count <= 0) {
+        if (matches) SDL_free(matches);
+        return false;
+    }
+    bool found = false;
+    SDL_Time newest = 0;
+    for (int i = 0; i < count; ++i) {
+        char path[CLIP_MAX_PATH];
+        path_join(path, sizeof(path), dir, matches[i]);
+        SDL_PathInfo info;
+        if (SDL_GetPathInfo(path, &info) && info.type == SDL_PATHTYPE_DIRECTORY) {
+            if (!found || info.modify_time > newest) {
+                SDL_strlcpy(out, path, out_size);
+                newest = info.modify_time;
+                found = true;
+            }
+        }
+    }
+    SDL_free(matches);
+    return found;
+}
+
+static void app_apply_loaded_surfaces(App *app, const ProjectLoadState *state) {
+    if (state->has_master_gain) {
+        if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+        app->audio.master_gain = state->master_gain;
+        if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    }
+    for (int param = 0; param < MASTER_REVERB_PARAM_COUNT; ++param) {
+        if (!state->reverb_param_present[param]) continue;
+        float value = 0.0f;
+        switch ((MasterReverbParamId)param) {
+            case MASTER_REVERB_PARAM_ENABLED: value = state->reverb_params.enabled ? 1.0f : 0.0f; break;
+            case MASTER_REVERB_PARAM_SEND: value = state->reverb_params.send; break;
+            case MASTER_REVERB_PARAM_RETURN: value = state->reverb_params.return_gain; break;
+            case MASTER_REVERB_PARAM_PREDELAY_MS: value = state->reverb_params.predelay_ms; break;
+            case MASTER_REVERB_PARAM_DECAY_SECONDS: value = state->reverb_params.decay_seconds; break;
+            case MASTER_REVERB_PARAM_SIZE: value = state->reverb_params.size; break;
+            case MASTER_REVERB_PARAM_DIFFUSION: value = state->reverb_params.diffusion; break;
+            case MASTER_REVERB_PARAM_DAMPING: value = state->reverb_params.damping; break;
+            case MASTER_REVERB_PARAM_LOW_CUT_HZ: value = state->reverb_params.low_cut_hz; break;
+            case MASTER_REVERB_PARAM_HIGH_CUT_HZ: value = state->reverb_params.high_cut_hz; break;
+            case MASTER_REVERB_PARAM_WIDTH: value = state->reverb_params.width; break;
+            case MASTER_REVERB_PARAM_MOD_DEPTH_MS: value = state->reverb_params.mod_depth_ms; break;
+            case MASTER_REVERB_PARAM_MOD_RATE_HZ: value = state->reverb_params.mod_rate_hz; break;
+            case MASTER_REVERB_PARAM_COUNT: break;
+        }
+        audio_engine_set_master_reverb_param(&app->audio, (MasterReverbParamId)param, value);
+    }
+    audio_engine_clear_master_reverb_tail(&app->audio);
+}
+
+bool app_load_project_bundle(App *app, const char *bundle_path) {
+    if (!app || !bundle_path || !bundle_path[0]) {
+        if (app) app_set_status(app, "No project path");
+        return false;
+    }
+    ProjectLoadState staged;
+    project_load_state_init(&staged);
+    if (!stage_project_bundle(bundle_path, &staged)) {
+        project_load_state_destroy(&staged);
+        app_set_status(app, "Could not load project bundle");
+        return false;
+    }
+
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    app->audio.playback_mode = AUDIO_PLAYBACK_TIMELINE;
+    app->audio.timeline_playhead_tick = 0.0;
+    app->audio.preview_active = false;
+    app->audio.preview_roster_clip_index = -1;
+    app->audio.preview_frame = 0.0;
+    app->audio.metronome_beat_valid = false;
+    for (int i = 0; i < app->roster_clip_count; ++i) {
+        roster_clip_destroy(&app->roster[i]);
+    }
+    SDL_memset(app->roster, 0, sizeof(app->roster));
+    for (int i = 0; i < staged.roster_clip_count; ++i) {
+        app->roster[i] = staged.roster[i];
+        SDL_memset(&staged.roster[i], 0, sizeof(staged.roster[i]));
+    }
+    app->roster_clip_count = staged.roster_clip_count;
+    app->timeline = staged.timeline;
+    app->timeline.playing = false;
+    app->transport.playing = false;
+    app->selected_roster_clip = staged.roster_clip_count > 0 ? 0 : -1;
+    app->selected_roster_clip_armed = false;
+    app->selected_timeline_lane = 0;
+    app->selected_timeline_instance = timeline_instance_ref_invalid();
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        if (app->timeline.lanes[lane_index].instance_count > 0) {
+            app->selected_timeline_lane = lane_index;
+            app->selected_timeline_instance = (TimelineInstanceRef){ lane_index, 0 };
+            break;
+        }
+    }
+    app->timeline_focus_zone = TIMELINE_FOCUS_RULER;
+    app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
+    app->timeline_play_range_adjusting = false;
+    app->timeline_edit_mode = TIMELINE_EDIT_NONE;
+    app_timeline_clear_context_menu(app);
+    app->project_menu_open = false;
+    app->view_mode = APP_VIEW_TIMELINE;
+    sync_transport_from_app(app);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    app_apply_loaded_surfaces(app, &staged);
+    project_load_state_destroy(&staged);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Loaded %s", bundle_path);
+    return true;
+}
+
+static bool app_load_project_bundle_default(App *app) {
+    char path[CLIP_MAX_PATH];
+    if (!find_newest_project_bundle(path, sizeof(path))) {
+        app_set_status(app, "No saved project bundles found");
+        return false;
+    }
+    return app_load_project_bundle(app, path);
 }
 
 static bool write_roster_clip_wav(const RosterClip *clip, const char *path) {
@@ -4013,10 +4755,10 @@ static void render_project_menu(App *app, float anchor_x, float anchor_y, int w,
 
     float item_y = menu.y + 50.0f;
     for (int i = 0; i < item_count; ++i) {
-        ProjectMenuItem item = (ProjectMenuItem)i;
-        SDL_FRect row = { menu.x + 8.0f, item_y - 4.0f, menu.w - 16.0f, 20.0f };
-        bool selected = i == app->project_menu_selected;
-        bool disabled = item == PROJECT_MENU_ITEM_OPEN;
+            ProjectMenuItem item = (ProjectMenuItem)i;
+            SDL_FRect row = { menu.x + 8.0f, item_y - 4.0f, menu.w - 16.0f, 20.0f };
+            bool selected = i == app->project_menu_selected;
+            bool disabled = false;
         if (selected) {
             SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 52);
             SDL_RenderFillRect(app->renderer, &row);

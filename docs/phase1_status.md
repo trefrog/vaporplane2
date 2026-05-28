@@ -21,7 +21,7 @@
 - Timeline view has focus zones, a tick cursor, beat/bar grid, beat-snapped tempo markers, play range handles, and range playback.
 - Timeline sequencing uses 8 lanes with same-lane overlap blocking and cross-lane overlap allowed.
 - Timeline playback applies per-instance velocity and shows a compact master output meter/clipping indicator.
-- Timeline Project menu can save a self-contained `.vapor/` bundle under `exports/projects/`; project load is shown as a future placeholder.
+- Timeline Project menu can save a self-contained `.vapor/` bundle under `exports/projects/` and load the newest saved bundle from that folder.
 - Master Mix is a third main view for the master bus meter and future reverb, FX chain, and MIDI/control sections.
 - Master audio owns a fixed-size built-in FX chain with one real built-in unit, `Reverb 1`, disabled by default.
 - `Reverb 1` defaults to a more assertive long-room character when enabled, with depth/rate modulation available to soften metallic ringing; startup playback remains dry.
@@ -108,7 +108,7 @@ cmake --build build
 - Keyboard `Enter`: activate focused zone.
 - Keyboard `Escape`: exit play-range adjustment or lifted edits; otherwise opens the Timeline Project menu, including before any clips are captured.
 - Keyboard `C` or gamepad Start/Plus opens a focus-aware context menu.
-- Project menu includes `Save project...`, `Open project...` placeholder, and `Quit`.
+- Project menu includes `Save project...`, `Open project...`, and `Quit`.
 - Context menus are vertical overlay lists with a drop shadow: Up/Down changes the highlighted item, South/Enter applies it, and East/Escape backs out.
 - `RULER` menus include `Mark tempo` and, when the cursor is on a removable tempo event, `Remove tempo`.
 - `RULER` and `TRACK AREA` menus include `Insert bar`, which inserts one full bar before the cursor's containing bar.

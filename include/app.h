@@ -241,6 +241,7 @@ void app_project_menu_close(App *app);
 void app_project_menu_move(App *app, int delta);
 void app_project_menu_apply(App *app);
 bool app_save_project_bundle(App *app, const char *bundle_path);
+bool app_load_project_bundle(App *app, const char *bundle_path);
 void app_timeline_insert_bar_at_cursor(App *app);
 void app_timeline_mark_tempo_at_cursor(App *app);
 void app_timeline_remove_tempo_at_cursor(App *app);

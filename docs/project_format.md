@@ -10,7 +10,7 @@ project_name.vapor/
   samples/
 ```
 
-This document describes the intended format shape only. Vaporplane does not implement full project save/load, audio conversion, MIDI learn, automation editing, envelope UI, or envelope playback yet.
+This document describes the project bundle shape. Vaporplane implements save/load for the core bundle files; MIDI learn, automation editing, envelope UI, and envelope playback are not installed yet.
 
 ## Authority Model
 
@@ -23,13 +23,13 @@ MIDI is not the whole project. JSON sidecars are authoritative for Vaporplane-sp
 
 ## Stable Identity Layers
 
-Vaporplane project identity has three stable layers:
+Vaporplane project identity has two stable JSON identity layers plus MIDI-owned timeline placements:
 
 - `sample_id`: a bundled WAV/audio asset in `samples/`.
 - `roster_clip_id`: a blessed loop/cut derived from a sample.
-- `clip_instance_id`: a timeline placement of a roster clip.
+- MIDI note events in `timeline.mid`: timeline placements of roster clips.
 
-Gremlin rule: runtime array order, roster order, MIDI note pitch, and MIDI channel are not permanent identity. Stable IDs in `project.json` are identity.
+Gremlin rule: runtime array order, roster order, MIDI note pitch, and MIDI channel are not permanent identity. Stable `sample_id` and `roster_clip_id` values in `project.json` are identity. MIDI note timing remains the timeline authority.
 
 ## project.json
 
@@ -43,29 +43,18 @@ Expected responsibilities:
 - Relative references to `timeline.mid` and `surfaces.json`.
 - `sample_id -> samples/*.wav` mappings.
 - `roster_clip_id -> sample_id` mappings.
-- `clip_instance_id -> roster_clip_id` mappings.
-- MIDI event locator metadata for mapping note events back to `clip_instance_id`.
+- `roster_clip_id -> MIDI binding` mappings, currently channel + note.
 
-MIDI event locator metadata may include:
+`project.json` must not store a second list of timeline placements. MIDI note events in `timeline.mid` are clip instances. The manifest only explains which roster clip a MIDI channel/note refers to.
 
-- track
-- channel
-- note pitch
-- start tick
-- duration ticks
-- velocity
-- occurrence index
-
-Duplicated timing fields in `project.json` are identity and validation aids only. They are not a second timeline. If timing conflicts with `timeline.mid`, the MIDI file remains the intended musical timing authority.
-
-MIDI note pitch may be arbitrary or sequential, and can be used as a clip/sample slot reference for MIDI compatibility. It is not the permanent identity of a sample or clip. Stable identity lives in `project.json` through `sample_id`, `roster_clip_id`, and `clip_instance_id`.
+MIDI note pitch may be arbitrary or sequential, and can be used as a clip/sample slot reference for MIDI compatibility. It is not the permanent identity of a sample or clip. Stable identity lives in `project.json` through `sample_id` and `roster_clip_id`.
 
 Example shape:
 
 ```json
 {
   "format": "vaporplane.project",
-  "version": 1,
+  "version": 2,
   "project_id": "vp_2026_05_28_example",
   "name": "example",
   "ppqn": 960,
@@ -82,27 +71,27 @@ Example shape:
       "roster_clip_id": "roster_001",
       "sample_id": "sample_001",
       "name": "sample_001_cut_a",
-      "source_start_frame": 1024,
-      "source_end_frame": 193024
-    }
-  ],
-  "clip_instances": [
-    {
-      "clip_instance_id": "clip_001",
-      "roster_clip_id": "roster_001",
-      "midi_locator": {
-        "track": 1,
+      "midi_binding": {
         "channel": 1,
-        "note": 60,
-        "start_tick": 0,
-        "duration_ticks": 3840,
-        "velocity": 100,
-        "occurrence": 0
+        "note": 60
+      },
+      "source_bpm": 114.0,
+      "beats_per_bar": 4,
+      "beat_unit": 4,
+      "target_bars": 4.0,
+      "target_beats": 16.0,
+      "source_lineage": {
+        "path": "original/source.wav",
+        "start_frame": 1024,
+        "end_frame": 193024,
+        "sample_rate": 48000
       }
     }
   ]
 }
 ```
+
+Legacy format v1 bundles may contain `clip_instances[]` locator objects. Loaders may use those only to recover channel/note to `roster_clip_id` mappings. Their timing fields are not authoritative and must not override `timeline.mid`.
 
 ## timeline.mid
 
