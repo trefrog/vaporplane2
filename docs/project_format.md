@@ -98,7 +98,7 @@ Example shape:
 }
 ```
 
-Legacy format v2 bundles may contain positional-looking IDs such as `sample_001` and `roster_001`. Once loaded, those strings are accepted as stable IDs for that project and preserved by later v3 saves rather than renumbered.
+Legacy format v2 bundles may contain positional-looking IDs such as `sample_001` and `roster_001`. Those strings are treated as import locators only. Loading a v2 bundle upgrades the in-memory project to fresh v3 stable IDs, and later v3 saves preserve those upgraded IDs rather than deriving names from roster order.
 
 Legacy format v1 bundles may contain `clip_instances[]` locator objects. Loaders may use those only to recover channel/note to `roster_clip_id` mappings. Their timing fields are not authoritative and must not override `timeline.mid`.
 

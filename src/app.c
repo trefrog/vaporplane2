@@ -3810,6 +3810,10 @@ static bool parse_project_manifest(const char *bundle_path, const char *json, Pr
         if (state->midi_binding_to_roster[ch][note] < 0) {
             state->midi_binding_to_roster[ch][note] = i;
         }
+        if (version < 3) {
+            generate_stable_id("sample", entry->clip.sample_id, sizeof(entry->clip.sample_id));
+            generate_stable_id("roster", entry->clip.roster_clip_id, sizeof(entry->clip.roster_clip_id));
+        }
         state->roster[i] = entry->clip;
         SDL_memset(&entry->clip, 0, sizeof(entry->clip));
     }
