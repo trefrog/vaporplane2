@@ -1,6 +1,7 @@
 #include "app.h"
 #include "input.h"
 #include "project_format.h"
+#include "project_validation.h"
 #include <ctype.h>
 #include <limits.h>
 #include <math.h>
@@ -3640,6 +3641,7 @@ static void project_roster_entries_destroy(ProjectRosterLoadEntry *entries, int 
 }
 
 static bool load_roster_wav_for_project(const char *bundle_path, const char *relative_path, RosterClip *clip) {
+    if (!project_validation_is_safe_relative_path(relative_path)) return false;
     char path[CLIP_MAX_PATH];
     path_join(path, sizeof(path), bundle_path, relative_path);
     AudioClip loaded;
@@ -4153,6 +4155,13 @@ bool app_load_project_bundle(App *app, const char *bundle_path) {
         if (app) app_set_status(app, "No project path");
         return false;
     }
+    ProjectValidationResult validation;
+    if (!project_validate_bundle(bundle_path, PROJECT_VALIDATION_FULL, &validation) ||
+        validation.status == PROJECT_VALIDATION_INVALID ||
+        validation.status == PROJECT_VALIDATION_UNKNOWN) {
+        app_set_status(app, validation.reason[0] ? validation.reason : "Could not validate project bundle");
+        return false;
+    }
     ProjectLoadState staged;
     project_load_state_init(&staged);
     if (!stage_project_bundle(bundle_path, &staged)) {
@@ -4205,7 +4214,11 @@ bool app_load_project_bundle(App *app, const char *bundle_path) {
 
     app_apply_loaded_surfaces(app, &staged);
     project_load_state_destroy(&staged);
-    SDL_snprintf(app->status_text, sizeof(app->status_text), "Loaded %s", bundle_path);
+    if (validation.status == PROJECT_VALIDATION_WARNING) {
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Loaded with warning: %s", validation.reason);
+    } else {
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Loaded %s", bundle_path);
+    }
     return true;
 }
 
