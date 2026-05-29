@@ -6,14 +6,25 @@
 #include "timeline.h"
 #include "transport.h"
 #include "waveform.h"
+#include "project_validation.h"
 
 #define APP_MAX_SAMPLES 64
+#define APP_MAX_PROJECTS 64
 #define APP_SAMPLE_NAME_MAX 128
 
 typedef struct {
     char path[CLIP_MAX_PATH];
     char name[APP_SAMPLE_NAME_MAX];
 } SampleEntry;
+
+typedef struct {
+    char path[CLIP_MAX_PATH];
+    char folder_name[APP_SAMPLE_NAME_MAX];
+    ProjectValidationResult quick_validation;
+    ProjectValidationResult full_validation;
+    bool full_validation_ready;
+    SDL_Time modify_time;
+} ProjectBrowserEntry;
 
 typedef enum {
     BPM_SOURCE_DEFAULT_120,
@@ -135,6 +146,11 @@ typedef struct App {
     int sample_count;
     int selected_sample;
     bool sample_selector_open;
+    ProjectBrowserEntry project_browser_entries[APP_MAX_PROJECTS];
+    int project_browser_count;
+    int project_browser_selected;
+    bool project_browser_open;
+    char project_browser_dir[CLIP_MAX_PATH];
     char sample_dir[CLIP_MAX_PATH];
     char roster_export_dir[CLIP_MAX_PATH];
     bool roster_export_dir_is_base_path;
@@ -242,6 +258,12 @@ void app_project_menu_open(App *app);
 void app_project_menu_close(App *app);
 void app_project_menu_move(App *app, int delta);
 void app_project_menu_apply(App *app);
+void app_project_browser_open(App *app);
+void app_project_browser_close(App *app);
+void app_project_browser_refresh(App *app);
+void app_project_browser_move(App *app, int delta);
+void app_project_browser_open_selected(App *app);
+void app_project_browser_preview_unavailable(App *app);
 bool app_save_project_bundle(App *app, const char *bundle_path);
 bool app_load_project_bundle(App *app, const char *bundle_path);
 void app_timeline_insert_bar_at_cursor(App *app);

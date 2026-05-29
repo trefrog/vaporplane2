@@ -754,7 +754,6 @@ static const char *project_menu_item_label(ProjectMenuItem item) {
 }
 
 static bool app_save_project_bundle_default(App *app);
-static bool app_load_project_bundle_default(App *app);
 
 static void timeline_effective_play_range(const MasterTimeline *timeline, int64_t *start, int64_t *end) {
     int64_t length = timeline->length_ticks > 0 ? timeline->length_ticks : 0;
@@ -2333,10 +2332,7 @@ void app_project_menu_apply(App *app) {
             }
             break;
         case PROJECT_MENU_ITEM_OPEN:
-            if (app_load_project_bundle_default(app)) {
-                app->project_menu_open = false;
-                app->project_menu_selected = 0;
-            }
+            app_project_browser_open(app);
             break;
         case PROJECT_MENU_ITEM_QUIT:
             app->running = false;
@@ -3382,6 +3378,130 @@ static bool app_save_project_bundle_default(App *app) {
     return app_save_project_bundle(app, path);
 }
 
+static int compare_project_browser_entries(const void *a, const void *b) {
+    const ProjectBrowserEntry *ea = (const ProjectBrowserEntry *)a;
+    const ProjectBrowserEntry *eb = (const ProjectBrowserEntry *)b;
+    if (ea->modify_time > eb->modify_time) return -1;
+    if (ea->modify_time < eb->modify_time) return 1;
+    return SDL_strcasecmp(ea->folder_name, eb->folder_name);
+}
+
+static bool project_validation_openable(ProjectValidationStatus status) {
+    return status == PROJECT_VALIDATION_VALID || status == PROJECT_VALIDATION_WARNING;
+}
+
+static void app_project_browser_validate_selected(App *app) {
+    if (!app || app->project_browser_count <= 0) return;
+    app->project_browser_selected = clamp_int(app->project_browser_selected, 0, app->project_browser_count - 1);
+    ProjectBrowserEntry *entry = &app->project_browser_entries[app->project_browser_selected];
+    project_validate_bundle(entry->path, PROJECT_VALIDATION_FULL, &entry->full_validation);
+    entry->full_validation_ready = true;
+}
+
+void app_project_browser_refresh(App *app) {
+    if (!app) return;
+    app->project_browser_count = 0;
+    app->project_browser_selected = 0;
+    SDL_memset(app->project_browser_entries, 0, sizeof(app->project_browser_entries));
+
+    if (!resolve_project_export_dir(app->project_browser_dir, sizeof(app->project_browser_dir))) {
+        app_set_status(app, "Could not open project folder");
+        return;
+    }
+
+    int count = 0;
+    char **matches = SDL_GlobDirectory(app->project_browser_dir, "*.vapor", 0, &count);
+    if (!matches) {
+        app_set_status(app, "No project bundles found");
+        return;
+    }
+
+    for (int i = 0; i < count && app->project_browser_count < APP_MAX_PROJECTS; ++i) {
+        char path[CLIP_MAX_PATH];
+        path_join(path, sizeof(path), app->project_browser_dir, matches[i]);
+        SDL_PathInfo info;
+        if (!SDL_GetPathInfo(path, &info) || info.type != SDL_PATHTYPE_DIRECTORY) continue;
+        ProjectBrowserEntry *entry = &app->project_browser_entries[app->project_browser_count++];
+        SDL_strlcpy(entry->path, path, sizeof(entry->path));
+        SDL_strlcpy(entry->folder_name, matches[i], sizeof(entry->folder_name));
+        entry->modify_time = info.modify_time;
+        project_validate_bundle(entry->path, PROJECT_VALIDATION_QUICK, &entry->quick_validation);
+    }
+    SDL_free(matches);
+
+    if (app->project_browser_count > 1) {
+        qsort(app->project_browser_entries,
+              (size_t)app->project_browser_count,
+              sizeof(app->project_browser_entries[0]),
+              compare_project_browser_entries);
+    }
+    if (app->project_browser_count > 0) {
+        app_project_browser_validate_selected(app);
+        SDL_snprintf(app->status_text, sizeof(app->status_text),
+                     "Project browser: %d bundle%s",
+                     app->project_browser_count,
+                     app->project_browser_count == 1 ? "" : "s");
+    } else {
+        app_set_status(app, "No project bundles found");
+    }
+}
+
+void app_project_browser_open(App *app) {
+    if (!app || app->view_mode != APP_VIEW_TIMELINE) return;
+    app_timeline_clear_context_menu(app);
+    app->sample_selector_open = false;
+    app->project_menu_open = false;
+    app->project_menu_selected = 0;
+    app->project_browser_open = true;
+    app_project_browser_refresh(app);
+}
+
+void app_project_browser_close(App *app) {
+    if (!app) return;
+    app->project_browser_open = false;
+    app_set_status(app, "Project browser closed");
+}
+
+void app_project_browser_move(App *app, int delta) {
+    if (!app || !app->project_browser_open || delta == 0 || app->project_browser_count <= 0) return;
+    int selected = app->project_browser_selected + delta;
+    while (selected < 0) selected += app->project_browser_count;
+    selected %= app->project_browser_count;
+    if (selected == app->project_browser_selected) return;
+    app->project_browser_selected = selected;
+    app_project_browser_validate_selected(app);
+}
+
+void app_project_browser_open_selected(App *app) {
+    if (!app || !app->project_browser_open) return;
+    if (app->project_browser_count <= 0) {
+        app_set_status(app, "No project selected");
+        return;
+    }
+    app_project_browser_validate_selected(app);
+    ProjectBrowserEntry *entry = &app->project_browser_entries[app->project_browser_selected];
+    ProjectValidationResult *validation = &entry->full_validation;
+    if (!project_validation_openable(validation->status)) {
+        SDL_snprintf(app->status_text, sizeof(app->status_text),
+                     "Cannot open: %s",
+                     validation->reason[0] ? validation->reason : project_validation_status_label(validation->status));
+        return;
+    }
+
+    audio_engine_stop_timeline(&app->audio, false);
+    audio_engine_stop_preview(&app->audio);
+    if (app_load_project_bundle(app, entry->path)) {
+        app->project_browser_open = false;
+        app->project_menu_open = false;
+        app->project_menu_selected = 0;
+    }
+}
+
+void app_project_browser_preview_unavailable(App *app) {
+    if (!app) return;
+    app_set_status(app, "Preview not implemented");
+}
+
 typedef struct {
     char sample_id[APP_STABLE_ID_MAX];
     char path[CLIP_MAX_PATH];
@@ -4093,33 +4213,6 @@ static bool stage_project_bundle(const char *bundle_path, ProjectLoadState *stat
     return true;
 }
 
-static bool find_newest_project_bundle(char *out, size_t out_size) {
-    char dir[CLIP_MAX_PATH];
-    if (!resolve_project_export_dir(dir, sizeof(dir))) return false;
-    int count = 0;
-    char **matches = SDL_GlobDirectory(dir, "*.vapor", 0, &count);
-    if (!matches || count <= 0) {
-        if (matches) SDL_free(matches);
-        return false;
-    }
-    bool found = false;
-    SDL_Time newest = 0;
-    for (int i = 0; i < count; ++i) {
-        char path[CLIP_MAX_PATH];
-        path_join(path, sizeof(path), dir, matches[i]);
-        SDL_PathInfo info;
-        if (SDL_GetPathInfo(path, &info) && info.type == SDL_PATHTYPE_DIRECTORY) {
-            if (!found || info.modify_time > newest) {
-                SDL_strlcpy(out, path, out_size);
-                newest = info.modify_time;
-                found = true;
-            }
-        }
-    }
-    SDL_free(matches);
-    return found;
-}
-
 static void app_apply_loaded_surfaces(App *app, const ProjectLoadState *state) {
     if (state->has_master_gain) {
         if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
@@ -4220,15 +4313,6 @@ bool app_load_project_bundle(App *app, const char *bundle_path) {
         SDL_snprintf(app->status_text, sizeof(app->status_text), "Loaded %s", bundle_path);
     }
     return true;
-}
-
-static bool app_load_project_bundle_default(App *app) {
-    char path[CLIP_MAX_PATH];
-    if (!find_newest_project_bundle(path, sizeof(path))) {
-        app_set_status(app, "No saved project bundles found");
-        return false;
-    }
-    return app_load_project_bundle(app, path);
 }
 
 static bool write_roster_clip_wav(const RosterClip *clip, const char *path) {
@@ -6249,7 +6333,113 @@ static void app_render_debug_overlay(App *app) {
     render_debug_gamepad(app, gamepad_panel, text, dim, hot);
 }
 
+static SDL_Color project_validation_color(ProjectValidationStatus status, bool selected) {
+    switch (status) {
+        case PROJECT_VALIDATION_VALID:
+            return selected ? (SDL_Color){ 226, 252, 246, 255 } : (SDL_Color){ 218, 230, 234, 255 };
+        case PROJECT_VALIDATION_WARNING:
+            return selected ? (SDL_Color){ 255, 230, 120, 255 } : (SDL_Color){ 235, 202, 86, 255 };
+        case PROJECT_VALIDATION_INVALID:
+            return selected ? (SDL_Color){ 255, 120, 128, 255 } : (SDL_Color){ 224, 86, 98, 255 };
+        case PROJECT_VALIDATION_UNKNOWN:
+        default:
+            return selected ? (SDL_Color){ 170, 180, 190, 255 } : (SDL_Color){ 118, 128, 140, 255 };
+    }
+}
+
+static void render_project_browser(App *app) {
+    if (!app || !app->project_browser_open) return;
+
+    int w = 0, h = 0;
+    SDL_GetRenderOutputSize(app->renderer, &w, &h);
+    SDL_FRect panel = { 24.0f, 48.0f, (float)w - 48.0f, (float)h - 96.0f };
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(app->renderer, 6, 7, 12, 232);
+    SDL_RenderFillRect(app->renderer, &panel);
+    SDL_SetRenderDrawColor(app->renderer, 100, 230, 240, 255);
+    SDL_RenderRect(app->renderer, &panel);
+
+    SDL_SetRenderDrawColor(app->renderer, 230, 238, 242, 255);
+    SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 14.0f, "PROJECT BROWSER");
+    SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 30.0f, app->project_browser_dir);
+    SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 46.0f,
+                        "Up/Down select   Enter/A open   R/Y refresh   X preview later   Esc/B close");
+    if (app->status_text[0]) {
+        SDL_SetRenderDrawColor(app->renderer, 190, 202, 212, 255);
+        SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 62.0f, app->status_text);
+    }
+
+    float detail_h = 78.0f;
+    float list_top = panel.y + 92.0f;
+    float list_bottom = panel.y + panel.h - detail_h - 12.0f;
+    if (app->project_browser_count <= 0) {
+        SDL_SetRenderDrawColor(app->renderer, 190, 202, 212, 255);
+        SDL_RenderDebugText(app->renderer, panel.x + 16.0f, list_top, "No .vapor project bundles found.");
+        return;
+    }
+
+    int visible_rows = (int)((list_bottom - list_top) / 18.0f);
+    if (visible_rows < 1) visible_rows = 1;
+    int first = app->project_browser_selected - visible_rows / 2;
+    if (first < 0) first = 0;
+    if (first + visible_rows > app->project_browser_count) first = app->project_browser_count - visible_rows;
+    if (first < 0) first = 0;
+
+    for (int row = 0; row < visible_rows && first + row < app->project_browser_count; ++row) {
+        int index = first + row;
+        ProjectBrowserEntry *entry = &app->project_browser_entries[index];
+        bool selected = index == app->project_browser_selected;
+        float y = list_top + (float)row * 18.0f;
+        if (selected) {
+            SDL_FRect highlight = { panel.x + 10.0f, y - 3.0f, panel.w - 20.0f, 16.0f };
+            SDL_SetRenderDrawColor(app->renderer, 65, 85, 100, 215);
+            SDL_RenderFillRect(app->renderer, &highlight);
+            SDL_SetRenderDrawColor(app->renderer, 255, 220, 130, 255);
+            SDL_RenderRect(app->renderer, &highlight);
+        }
+        ProjectValidationResult *row_validation = (selected && entry->full_validation_ready) ?
+                                                  &entry->full_validation :
+                                                  &entry->quick_validation;
+        SDL_Color color = project_validation_color(row_validation->status, selected);
+        set_draw_color(app->renderer, color);
+        const char *name = row_validation->project_name[0] ?
+                           row_validation->project_name :
+                           entry->folder_name;
+        SDL_RenderDebugTextFormat(app->renderer,
+                                  panel.x + 16.0f,
+                                  y,
+                                  "%c %-8s  %-32s  %s",
+                                  selected ? '>' : ' ',
+                                  project_validation_status_label(row_validation->status),
+                                  name,
+                                  entry->folder_name);
+    }
+
+    ProjectBrowserEntry *selected = &app->project_browser_entries[app->project_browser_selected];
+    ProjectValidationResult *focused = selected->full_validation_ready ?
+                                       &selected->full_validation :
+                                       &selected->quick_validation;
+    SDL_FRect detail = { panel.x + 10.0f, panel.y + panel.h - detail_h, panel.w - 20.0f, detail_h - 10.0f };
+    SDL_SetRenderDrawColor(app->renderer, 14, 18, 26, 230);
+    SDL_RenderFillRect(app->renderer, &detail);
+    set_draw_color(app->renderer, project_validation_color(focused->status, true));
+    SDL_RenderRect(app->renderer, &detail);
+    SDL_RenderDebugTextFormat(app->renderer, detail.x + 10.0f, detail.y + 10.0f,
+                              "%s  %s",
+                              project_validation_status_label(focused->status),
+                              focused->reason[0] ? focused->reason : "unknown");
+    SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
+    SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 28.0f,
+                        focused->detail[0] ? focused->detail : selected->path);
+    SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 46.0f, selected->path);
+}
+
 static void app_render_overlay(App *app) {
+    if (app->project_browser_open) {
+        render_project_browser(app);
+        return;
+    }
+
     SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
     const char *current = app->clip.file_path[0] ? app->clip.file_path : "generated";
     SDL_RenderDebugTextFormat(app->renderer, 12, 10, "sample: %s", current);
@@ -6374,6 +6564,10 @@ bool app_init(App *app){
     app->debug_frame_ms_avg = 0.0;
     app->debug_frame_ms_max = 0.0;
     app->debug_fps = 0.0;
+    app->project_browser_open = false;
+    app->project_browser_count = 0;
+    app->project_browser_selected = 0;
+    app->project_browser_dir[0] = '\0';
     app_resolve_roster_export_dir(app);
     app_refresh_sample_list(app);
     clip_init_generated(&app->clip, 48000, 2.0f);
