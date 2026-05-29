@@ -31,6 +31,8 @@ Vaporplane project identity has two stable JSON identity layers plus MIDI-owned 
 
 Gremlin rule: runtime array order, roster order, MIDI note pitch, and MIDI channel are not permanent identity. Stable `sample_id` and `roster_clip_id` values in `project.json` are identity. MIDI note timing remains the timeline authority.
 
+Format v3 generates stable IDs once when a roster clip enters the project, then preserves those IDs across save-as bundles, deletion, and reordering. IDs are not derived from current array position. No sample content hashes are stored; bundled WAVs are authoritative and may be externally edited as long as filenames and manifest references remain valid.
+
 ## project.json
 
 `project.json` should stay compact. It identifies the project, names the bundle files, and maps stable Vaporplane IDs to bundled assets and MIDI events.
@@ -44,6 +46,8 @@ Expected responsibilities:
 - `sample_id -> samples/*.wav` mappings.
 - `roster_clip_id -> sample_id` mappings.
 - `roster_clip_id -> MIDI binding` mappings, currently channel + note.
+- Roster clip loop anchors: `loop_start_frame`, `loop_end_frame`, and `downbeat_offset_frames`.
+- Optional source lineage/provenance: source path, source bounds, and source sample rate.
 
 `project.json` must not store a second list of timeline placements. MIDI note events in `timeline.mid` are clip instances. The manifest only explains which roster clip a MIDI channel/note refers to.
 
@@ -54,23 +58,23 @@ Example shape:
 ```json
 {
   "format": "vaporplane.project",
-  "version": 2,
-  "project_id": "vp_2026_05_28_example",
+  "version": 3,
+  "project_id": "project_ab12cd34",
   "name": "example",
   "ppqn": 960,
   "timeline": "timeline.mid",
   "surfaces": "surfaces.json",
   "samples": [
     {
-      "sample_id": "sample_001",
-      "path": "samples/sample_001.wav"
+      "sample_id": "sample_4f91c2aa",
+      "path": "samples/sample_4f91c2aa.wav"
     }
   ],
   "roster_clips": [
     {
-      "roster_clip_id": "roster_001",
-      "sample_id": "sample_001",
-      "name": "sample_001_cut_a",
+      "roster_clip_id": "roster_c87e120d",
+      "sample_id": "sample_4f91c2aa",
+      "name": "sample_cut_a",
       "midi_binding": {
         "channel": 1,
         "note": 60
@@ -80,6 +84,9 @@ Example shape:
       "beat_unit": 4,
       "target_bars": 4.0,
       "target_beats": 16.0,
+      "loop_start_frame": 0,
+      "loop_end_frame": 768000,
+      "downbeat_offset_frames": 0,
       "source_lineage": {
         "path": "original/source.wav",
         "start_frame": 1024,
@@ -90,6 +97,8 @@ Example shape:
   ]
 }
 ```
+
+Legacy format v2 bundles may contain positional-looking IDs such as `sample_001` and `roster_001`. Once loaded, those strings are accepted as stable IDs for that project and preserved by later v3 saves rather than renumbered.
 
 Legacy format v1 bundles may contain `clip_instances[]` locator objects. Loaders may use those only to recover channel/note to `roster_clip_id` mappings. Their timing fields are not authoritative and must not override `timeline.mid`.
 
@@ -120,6 +129,8 @@ Expected responsibilities:
 - FX chain unit list.
 - FX unit stable parameter IDs.
 - FX unit current parameter values in parameter-native units.
+- Timeline surface state: tape speed, play range start/end ticks, and play range loop enabled.
+- Lane surface state: lane index, muted, gain, palette, and future lane FX chain placeholders.
 - Future external MIDI CC bindings.
 - Timeline CC envelope mappings from MIDI CC lanes to stable Vaporplane parameter IDs.
 
@@ -147,6 +158,23 @@ Example shape:
       "enabled": false
     }
   },
+  "timeline_surface": {
+    "tape_speed": 1.0,
+    "play_range": {
+      "start_tick": 0,
+      "end_tick": 15360,
+      "loop_enabled": false
+    }
+  },
+  "lanes": [
+    {
+      "lane": 1,
+      "muted": false,
+      "gain": 1.0,
+      "palette": 0,
+      "fx_chain": []
+    }
+  ],
   "fx_chain": [
     {
       "unit_id": "reverb_1",
@@ -208,4 +236,4 @@ Initial CC values are 7-bit inputs in the range `0..127`. They map to normalized
 
 The `samples/` directory contains bundled WAV files. `project.json` maps stable `sample_id` values to paths inside this directory.
 
-Project bundle save V1 writes roster clips as canonical bundled WAV assets: 48 kHz, stereo, 32-bit float. These bundled WAVs are authoritative for future playback. Source lineage in `project.json` is provenance only and is not required to reconstruct playback.
+Project bundle save writes roster clips as canonical bundled WAV assets: 48 kHz, stereo, 32-bit float. Filenames are based on stable `sample_id` values, not roster order. These bundled WAVs are authoritative for future playback. Source lineage in `project.json` is provenance only and is not required to reconstruct playback.

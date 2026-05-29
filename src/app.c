@@ -92,8 +92,40 @@ static SDL_Color roster_color_for_index(int index) {
     return roster_palette[index % count];
 }
 
+static int app_next_available_midi_note(const App *app) {
+    bool used[128] = {0};
+    if (app) {
+        for (int i = 0; i < app->roster_clip_count; ++i) {
+            if (app->roster[i].midi_channel == 0 &&
+                app->roster[i].midi_note >= 0 &&
+                app->roster[i].midi_note < 128) {
+                used[app->roster[i].midi_note] = true;
+            }
+        }
+    }
+    for (int note = 60; note < 128; ++note) {
+        if (!used[note]) return note;
+    }
+    for (int note = 0; note < 60; ++note) {
+        if (!used[note]) return note;
+    }
+    return 60;
+}
+
 static bool colors_equal(SDL_Color a, SDL_Color b) {
     return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
+static void generate_stable_id(const char *prefix, char *out, size_t out_size) {
+    static Uint32 counter = 0;
+    Uint32 bits = SDL_rand_bits();
+    Uint64 ticks = SDL_GetTicksNS();
+    counter++;
+    SDL_snprintf(out,
+                 out_size,
+                 "%s_%08x",
+                 prefix ? prefix : "id",
+                 (unsigned int)(bits ^ (Uint32)ticks ^ (Uint32)(ticks >> 32) ^ counter));
 }
 
 static SDL_Color roster_color_avoiding_neighbors(SDL_Color preferred, const SDL_Color *prev, const SDL_Color *next) {
@@ -227,6 +259,12 @@ static int clamp_int(int value, int min_value, int max_value) {
 }
 
 static int64_t clamp_i64(int64_t value, int64_t min_value, int64_t max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
+static double clamp_double(double value, double min_value, double max_value) {
     if (value < min_value) return min_value;
     if (value > max_value) return max_value;
     return value;
@@ -1324,6 +1362,8 @@ void app_capture_current_loop_to_roster(App *app) {
 
     RosterClip next;
     SDL_memset(&next, 0, sizeof(next));
+    generate_stable_id("sample", next.sample_id, sizeof(next.sample_id));
+    generate_stable_id("roster", next.roster_clip_id, sizeof(next.roster_clip_id));
     char base[APP_ROSTER_CLIP_NAME_MAX];
     if (app->waveform_source_mode == WAVEFORM_SOURCE_ROSTER && app->waveform_source_name[0]) {
         SDL_strlcpy(base, app->waveform_source_name, sizeof(base));
@@ -1336,6 +1376,9 @@ void app_capture_current_loop_to_roster(App *app) {
     SDL_strlcpy(next.source_path, source_path, sizeof(next.source_path));
     next.source_loop_start_frame = app->waveform_source_offset_frame + start;
     next.source_loop_end_frame = app->waveform_source_offset_frame + end;
+    next.source_sample_rate = app->clip.sample_rate;
+    next.loop_start_frame = 0;
+    next.loop_end_frame = frame_count;
     next.sample_rate = app->clip.sample_rate;
     next.channels = app->clip.channels;
     next.frame_count = frame_count;
@@ -1345,7 +1388,7 @@ void app_capture_current_loop_to_roster(App *app) {
     next.beat_unit = tempo.beat_unit;
     next.target_bars = tempo.target_bars;
     next.target_beats = tempo.target_bars * (double)tempo.beats_per_bar;
-    next.midi_note = clamp_int(60 + (app->roster_clip_count % 36), 0, 127);
+    next.midi_note = app_next_available_midi_note(app);
     next.midi_channel = 0;
     next.midi_velocity = 100;
     if (tempo.downbeat_frame > start) {
@@ -1439,8 +1482,10 @@ void app_open_selected_roster_clip_waveform(App *app) {
     next.channels = roster_clip->channels;
     next.frame_count = roster_clip->frame_count;
     next.samples = samples;
-    next.loop_start_frame = 0;
-    next.loop_end_frame = next.frame_count;
+    next.loop_start_frame = roster_clip->loop_start_frame < next.frame_count ? roster_clip->loop_start_frame : 0;
+    next.loop_end_frame = roster_clip->loop_end_frame > next.loop_start_frame && roster_clip->loop_end_frame <= next.frame_count ?
+        roster_clip->loop_end_frame :
+        next.frame_count;
     next.source_bpm = timeline_clamp_bpm(roster_clip->source_bpm);
     next.has_clip_metadata_bpm = true;
     next.clip_metadata_bpm = next.source_bpm;
@@ -2759,16 +2804,38 @@ static void project_bundle_name_from_path(const char *path, char *out, size_t ou
     if (!out[0]) SDL_strlcpy(out, "vaporplane_project", out_size);
 }
 
-static bool project_sample_filename(int roster_index, char *out, size_t out_size) {
-    return out && out_size > 0 &&
-           SDL_snprintf(out, out_size, "sample_%03d.wav", roster_index + 1) > 0;
+static bool project_sample_filename_for_clip(const RosterClip *clip, int fallback_index, char *out, size_t out_size) {
+    const char *sample_id = clip && clip->sample_id[0] ? clip->sample_id : NULL;
+    if (sample_id) {
+        return out && out_size > 0 && SDL_snprintf(out, out_size, "%s.wav", sample_id) > 0;
+    }
+    return out && out_size > 0 && SDL_snprintf(out, out_size, "sample_%03d.wav", fallback_index + 1) > 0;
 }
 
-static bool project_sample_relative_path(int roster_index, char *out, size_t out_size) {
-    char filename[32];
-    if (!project_sample_filename(roster_index, filename, sizeof(filename))) return false;
+static bool project_sample_relative_path_for_clip(const RosterClip *clip, int fallback_index, char *out, size_t out_size) {
+    char filename[APP_STABLE_ID_MAX + 8];
+    if (!project_sample_filename_for_clip(clip, fallback_index, filename, sizeof(filename))) return false;
     path_join(out, out_size, VAPORPLANE_PROJECT_SAMPLES_DIRNAME, filename);
     return out && out[0];
+}
+
+static void app_ensure_project_identity(App *app, const char *bundle_path) {
+    if (!app) return;
+    if (!app->project_id[0]) {
+        generate_stable_id("project", app->project_id, sizeof(app->project_id));
+    }
+    if (!app->project_name[0]) {
+        project_bundle_name_from_path(bundle_path, app->project_name, sizeof(app->project_name));
+    }
+    for (int i = 0; i < app->roster_clip_count; ++i) {
+        RosterClip *clip = &app->roster[i];
+        if (!clip->sample_id[0]) generate_stable_id("sample", clip->sample_id, sizeof(clip->sample_id));
+        if (!clip->roster_clip_id[0]) generate_stable_id("roster", clip->roster_clip_id, sizeof(clip->roster_clip_id));
+        if (clip->loop_end_frame <= clip->loop_start_frame || clip->loop_end_frame > clip->frame_count) {
+            clip->loop_start_frame = 0;
+            clip->loop_end_frame = clip->frame_count;
+        }
+    }
 }
 
 static bool write_project_float_wav(const RosterClip *clip, const char *path) {
@@ -3056,6 +3123,26 @@ static bool write_project_surfaces_json(const App *app, const char *path) {
     ok = ok && io_printf(io, "    \"gain\": %.6f,\n", app->audio.master_gain);
     ok = ok && io_printf(io, "    \"clip_protection\": { \"enabled\": false }\n");
     ok = ok && io_printf(io, "  },\n");
+    ok = ok && io_printf(io, "  \"timeline_surface\": {\n");
+    ok = ok && io_printf(io, "    \"tape_speed\": %.6f,\n", app->timeline.tape_speed);
+    ok = ok && io_printf(io, "    \"play_range\": {\n");
+    ok = ok && io_printf(io, "      \"start_tick\": %lld,\n", (long long)app->timeline.play_range_start_tick);
+    ok = ok && io_printf(io, "      \"end_tick\": %lld,\n", (long long)app->timeline.play_range_end_tick);
+    ok = ok && io_printf(io, "      \"loop_enabled\": %s\n", app->timeline.play_range_loop_enabled ? "true" : "false");
+    ok = ok && io_printf(io, "    }\n");
+    ok = ok && io_printf(io, "  },\n");
+    ok = ok && io_printf(io, "  \"lanes\": [\n");
+    for (int lane_index = 0; ok && lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        const TimelineLane *lane = &app->timeline.lanes[lane_index];
+        ok = ok && io_printf(io,
+                             "    { \"lane\": %d, \"muted\": %s, \"gain\": %.6f, \"palette\": %d, \"fx_chain\": [] }%s\n",
+                             lane_index + 1,
+                             lane->muted ? "true" : "false",
+                             lane->gain,
+                             lane->palette_index,
+                             lane_index + 1 < TIMELINE_MAX_LANES ? "," : "");
+    }
+    ok = ok && io_printf(io, "  ],\n");
     ok = ok && io_printf(io, "  \"fx_chain\": [\n");
     for (int i = 0; ok && i < chain.unit_count && i < MASTER_FX_CHAIN_MAX_UNITS; ++i) {
         const MasterFxUnit *unit = &chain.units[i];
@@ -3105,7 +3192,9 @@ static bool write_project_manifest_json(const App *app, const char *bundle_path,
     SDL_IOStream *io = SDL_IOFromFile(path, "wb");
     if (!io) return false;
     char project_name[APP_SAMPLE_NAME_MAX];
-    project_bundle_name_from_path(bundle_path, project_name, sizeof(project_name));
+    if (app->project_name[0]) SDL_strlcpy(project_name, app->project_name, sizeof(project_name));
+    else project_bundle_name_from_path(bundle_path, project_name, sizeof(project_name));
+    const char *project_id = app->project_id[0] ? app->project_id : project_name;
     int ppqn = app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat : app->transport.ppqn;
     if (ppqn <= 0) ppqn = 960;
 
@@ -3114,7 +3203,7 @@ static bool write_project_manifest_json(const App *app, const char *bundle_path,
     ok = ok && io_printf(io, "  \"format\": \"%s\",\n", VAPORPLANE_PROJECT_FORMAT_NAME);
     ok = ok && io_printf(io, "  \"version\": %d,\n", VAPORPLANE_PROJECT_FORMAT_VERSION);
     ok = ok && io_printf(io, "  \"project_id\": ");
-    ok = ok && json_write_string(io, project_name);
+    ok = ok && json_write_string(io, project_id);
     ok = ok && io_printf(io, ",\n  \"name\": ");
     ok = ok && json_write_string(io, project_name);
     ok = ok && io_printf(io, ",\n  \"ppqn\": %d,\n", ppqn);
@@ -3123,9 +3212,15 @@ static bool write_project_manifest_json(const App *app, const char *bundle_path,
 
     ok = ok && io_printf(io, "  \"samples\": [\n");
     for (int i = 0; ok && i < app->roster_clip_count; ++i) {
+        const RosterClip *clip = &app->roster[i];
         char rel_path[CLIP_MAX_PATH];
-        project_sample_relative_path(i, rel_path, sizeof(rel_path));
-        ok = ok && io_printf(io, "    { \"sample_id\": \"sample_%03d\", \"path\": ", i + 1);
+        char sample_id[APP_STABLE_ID_MAX];
+        if (clip->sample_id[0]) SDL_strlcpy(sample_id, clip->sample_id, sizeof(sample_id));
+        else SDL_snprintf(sample_id, sizeof(sample_id), "sample_%03d", i + 1);
+        ok = ok && project_sample_relative_path_for_clip(clip, i, rel_path, sizeof(rel_path));
+        ok = ok && io_printf(io, "    { \"sample_id\": ");
+        ok = ok && json_write_string(io, sample_id);
+        ok = ok && io_printf(io, ", \"path\": ");
         ok = ok && json_write_string(io, rel_path);
         ok = ok && io_printf(io, " }%s\n", i + 1 < app->roster_clip_count ? "," : "");
     }
@@ -3134,9 +3229,18 @@ static bool write_project_manifest_json(const App *app, const char *bundle_path,
     ok = ok && io_printf(io, "  \"roster_clips\": [\n");
     for (int i = 0; ok && i < app->roster_clip_count; ++i) {
         const RosterClip *clip = &app->roster[i];
+        char roster_clip_id[APP_STABLE_ID_MAX];
+        char sample_id[APP_STABLE_ID_MAX];
+        if (clip->roster_clip_id[0]) SDL_strlcpy(roster_clip_id, clip->roster_clip_id, sizeof(roster_clip_id));
+        else SDL_snprintf(roster_clip_id, sizeof(roster_clip_id), "roster_%03d", i + 1);
+        if (clip->sample_id[0]) SDL_strlcpy(sample_id, clip->sample_id, sizeof(sample_id));
+        else SDL_snprintf(sample_id, sizeof(sample_id), "sample_%03d", i + 1);
         ok = ok && io_printf(io, "    {\n");
-        ok = ok && io_printf(io, "      \"roster_clip_id\": \"roster_%03d\",\n", i + 1);
-        ok = ok && io_printf(io, "      \"sample_id\": \"sample_%03d\",\n", i + 1);
+        ok = ok && io_printf(io, "      \"roster_clip_id\": ");
+        ok = ok && json_write_string(io, roster_clip_id);
+        ok = ok && io_printf(io, ",\n      \"sample_id\": ");
+        ok = ok && json_write_string(io, sample_id);
+        ok = ok && io_printf(io, ",\n");
         ok = ok && io_printf(io, "      \"name\": ");
         ok = ok && json_write_string(io, clip->name);
         ok = ok && io_printf(io, ",\n");
@@ -3145,6 +3249,8 @@ static bool write_project_manifest_json(const App *app, const char *bundle_path,
         ok = ok && io_printf(io, "      \"beat_unit\": %d,\n", clip->beat_unit);
         ok = ok && io_printf(io, "      \"target_bars\": %.6f,\n", clip->target_bars);
         ok = ok && io_printf(io, "      \"target_beats\": %.6f,\n", clip->target_beats);
+        ok = ok && io_printf(io, "      \"loop_start_frame\": %llu,\n", (unsigned long long)clip->loop_start_frame);
+        ok = ok && io_printf(io, "      \"loop_end_frame\": %llu,\n", (unsigned long long)clip->loop_end_frame);
         ok = ok && io_printf(io, "      \"downbeat_offset_frames\": %llu,\n", (unsigned long long)clip->downbeat_offset_frames);
         ok = ok && io_printf(io, "      \"midi_binding\": {\n");
         ok = ok && io_printf(io, "        \"channel\": %d,\n", clamp_int(clip->midi_channel, 0, 15) + 1);
@@ -3156,7 +3262,7 @@ static bool write_project_manifest_json(const App *app, const char *bundle_path,
         ok = ok && io_printf(io, ",\n");
         ok = ok && io_printf(io, "        \"start_frame\": %llu,\n", (unsigned long long)clip->source_loop_start_frame);
         ok = ok && io_printf(io, "        \"end_frame\": %llu,\n", (unsigned long long)clip->source_loop_end_frame);
-        ok = ok && io_printf(io, "        \"sample_rate\": %d\n", clip->sample_rate);
+        ok = ok && io_printf(io, "        \"sample_rate\": %d\n", clip->source_sample_rate > 0 ? clip->source_sample_rate : clip->sample_rate);
         ok = ok && io_printf(io, "      }\n");
         ok = ok && io_printf(io, "    }%s\n", i + 1 < app->roster_clip_count ? "," : "");
     }
@@ -3176,6 +3282,7 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
         app_set_status(app, "Project bundle already exists");
         return false;
     }
+    app_ensure_project_identity(app, bundle_path);
     if (!ensure_directory(bundle_path)) {
         app_set_status(app, "Could not create project bundle");
         return false;
@@ -3189,9 +3296,12 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
     }
 
     for (int i = 0; i < app->roster_clip_count; ++i) {
-        char filename[32];
+        char filename[APP_STABLE_ID_MAX + 8];
         char sample_path[CLIP_MAX_PATH];
-        project_sample_filename(i, filename, sizeof(filename));
+        if (!project_sample_filename_for_clip(&app->roster[i], i, filename, sizeof(filename))) {
+            app_set_status(app, "Could not name project sample WAV");
+            return false;
+        }
         path_join(sample_path, sizeof(sample_path), samples_dir, filename);
         if (!write_project_float_wav(&app->roster[i], sample_path)) {
             app_set_status(app, "Could not write project sample WAV");
@@ -3272,12 +3382,12 @@ static bool app_save_project_bundle_default(App *app) {
 }
 
 typedef struct {
-    char sample_id[32];
+    char sample_id[APP_STABLE_ID_MAX];
     char path[CLIP_MAX_PATH];
 } ProjectSampleMapEntry;
 
 typedef struct {
-    char roster_clip_id[32];
+    char roster_clip_id[APP_STABLE_ID_MAX];
     RosterClip clip;
     int midi_channel;
     int midi_note;
@@ -3285,6 +3395,8 @@ typedef struct {
 } ProjectRosterLoadEntry;
 
 typedef struct {
+    char project_id[APP_STABLE_ID_MAX];
+    char project_name[APP_SAMPLE_NAME_MAX];
     RosterClip roster[APP_MAX_ROSTER_CLIPS];
     int roster_clip_count;
     int midi_binding_to_roster[16][128];
@@ -3539,6 +3651,7 @@ static bool load_roster_wav_for_project(const char *bundle_path, const char *rel
     loaded.samples = NULL;
     clip->source_loop_start_frame = 0;
     clip->source_loop_end_frame = clip->frame_count;
+    clip->source_sample_rate = clip->sample_rate;
     SDL_strlcpy(clip->source_path, path, sizeof(clip->source_path));
     clip_destroy(&loaded);
     return true;
@@ -3553,6 +3666,10 @@ static bool parse_project_manifest(const char *bundle_path, const char *json, Pr
     int ppqn = 960;
     json_get_int_range(json, json_end, "ppqn", &ppqn);
     state->timeline.ticks_per_beat = clamp_int(ppqn, 1, 32767);
+    json_get_string_range(json, json_end, "project_id", state->project_id, sizeof(state->project_id));
+    json_get_string_range(json, json_end, "name", state->project_name, sizeof(state->project_name));
+    if (!state->project_id[0]) project_bundle_name_from_path(bundle_path, state->project_id, sizeof(state->project_id));
+    if (!state->project_name[0]) project_bundle_name_from_path(bundle_path, state->project_name, sizeof(state->project_name));
 
     ProjectSampleMapEntry samples[APP_MAX_ROSTER_CLIPS];
     int sample_count = 0;
@@ -3582,7 +3699,7 @@ static bool parse_project_manifest(const char *bundle_path, const char *json, Pr
             return false;
         }
         ProjectRosterLoadEntry *entry = &entries[roster_count];
-        char sample_id[32];
+        char sample_id[APP_STABLE_ID_MAX];
         if (!json_get_string_range(object_start, object_end, "roster_clip_id", entry->roster_clip_id, sizeof(entry->roster_clip_id)) ||
             !json_get_string_range(object_start, object_end, "sample_id", sample_id, sizeof(sample_id))) {
             project_roster_entries_destroy(entries, roster_count);
@@ -3598,6 +3715,8 @@ static bool parse_project_manifest(const char *bundle_path, const char *json, Pr
             project_roster_entries_destroy(entries, roster_count);
             return false;
         }
+        SDL_strlcpy(clip->sample_id, sample_id, sizeof(clip->sample_id));
+        SDL_strlcpy(clip->roster_clip_id, entry->roster_clip_id, sizeof(clip->roster_clip_id));
         if (!json_get_string_range(object_start, object_end, "name", clip->name, sizeof(clip->name))) {
             SDL_strlcpy(clip->name, entry->roster_clip_id, sizeof(clip->name));
         }
@@ -3617,6 +3736,16 @@ static bool parse_project_manifest(const char *bundle_path, const char *json, Pr
         if (json_get_int64_range(object_start, object_end, "downbeat_offset_frames", &frame_value) && frame_value >= 0) {
             clip->downbeat_offset_frames = (size_t)frame_value;
         }
+        clip->loop_start_frame = 0;
+        clip->loop_end_frame = clip->frame_count;
+        if (json_get_int64_range(object_start, object_end, "loop_start_frame", &frame_value) && frame_value >= 0 &&
+            (size_t)frame_value < clip->frame_count) {
+            clip->loop_start_frame = (size_t)frame_value;
+        }
+        if (json_get_int64_range(object_start, object_end, "loop_end_frame", &frame_value) && frame_value > 0 &&
+            (size_t)frame_value <= clip->frame_count && (size_t)frame_value > clip->loop_start_frame) {
+            clip->loop_end_frame = (size_t)frame_value;
+        }
         const char *lineage_start = NULL;
         const char *lineage_end = NULL;
         if (json_find_object_range(object_start, object_end, "source_lineage", &lineage_start, &lineage_end)) {
@@ -3626,6 +3755,9 @@ static bool parse_project_manifest(const char *bundle_path, const char *json, Pr
             }
             if (json_get_int64_range(lineage_start, lineage_end, "end_frame", &frame_value) && frame_value >= 0) {
                 clip->source_loop_end_frame = (size_t)frame_value;
+            }
+            if (json_get_int_range(lineage_start, lineage_end, "sample_rate", &int_value) && int_value > 0) {
+                clip->source_sample_rate = int_value;
             }
         }
         entry->midi_channel = 0;
@@ -3651,7 +3783,7 @@ static bool parse_project_manifest(const char *bundle_path, const char *json, Pr
     if (version == 1 && json_find_array_range(json, json_end, "clip_instances", &array_start, &array_end)) {
         cursor = array_start + 1;
         while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
-            char roster_clip_id[32];
+            char roster_clip_id[APP_STABLE_ID_MAX];
             if (!json_get_string_range(object_start, object_end, "roster_clip_id", roster_clip_id, sizeof(roster_clip_id))) continue;
             int roster_index = project_roster_index_by_id(entries, roster_count, roster_clip_id);
             if (roster_index < 0 || entries[roster_index].has_midi_binding) continue;
@@ -3857,9 +3989,51 @@ static void parse_project_surfaces(const char *json, ProjectLoadState *state) {
     const char *end = json + SDL_strlen(json);
     double value = 0.0;
     bool bool_value = false;
-    if (json_get_double_range(json, end, "gain", &value)) {
+    const char *object_start = NULL;
+    const char *object_end = NULL;
+    if (json_find_object_range(json, end, "master", &object_start, &object_end) &&
+        json_get_double_range(object_start, object_end, "gain", &value)) {
         state->master_gain = (float)value;
         state->has_master_gain = true;
+    }
+    if (json_find_object_range(json, end, "timeline_surface", &object_start, &object_end)) {
+        if (json_get_double_range(object_start, object_end, "tape_speed", &value)) {
+            state->timeline.tape_speed = (float)clamp_double(value, TIMELINE_TAPE_SPEED_MIN, TIMELINE_TAPE_SPEED_MAX);
+        }
+        const char *range_start = NULL;
+        const char *range_end = NULL;
+        if (json_find_object_range(object_start, object_end, "play_range", &range_start, &range_end)) {
+            int64_t tick_value = 0;
+            if (json_get_int64_range(range_start, range_end, "start_tick", &tick_value)) {
+                state->timeline.play_range_start_tick = clamp_i64(tick_value, 0, state->timeline.length_ticks);
+            }
+            if (json_get_int64_range(range_start, range_end, "end_tick", &tick_value)) {
+                state->timeline.play_range_end_tick = clamp_i64(tick_value, state->timeline.play_range_start_tick, state->timeline.length_ticks);
+            }
+            if (json_get_bool_range(range_start, range_end, "loop_enabled", &bool_value)) {
+                state->timeline.play_range_loop_enabled = bool_value;
+            }
+            state->timeline.play_range_custom =
+                state->timeline.play_range_start_tick > 0 ||
+                state->timeline.play_range_end_tick < state->timeline.length_ticks ||
+                state->timeline.play_range_loop_enabled;
+        }
+    }
+    const char *array_start = NULL;
+    const char *array_end = NULL;
+    if (json_find_array_range(json, end, "lanes", &array_start, &array_end)) {
+        const char *cursor = array_start + 1;
+        while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
+            int lane_number = 0;
+            if (!json_get_int_range(object_start, object_end, "lane", &lane_number)) continue;
+            int lane_index = lane_number - 1;
+            if (lane_index < 0 || lane_index >= TIMELINE_MAX_LANES) continue;
+            TimelineLane *lane = &state->timeline.lanes[lane_index];
+            int int_value = 0;
+            if (json_get_bool_range(object_start, object_end, "muted", &bool_value)) lane->muted = bool_value;
+            if (json_get_double_range(object_start, object_end, "gain", &value)) lane->gain = (float)clamp_double(value, 0.0, 2.0);
+            if (json_get_int_range(object_start, object_end, "palette", &int_value)) lane->palette_index = clamp_int(int_value, 0, lane_palette_count() - 1);
+        }
     }
     if (json_get_bool_range(json, end, "master.fx.reverb_1.enabled", &bool_value)) {
         state->reverb_params.enabled = bool_value;
@@ -4000,6 +4174,8 @@ bool app_load_project_bundle(App *app, const char *bundle_path) {
     }
     app->roster_clip_count = staged.roster_clip_count;
     app->timeline = staged.timeline;
+    SDL_strlcpy(app->project_id, staged.project_id, sizeof(app->project_id));
+    SDL_strlcpy(app->project_name, staged.project_name, sizeof(app->project_name));
     app->timeline.playing = false;
     app->transport.playing = false;
     app->selected_roster_clip = staged.roster_clip_count > 0 ? 0 : -1;

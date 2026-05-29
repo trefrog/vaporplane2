@@ -14,6 +14,7 @@
 #define APP_MIN_CAPTURE_FRAMES 64
 #define APP_MAX_CAPTURE_FRAMES (48000 * 60 * 5)
 #define APP_MAX_CAPTURE_BYTES (64u * 1024u * 1024u)
+#define APP_STABLE_ID_MAX 48
 #define TIMELINE_MIN_BPM 30.0
 #define TIMELINE_MAX_BPM 300.0
 #define TIMELINE_DEFAULT_BPM 120.0
@@ -22,10 +23,15 @@
 #define TIMELINE_TAPE_SPEED_MAX 4.0f
 
 typedef struct {
+    char sample_id[APP_STABLE_ID_MAX];
+    char roster_clip_id[APP_STABLE_ID_MAX];
     char name[APP_ROSTER_CLIP_NAME_MAX];
     char source_path[CLIP_MAX_PATH];
     size_t source_loop_start_frame;
     size_t source_loop_end_frame;
+    int source_sample_rate;
+    size_t loop_start_frame;
+    size_t loop_end_frame;
     int sample_rate;
     int channels;
     size_t frame_count;

@@ -22,6 +22,7 @@
 - Timeline sequencing uses 8 lanes with same-lane overlap blocking and cross-lane overlap allowed.
 - Timeline playback applies per-instance velocity and shows a compact master output meter/clipping indicator.
 - Timeline Project menu can save a self-contained `.vapor/` bundle under `exports/projects/` and load the newest saved bundle from that folder.
+- Project bundle format v3 preserves stable project/sample/roster IDs, MIDI bindings, roster loop anchors, tape speed, play range, lane mute/gain/palette, Master gain, and `Reverb 1` parameters.
 - Master Mix is a third main view for the master bus meter and future reverb, FX chain, and MIDI/control sections.
 - Master audio owns a fixed-size built-in FX chain with one real built-in unit, `Reverb 1`, disabled by default.
 - `Reverb 1` defaults to a more assertive long-room character when enabled, with depth/rate modulation available to soften metallic ringing; startup playback remains dry.
@@ -211,7 +212,7 @@ cmake --build build
 ## Known limitations
 - Gamepad support is first-pass only and needs tuning against real hardware.
 - Loop playback has a very short boundary crossfade, but it still needs tuning by ear.
-- Timeline has no mouse drag/drop editing, clip stretching, tempo ramps, MIDI clips, SMF save/load, project persistence, routing, effects, pan, sends, solo, or mixer UI.
+- Timeline has no mouse drag/drop editing, clip stretching, tempo ramps, MIDI clip editing, overwrite save, project file picker, routing, lane FX DSP, pan, sends, solo, or mixer UI.
 
 ## Next
 - Tune gamepad editing feel and add unobtrusive UX hints.

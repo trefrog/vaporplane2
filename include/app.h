@@ -139,6 +139,8 @@ typedef struct App {
     char roster_export_dir[CLIP_MAX_PATH];
     bool roster_export_dir_is_base_path;
     char status_text[160];
+    char project_id[APP_STABLE_ID_MAX];
+    char project_name[APP_SAMPLE_NAME_MAX];
 
     bool tempo_lock_mode;
     double transport_bpm;
