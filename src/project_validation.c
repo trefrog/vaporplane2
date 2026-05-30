@@ -7,7 +7,6 @@
 
 #define PROJECT_VALIDATION_MAX_SAMPLES 128
 #define PROJECT_VALIDATION_ID_MAX 128
-#define VAPORPLANE_PROJECT_PREVIEW_FILENAME "preview.wav"
 
 typedef struct {
     char sample_id[PROJECT_VALIDATION_ID_MAX];

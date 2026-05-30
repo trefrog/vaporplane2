@@ -92,6 +92,44 @@ static bool mix_preview(AudioEngine *a, float *left, float *right) {
     return true;
 }
 
+static bool mix_file_preview(AudioEngine *a, float *left, float *right) {
+    if(!a->file_preview_active || !a->file_preview_clip) return false;
+    const AudioClip *clip = a->file_preview_clip;
+    if(!clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0) {
+        a->file_preview_active = false;
+        a->file_preview_clip = NULL;
+        a->file_preview_frame = 0.0;
+        return false;
+    }
+    if(a->file_preview_frame >= (double)clip->frame_count) {
+        a->file_preview_active = false;
+        a->file_preview_clip = NULL;
+        a->file_preview_frame = 0.0;
+        return false;
+    }
+
+    size_t i0 = (size_t)a->file_preview_frame;
+    size_t i1 = i0 + 1 < clip->frame_count ? i0 + 1 : i0;
+    double frac = a->file_preview_frame - (double)i0;
+    int right_channel = clip->channels > 1 ? 1 : 0;
+    float l0 = clip->samples[i0 * (size_t)clip->channels];
+    float l1 = clip->samples[i1 * (size_t)clip->channels];
+    float r0 = clip->samples[i0 * (size_t)clip->channels + (size_t)right_channel];
+    float r1 = clip->samples[i1 * (size_t)clip->channels + (size_t)right_channel];
+    *left += (float)((1.0 - frac) * l0 + frac * l1);
+    *right += (float)((1.0 - frac) * r0 + frac * r1);
+
+    double frame_step = a->spec.freq > 0 ? (double)clip->sample_rate / (double)a->spec.freq : 1.0;
+    if(frame_step <= 0.0) frame_step = 1.0;
+    a->file_preview_frame += frame_step;
+    if(a->file_preview_frame >= (double)clip->frame_count) {
+        a->file_preview_active = false;
+        a->file_preview_clip = NULL;
+        a->file_preview_frame = 0.0;
+    }
+    return true;
+}
+
 static double timeline_declik_gain(double elapsed_seconds, double source_duration_seconds, double instance_duration_seconds, int output_rate) {
     double audible_duration = fmin(source_duration_seconds, instance_duration_seconds);
     if(audible_duration <= 0.0) return 0.0;
@@ -744,6 +782,7 @@ static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right
         a->metronome_beat_valid = false;
     }
     if(mix_preview(a, &left, &right)) active_clips++;
+    if(mix_file_preview(a, &left, &right)) active_clips++;
     a->debug_stats.active_clips = active_clips;
     if(a->playback_mode == AUDIO_PLAYBACK_WAVEFORM) transport_update(a->transport, 1.0/(double)a->spec.freq);
     float m = transport_next_metronome_sample(a->transport, a->spec.freq);
@@ -913,6 +952,25 @@ void audio_engine_stop_preview(AudioEngine *a) {
     a->preview_active = false;
     a->preview_roster_clip_index = -1;
     a->preview_frame = 0.0;
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+}
+
+bool audio_engine_preview_file_clip(AudioEngine *a, const AudioClip *clip) {
+    if(!a || !clip || !clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0) return false;
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    a->file_preview_clip = clip;
+    a->file_preview_frame = 0.0;
+    a->file_preview_active = true;
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+    return true;
+}
+
+void audio_engine_stop_file_preview(AudioEngine *a) {
+    if(!a) return;
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    a->file_preview_active = false;
+    a->file_preview_clip = NULL;
+    a->file_preview_frame = 0.0;
     if(a->stream) SDL_UnlockAudioStream(a->stream);
 }
 

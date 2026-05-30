@@ -142,6 +142,9 @@ typedef struct {
     bool preview_active;
     int preview_roster_clip_index;
     double preview_frame;
+    bool file_preview_active;
+    const AudioClip *file_preview_clip;
+    double file_preview_frame;
     float master_gain;
     MasterFxChain master_fx_chain;
     MasterReverbParams master_reverb_target;
@@ -167,6 +170,8 @@ void audio_engine_start_timeline(AudioEngine *a);
 void audio_engine_stop_timeline(AudioEngine *a, bool rewind);
 bool audio_engine_preview_roster_clip(AudioEngine *a, int roster_index);
 void audio_engine_stop_preview(AudioEngine *a);
+bool audio_engine_preview_file_clip(AudioEngine *a, const AudioClip *clip);
+void audio_engine_stop_file_preview(AudioEngine *a);
 void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick);
 bool audio_engine_timeline_is_playing(const AudioEngine *a);
 int64_t audio_engine_get_timeline_playhead_tick(const AudioEngine *a);

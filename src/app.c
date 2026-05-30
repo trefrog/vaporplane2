@@ -754,6 +754,7 @@ static const char *project_menu_item_label(ProjectMenuItem item) {
 }
 
 static bool app_save_project_bundle_default(App *app);
+static void app_project_browser_clear_preview(App *app);
 
 static void timeline_effective_play_range(const MasterTimeline *timeline, int64_t *start, int64_t *end) {
     int64_t length = timeline->length_ticks > 0 ? timeline->length_ticks : 0;
@@ -1783,6 +1784,40 @@ void app_toggle_debug_overlay(App *app) {
             app_set_status(app, "Debug overlay: gamepad + stats");
             break;
     }
+}
+
+bool app_stop_active_audio(App *app) {
+    if (!app) return false;
+
+    bool stopped = false;
+    if (audio_engine_timeline_is_playing(&app->audio)) {
+        audio_engine_stop_timeline(&app->audio, false);
+        sync_transport_from_app(app);
+        stopped = true;
+    }
+    if (app->audio.preview_active) {
+        audio_engine_stop_preview(&app->audio);
+        stopped = true;
+    }
+    if (app->audio.file_preview_active) {
+        app_project_browser_clear_preview(app);
+        stopped = true;
+    }
+    if (app->audio.playback_mode == AUDIO_PLAYBACK_WAVEFORM && app->transport.playing) {
+        app->transport.playing = false;
+        app->transport.metronome_env = 0.0f;
+        stopped = true;
+    }
+
+    if (stopped) {
+        if (app->audio.stream) {
+            SDL_LockAudioStream(app->audio.stream);
+            SDL_ClearAudioStream(app->audio.stream);
+            SDL_UnlockAudioStream(app->audio.stream);
+        }
+        app_set_status(app, "Audio stopped");
+    }
+    return stopped;
 }
 
 void app_toggle_timeline_playback(App *app) {
@@ -2835,6 +2870,37 @@ static void app_ensure_project_identity(App *app, const char *bundle_path) {
     }
 }
 
+static bool write_project_float_wav_buffer(const float *samples, size_t frame_count, const char *path) {
+    if (!samples || frame_count == 0 || !path) return false;
+
+    Uint64 data_size = (Uint64)frame_count * (Uint64)VAPORPLANE_PROJECT_CHANNELS * sizeof(float);
+    if (data_size > 0xffffffffu) return false;
+
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io) return false;
+
+    Uint16 block_align = (Uint16)(VAPORPLANE_PROJECT_CHANNELS * (VAPORPLANE_PROJECT_WAV_BITS_PER_SAMPLE / 8));
+    Uint32 byte_rate = (Uint32)(VAPORPLANE_PROJECT_SAMPLE_RATE * block_align);
+    bool ok = true;
+    ok = ok && write_fourcc(io, "RIFF");
+    ok = ok && SDL_WriteU32LE(io, 36u + (Uint32)data_size);
+    ok = ok && write_fourcc(io, "WAVE");
+    ok = ok && write_fourcc(io, "fmt ");
+    ok = ok && SDL_WriteU32LE(io, 16);
+    ok = ok && SDL_WriteU16LE(io, 3);
+    ok = ok && SDL_WriteU16LE(io, (Uint16)VAPORPLANE_PROJECT_CHANNELS);
+    ok = ok && SDL_WriteU32LE(io, (Uint32)VAPORPLANE_PROJECT_SAMPLE_RATE);
+    ok = ok && SDL_WriteU32LE(io, byte_rate);
+    ok = ok && SDL_WriteU16LE(io, block_align);
+    ok = ok && SDL_WriteU16LE(io, (Uint16)VAPORPLANE_PROJECT_WAV_BITS_PER_SAMPLE);
+    ok = ok && write_fourcc(io, "data");
+    ok = ok && SDL_WriteU32LE(io, (Uint32)data_size);
+    ok = ok && SDL_WriteIO(io, samples, (size_t)data_size) == (size_t)data_size;
+
+    ok = SDL_CloseIO(io) && ok;
+    return ok;
+}
+
 static bool write_project_float_wav(const RosterClip *clip, const char *path) {
     if (!clip || !path || !clip->samples || clip->frame_count == 0 ||
         clip->channels <= 0 || clip->sample_rate <= 0) {
@@ -2868,38 +2934,67 @@ static bool write_project_float_wav(const RosterClip *clip, const char *path) {
         return false;
     }
 
-    Uint64 data_size = (Uint64)converted_len;
-    if (data_size > 0xffffffffu) {
-        SDL_free(converted);
-        return false;
-    }
-
-    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
-    if (!io) {
-        SDL_free(converted);
-        return false;
-    }
-
-    Uint16 block_align = (Uint16)(VAPORPLANE_PROJECT_CHANNELS * (VAPORPLANE_PROJECT_WAV_BITS_PER_SAMPLE / 8));
-    Uint32 byte_rate = (Uint32)(VAPORPLANE_PROJECT_SAMPLE_RATE * block_align);
-    bool ok = true;
-    ok = ok && write_fourcc(io, "RIFF");
-    ok = ok && SDL_WriteU32LE(io, 36u + (Uint32)data_size);
-    ok = ok && write_fourcc(io, "WAVE");
-    ok = ok && write_fourcc(io, "fmt ");
-    ok = ok && SDL_WriteU32LE(io, 16);
-    ok = ok && SDL_WriteU16LE(io, 3);
-    ok = ok && SDL_WriteU16LE(io, (Uint16)VAPORPLANE_PROJECT_CHANNELS);
-    ok = ok && SDL_WriteU32LE(io, (Uint32)VAPORPLANE_PROJECT_SAMPLE_RATE);
-    ok = ok && SDL_WriteU32LE(io, byte_rate);
-    ok = ok && SDL_WriteU16LE(io, block_align);
-    ok = ok && SDL_WriteU16LE(io, (Uint16)VAPORPLANE_PROJECT_WAV_BITS_PER_SAMPLE);
-    ok = ok && write_fourcc(io, "data");
-    ok = ok && SDL_WriteU32LE(io, (Uint32)data_size);
-    ok = ok && SDL_WriteIO(io, converted, (size_t)converted_len) == (size_t)converted_len;
-
-    ok = SDL_CloseIO(io) && ok;
+    size_t frame_count = (size_t)converted_len / (sizeof(float) * VAPORPLANE_PROJECT_CHANNELS);
+    bool ok = write_project_float_wav_buffer((const float *)converted, frame_count, path);
     SDL_free(converted);
+    return ok;
+}
+
+static float roster_clip_sample_at_for_preview(const RosterClip *clip, double frame, int channel, size_t loop_start, size_t loop_end) {
+    if (!clip || !clip->samples || clip->frame_count == 0 || clip->channels <= 0 || loop_end <= loop_start) return 0.0f;
+    double loop_len = (double)(loop_end - loop_start);
+    while (frame < (double)loop_start) frame += loop_len;
+    while (frame >= (double)loop_end) frame -= loop_len;
+    size_t i0 = (size_t)frame;
+    size_t i1 = i0 + 1 < loop_end ? i0 + 1 : loop_start;
+    double frac = frame - (double)i0;
+    int c = channel < clip->channels ? channel : clip->channels - 1;
+    float s0 = clip->samples[i0 * (size_t)clip->channels + (size_t)c];
+    float s1 = clip->samples[i1 * (size_t)clip->channels + (size_t)c];
+    return (float)((1.0 - frac) * s0 + frac * s1);
+}
+
+static bool write_project_preview_wav(const App *app, const char *path) {
+    if (!app || !path) return false;
+    const RosterClip *clip = NULL;
+    for (int i = 0; i < app->roster_clip_count; ++i) {
+        const RosterClip *candidate = &app->roster[i];
+        if (candidate->samples && candidate->frame_count > 0 &&
+            candidate->channels > 0 && candidate->sample_rate > 0) {
+            clip = candidate;
+            break;
+        }
+    }
+    if (!clip) return false;
+
+    size_t loop_start = clip->loop_start_frame;
+    size_t loop_end = clip->loop_end_frame;
+    if (loop_end > clip->frame_count) loop_end = clip->frame_count;
+    if (loop_end <= loop_start + 1) {
+        loop_start = 0;
+        loop_end = clip->frame_count;
+    }
+    if (loop_end <= loop_start + 1) return false;
+
+    const size_t preview_frames = (size_t)VAPORPLANE_PROJECT_SAMPLE_RATE * 7u;
+    float *buffer = (float *)SDL_calloc(preview_frames * VAPORPLANE_PROJECT_CHANNELS, sizeof(float));
+    if (!buffer) return false;
+
+    double source_frame = (double)loop_start;
+    double source_step = (double)clip->sample_rate / (double)VAPORPLANE_PROJECT_SAMPLE_RATE;
+    if (source_step <= 0.0) source_step = 1.0;
+    float gain = app->audio.master_gain;
+    if (gain <= 0.0f) gain = 1.0f;
+    for (size_t frame = 0; frame < preview_frames; ++frame) {
+        buffer[frame * 2] = roster_clip_sample_at_for_preview(clip, source_frame, 0, loop_start, loop_end) * gain;
+        buffer[frame * 2 + 1] = roster_clip_sample_at_for_preview(clip, source_frame, 1, loop_start, loop_end) * gain;
+        source_frame += source_step;
+        double loop_len = (double)(loop_end - loop_start);
+        while (source_frame >= (double)loop_end) source_frame -= loop_len;
+    }
+
+    bool ok = write_project_float_wav_buffer(buffer, preview_frames, path);
+    SDL_free(buffer);
     return ok;
 }
 
@@ -3275,6 +3370,7 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
         if (app) app_set_status(app, "No project path");
         return false;
     }
+    app_project_browser_clear_preview(app);
     if (path_exists_any(bundle_path)) {
         app_set_status(app, "Project bundle already exists");
         return false;
@@ -3308,10 +3404,12 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
 
     char timeline_path[CLIP_MAX_PATH];
     char surfaces_path[CLIP_MAX_PATH];
+    char preview_path[CLIP_MAX_PATH];
     char project_path[CLIP_MAX_PATH];
     char project_tmp_path[CLIP_MAX_PATH];
     path_join(timeline_path, sizeof(timeline_path), bundle_path, VAPORPLANE_PROJECT_TIMELINE_FILENAME);
     path_join(surfaces_path, sizeof(surfaces_path), bundle_path, VAPORPLANE_PROJECT_SURFACES_FILENAME);
+    path_join(preview_path, sizeof(preview_path), bundle_path, VAPORPLANE_PROJECT_PREVIEW_FILENAME);
     path_join(project_path, sizeof(project_path), bundle_path, VAPORPLANE_PROJECT_MANIFEST_FILENAME);
     SDL_snprintf(project_tmp_path, sizeof(project_tmp_path), "%s.tmp", project_path);
 
@@ -3334,7 +3432,12 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
         return false;
     }
 
-    SDL_snprintf(app->status_text, sizeof(app->status_text), "Saved %s", bundle_path);
+    bool preview_ok = write_project_preview_wav(app, preview_path);
+    if (preview_ok) {
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Saved %s", bundle_path);
+    } else {
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Saved %s (preview skipped)", bundle_path);
+    }
     return true;
 }
 
@@ -3388,6 +3491,15 @@ static int compare_project_browser_entries(const void *a, const void *b) {
 
 static bool project_validation_openable(ProjectValidationStatus status) {
     return status == PROJECT_VALIDATION_VALID || status == PROJECT_VALIDATION_WARNING;
+}
+
+static void app_project_browser_clear_preview(App *app) {
+    if (!app) return;
+    audio_engine_stop_file_preview(&app->audio);
+    if (app->project_browser_preview_clip_loaded) {
+        clip_destroy(&app->project_browser_preview_clip);
+        app->project_browser_preview_clip_loaded = false;
+    }
 }
 
 static void app_project_browser_validate_selected(App *app) {
@@ -3458,6 +3570,7 @@ void app_project_browser_open(App *app) {
 
 void app_project_browser_close(App *app) {
     if (!app) return;
+    app_project_browser_clear_preview(app);
     app->project_browser_open = false;
     app_set_status(app, "Project browser closed");
 }
@@ -3490,6 +3603,7 @@ void app_project_browser_open_selected(App *app) {
 
     audio_engine_stop_timeline(&app->audio, false);
     audio_engine_stop_preview(&app->audio);
+    app_project_browser_clear_preview(app);
     if (app_load_project_bundle(app, entry->path)) {
         app->project_browser_open = false;
         app->project_menu_open = false;
@@ -3497,9 +3611,39 @@ void app_project_browser_open_selected(App *app) {
     }
 }
 
-void app_project_browser_preview_unavailable(App *app) {
-    if (!app) return;
-    app_set_status(app, "Preview not implemented");
+void app_project_browser_preview_selected(App *app) {
+    if (!app || !app->project_browser_open) return;
+    if (app->project_browser_count <= 0) {
+        app_set_status(app, "No project selected");
+        return;
+    }
+    app_project_browser_validate_selected(app);
+    ProjectBrowserEntry *entry = &app->project_browser_entries[app->project_browser_selected];
+    ProjectValidationResult *validation = &entry->full_validation;
+    if (!validation->preview_available) {
+        SDL_snprintf(app->status_text, sizeof(app->status_text),
+                     "Preview unavailable: %s",
+                     validation->reason[0] ? validation->reason : "missing preview.wav");
+        return;
+    }
+
+    char preview_path[CLIP_MAX_PATH];
+    path_join(preview_path, sizeof(preview_path), entry->path, VAPORPLANE_PROJECT_PREVIEW_FILENAME);
+    AudioClip next;
+    if (!clip_init_from_wav(&next, preview_path)) {
+        app_set_status(app, "Could not load preview.wav");
+        return;
+    }
+
+    app_project_browser_clear_preview(app);
+    app->project_browser_preview_clip = next;
+    app->project_browser_preview_clip_loaded = true;
+    if (audio_engine_preview_file_clip(&app->audio, &app->project_browser_preview_clip)) {
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Previewing %s", entry->folder_name);
+    } else {
+        app_project_browser_clear_preview(app);
+        app_set_status(app, "Could not play preview.wav");
+    }
 }
 
 typedef struct {
@@ -4248,6 +4392,7 @@ bool app_load_project_bundle(App *app, const char *bundle_path) {
         if (app) app_set_status(app, "No project path");
         return false;
     }
+    app_project_browser_clear_preview(app);
     ProjectValidationResult validation;
     if (!project_validate_bundle(bundle_path, PROJECT_VALIDATION_FULL, &validation) ||
         validation.status == PROJECT_VALIDATION_INVALID ||
@@ -6363,7 +6508,7 @@ static void render_project_browser(App *app) {
     SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 14.0f, "PROJECT BROWSER");
     SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 30.0f, app->project_browser_dir);
     SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 46.0f,
-                        "Up/Down select   Enter/A open   R/Y refresh   X preview later   Esc/B close");
+                        "Up/Down select   Enter/A open   R/Y refresh   X preview   Esc/B close");
     if (app->status_text[0]) {
         SDL_SetRenderDrawColor(app->renderer, 190, 202, 212, 255);
         SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 62.0f, app->status_text);
@@ -6568,6 +6713,7 @@ bool app_init(App *app){
     app->project_browser_count = 0;
     app->project_browser_selected = 0;
     app->project_browser_dir[0] = '\0';
+    app->project_browser_preview_clip_loaded = false;
     app_resolve_roster_export_dir(app);
     app_refresh_sample_list(app);
     clip_init_generated(&app->clip, 48000, 2.0f);
@@ -6682,6 +6828,7 @@ void app_run(App *app){
     }
 }
 void app_shutdown(App *app){
+    app_project_browser_clear_preview(app);
     audio_engine_shutdown(&app->audio);
     clip_destroy(&app->clip);
     for (int i = 0; i < app->roster_clip_count; ++i) roster_clip_destroy(&app->roster[i]);

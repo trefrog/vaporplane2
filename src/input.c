@@ -454,6 +454,7 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
         case SDLK_ESCAPE:
             if(app->timeline_play_range_adjusting) app_timeline_cancel_focus(app);
             else if(app->timeline_edit_mode != TIMELINE_EDIT_NONE) app_timeline_cancel_focus(app);
+            else if(app_stop_active_audio(app)) return true;
             else app_project_menu_open(app);
             return true;
         case SDLK_RETURN: app_timeline_activate_focus(app); return true;
@@ -626,7 +627,7 @@ bool input_handle_event(App *app, const SDL_Event *e){
             case SDLK_DOWN: app_project_browser_move(app, 1); break;
             case SDLK_RETURN: app_project_browser_open_selected(app); break;
             case SDLK_R: app_project_browser_refresh(app); break;
-            case SDLK_X: app_project_browser_preview_unavailable(app); break;
+            case SDLK_X: app_project_browser_preview_selected(app); break;
             default: break;
         }
         return true;
@@ -719,7 +720,7 @@ void input_update_gamepad(App *app, double dt){
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_EAST) ||
            button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_START)) app_project_browser_close(app);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_NORTH)) app_project_browser_refresh(app);
-        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_WEST)) app_project_browser_preview_unavailable(app);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_WEST)) app_project_browser_preview_selected(app);
         return;
     }
 
