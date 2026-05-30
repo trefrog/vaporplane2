@@ -353,11 +353,44 @@ Do not implement preview marker UI yet.
 
 ## Rendering Scope
 
-Start conservative:
+Start conservative.
 
-- It is acceptable for V1 preview rendering to be dry/basic if that avoids destabilizing the real-time engine.
-- If existing offline render plumbing can include tape speed, master gain, and FX safely, include them.
-- If not, document the limitation in code/status text and keep the file structurally valid.
+Preferred V1:
+- Offline render from the first timeline span with clip activity.
+- Include tape-speed/timeline timing if the existing render helpers make that safe.
+- Include master gain if simple.
+- Include FX only if already available in an offline-safe path.
+
+Fallback V1:
+- Render the first roster clip directly into `preview.wav`.
+
+Allowed failure:
+- If neither path is clean, skip `preview.wav` and report a warning. The project save may still succeed because `preview.wav` is non-authoritative.
+
+## Preview Generation Mechanism
+
+Preview rendering should be offline/silent, not real-time playback.
+
+The save path should render into an intermediate stereo float buffer as fast as the CPU allows, then write that buffer to `preview.wav`.
+
+Do not:
+- start timeline playback
+- depend on SDL audio callback timing
+- wait 7 seconds of wall-clock time
+- record from the output device
+- mutate current transport/playback state
+- require the project browser to load a hidden timeline
+
+Suggested flow:
+
+1. Take a save/export snapshot of roster clips, timeline clip instances, tempo map, and surfaces/master state.
+2. Choose a preview start point.
+3. Allocate or reuse a temporary offline render buffer for approximately 7 seconds at 48000 Hz stereo float.
+4. Render timeline/sample audio into that buffer using offline render helpers.
+5. Apply master gain and any safe currently implemented surfaces/FX if clean.
+6. Write the buffer as `preview.wav`.
+
+If no clean offline timeline renderer exists yet, V1 may render a fallback preview from the first roster clip only, or skip preview generation with a warning. Do not route real-time audio just to create the preview.
 
 ## Implementation Rules
 
