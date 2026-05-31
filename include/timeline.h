@@ -36,6 +36,7 @@ typedef struct {
     int channels;
     size_t frame_count;
     float *samples;
+    bool tempo_calibrated;
     double source_bpm;
     int beats_per_bar;
     int beat_unit;

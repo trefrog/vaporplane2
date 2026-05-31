@@ -91,6 +91,7 @@ typedef enum {
     TIMELINE_CONTEXT_ITEM_MARK_TEMPO,
     TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO,
     TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE,
+    TIMELINE_CONTEXT_ITEM_APPLY_LANE_VELOCITY,
     TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM,
     TIMELINE_CONTEXT_ITEM_RENAME_ROSTER,
     TIMELINE_CONTEXT_ITEM_PLACE_FREE,
@@ -124,6 +125,13 @@ typedef enum {
 } RosterCommitMenuItem;
 
 typedef enum {
+    WAVEFORM_FRAME_GRIP_ANCHOR_NONE,
+    WAVEFORM_FRAME_GRIP_ANCHOR_DOWNBEAT,
+    WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_START,
+    WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_END
+} WaveformFrameGripAnchor;
+
+typedef enum {
     APP_TEXT_ENTRY_DISPLAY_NAME,
     APP_TEXT_ENTRY_FILENAME_SAFE,
     APP_TEXT_ENTRY_SEARCH_FILTER
@@ -134,7 +142,8 @@ typedef enum {
     APP_TEXT_ENTRY_ACTION_SAVE_AS_PROJECT,
     APP_TEXT_ENTRY_ACTION_EXPORT_TIMELINE_WAV,
     APP_TEXT_ENTRY_ACTION_EXPORT_ROSTER_WAV,
-    APP_TEXT_ENTRY_ACTION_RENAME_ROSTER_CLIP
+    APP_TEXT_ENTRY_ACTION_RENAME_ROSTER_CLIP,
+    APP_TEXT_ENTRY_ACTION_APPLY_LANE_VELOCITY
 } AppTextEntryAction;
 
 typedef struct App {
@@ -173,6 +182,7 @@ typedef struct App {
     int waveform_frame_grip_snap_index;
     double waveform_frame_grip_snap_beats;
     double waveform_frame_grip_l2_seconds;
+    WaveformFrameGripAnchor waveform_frame_grip_anchor;
     bool controls_legend_open;
 
     SampleEntry samples[APP_MAX_SAMPLES];
@@ -205,6 +215,7 @@ typedef struct App {
     int text_entry_key_col;
     bool text_entry_uppercase;
     int text_entry_target_roster_index;
+    int text_entry_target_lane_index;
 
     bool tempo_lock_mode;
     double transport_bpm;

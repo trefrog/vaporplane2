@@ -87,17 +87,6 @@ static size_t target_visible_frame_count(App *app) {
     return ef > sf ? ef - sf : 1;
 }
 
-static bool waveform_frame_grip_available(const App *app) {
-    return app &&
-           app->view_mode == APP_VIEW_WAVEFORM &&
-           app->clip.clip_tempo_locked &&
-           !app->tempo_lock_mode &&
-           app->clip.samples &&
-           app->clip.frame_count > 1 &&
-           app->clip.sample_rate > 0 &&
-           app->clip.tempo_lock.bpm > 0.0;
-}
-
 static void set_view_to_exact_frames(App *app, size_t left, size_t right) {
     if(!app || app->clip.frame_count < 1) return;
     if(left >= app->clip.frame_count) left = app->clip.frame_count - 1;
@@ -112,6 +101,87 @@ static void set_view_to_exact_frames(App *app, size_t left, size_t right) {
     app->view.view_center = center;
     app->view.view_span = span;
     clamp_view_target(app);
+}
+
+static bool waveform_has_valid_loop_selection(const App *app) {
+    return app &&
+           app->clip.frame_count > 1 &&
+           app->clip.loop_end_frame > app->clip.loop_start_frame &&
+           app->clip.loop_start_frame < app->clip.frame_count &&
+           app->clip.loop_end_frame <= app->clip.frame_count;
+}
+
+static bool waveform_frame_grip_has_trusted_tempo(const App *app) {
+    return app &&
+           app->clip.clip_tempo_locked &&
+           app->clip.tempo_lock.bpm > 0.0 &&
+           app->clip.tempo_lock.downbeat_frame < app->clip.frame_count;
+}
+
+static bool waveform_frame_grip_anchor_valid(const App *app, WaveformFrameGripAnchor anchor) {
+    if(!app || app->clip.frame_count < 2) return false;
+    switch(anchor) {
+        case WAVEFORM_FRAME_GRIP_ANCHOR_DOWNBEAT:
+            return waveform_frame_grip_has_trusted_tempo(app);
+        case WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_START:
+        case WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_END:
+            return waveform_has_valid_loop_selection(app);
+        case WAVEFORM_FRAME_GRIP_ANCHOR_NONE:
+        default:
+            return false;
+    }
+}
+
+static size_t waveform_frame_grip_anchor_frame(const App *app, WaveformFrameGripAnchor anchor) {
+    if(!app || app->clip.frame_count < 1) return 0;
+    size_t frame = 0;
+    switch(anchor) {
+        case WAVEFORM_FRAME_GRIP_ANCHOR_DOWNBEAT:
+            frame = app->clip.tempo_lock.downbeat_frame;
+            break;
+        case WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_START:
+            frame = app->clip.loop_start_frame;
+            break;
+        case WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_END:
+            frame = app->clip.loop_end_frame;
+            break;
+        case WAVEFORM_FRAME_GRIP_ANCHOR_NONE:
+        default:
+            frame = 0;
+            break;
+    }
+    if(frame >= app->clip.frame_count) frame = app->clip.frame_count - 1;
+    return frame;
+}
+
+static const char *waveform_frame_grip_anchor_label(WaveformFrameGripAnchor anchor) {
+    switch(anchor) {
+        case WAVEFORM_FRAME_GRIP_ANCHOR_DOWNBEAT: return "DB";
+        case WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_START: return "LS";
+        case WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_END: return "LE";
+        case WAVEFORM_FRAME_GRIP_ANCHOR_NONE:
+        default: return "--";
+    }
+}
+
+static WaveformFrameGripAnchor waveform_frame_grip_default_anchor(const App *app) {
+    if(waveform_frame_grip_anchor_valid(app, WAVEFORM_FRAME_GRIP_ANCHOR_DOWNBEAT)) {
+        return WAVEFORM_FRAME_GRIP_ANCHOR_DOWNBEAT;
+    }
+    if(waveform_frame_grip_anchor_valid(app, WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_START)) {
+        return WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_START;
+    }
+    return WAVEFORM_FRAME_GRIP_ANCHOR_NONE;
+}
+
+static bool waveform_frame_grip_available(const App *app) {
+    return app &&
+           app->view_mode == APP_VIEW_WAVEFORM &&
+           !app->tempo_lock_mode &&
+           app->clip.samples &&
+           app->clip.frame_count > 1 &&
+           app->clip.sample_rate > 0 &&
+           waveform_frame_grip_default_anchor(app) != WAVEFORM_FRAME_GRIP_ANCHOR_NONE;
 }
 
 static void waveform_frame_grip_set_right(App *app, size_t right, bool clear_snap) {
@@ -130,25 +200,38 @@ static void waveform_frame_grip_set_right(App *app, size_t right, bool clear_sna
     set_view_to_exact_frames(app, left, right);
 }
 
-static void waveform_frame_grip_begin(App *app) {
-    size_t left = app->clip.loop_start_frame;
-    if(left >= app->clip.frame_count) left = app->clip.frame_count - 1;
+static bool waveform_frame_grip_set_anchor(App *app, WaveformFrameGripAnchor anchor) {
+    if(!waveform_frame_grip_anchor_valid(app, anchor)) return false;
     size_t length = target_visible_frame_count(app);
+    if(app->waveform_frame_grip_exact_valid &&
+       app->waveform_frame_grip_right_frame > app->waveform_frame_grip_left_frame) {
+        length = app->waveform_frame_grip_right_frame - app->waveform_frame_grip_left_frame;
+    }
     if(length < 1) length = 1;
+    size_t left = waveform_frame_grip_anchor_frame(app, anchor);
     size_t right = left + length;
     if(right > app->clip.frame_count) right = app->clip.frame_count;
     if(right <= left) right = left + 1 <= app->clip.frame_count ? left + 1 : app->clip.frame_count;
     app->waveform_frame_grip_active = true;
+    app->waveform_frame_grip_anchor = anchor;
     app->waveform_frame_grip_snap_active = false;
-    app->waveform_frame_grip_snap_index = -1;
-    app->waveform_frame_grip_snap_beats = 0.0;
     app->waveform_frame_grip_left_frame = left;
     waveform_frame_grip_set_right(app, right, true);
-    SDL_strlcpy(app->status_text, "FRAME GRIP", sizeof(app->status_text));
+    SDL_snprintf(app->status_text, sizeof(app->status_text),
+                 "FRAME GRIP %s", waveform_frame_grip_anchor_label(anchor));
+    return true;
+}
+
+static void waveform_frame_grip_begin(App *app) {
+    WaveformFrameGripAnchor anchor = waveform_frame_grip_default_anchor(app);
+    if(anchor == WAVEFORM_FRAME_GRIP_ANCHOR_NONE ||
+       !waveform_frame_grip_set_anchor(app, anchor)) {
+        app_clear_waveform_frame_grip(app);
+    }
 }
 
 static double waveform_frame_grip_frames_per_beat(const App *app) {
-    if(!app || app->clip.sample_rate <= 0 || app->clip.tempo_lock.bpm <= 0.0) return 0.0;
+    if(!waveform_frame_grip_has_trusted_tempo(app) || app->clip.sample_rate <= 0) return 0.0;
     return (60.0 / app->clip.tempo_lock.bpm) * (double)app->clip.sample_rate;
 }
 
@@ -224,10 +307,42 @@ static void waveform_frame_apply_snap_index(App *app, int index) {
                  "SNAP FRAME: %.0f beats", beats);
 }
 
+static void waveform_frame_grip_cycle_anchor(App *app, int direction) {
+    static const WaveformFrameGripAnchor anchors[] = {
+        WAVEFORM_FRAME_GRIP_ANCHOR_DOWNBEAT,
+        WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_START,
+        WAVEFORM_FRAME_GRIP_ANCHOR_LOOP_END
+    };
+    int count = (int)(sizeof(anchors) / sizeof(anchors[0]));
+    int start = 0;
+    for(int i = 0; i < count; ++i) {
+        if(anchors[i] == app->waveform_frame_grip_anchor) {
+            start = i;
+            break;
+        }
+    }
+    for(int step = 1; step <= count; ++step) {
+        int index = (start + direction * step) % count;
+        if(index < 0) index += count;
+        if(waveform_frame_grip_set_anchor(app, anchors[index])) return;
+    }
+}
+
 static void waveform_frame_grip_update(App *app, double ly, double dt, bool r2_shift) {
     if(!app->waveform_frame_grip_active) waveform_frame_grip_begin(app);
+    if(!app->waveform_frame_grip_active) return;
 
     if(r2_shift) {
+        if(!waveform_frame_grip_has_trusted_tempo(app)) {
+            app->waveform_frame_grip_snap_active = false;
+            app->waveform_frame_grip_snap_index = -1;
+            app->waveform_frame_grip_snap_beats = 0.0;
+            SDL_strlcpy(app->status_text, "snap: no lock", sizeof(app->status_text));
+            set_view_to_exact_frames(app,
+                                     app->waveform_frame_grip_left_frame,
+                                     app->waveform_frame_grip_right_frame);
+            return;
+        }
         if(!app->waveform_frame_grip_snap_active) {
             app->waveform_frame_grip_snap_active = true;
             int index = waveform_frame_nearest_snap_index(app);
@@ -243,20 +358,20 @@ static void waveform_frame_grip_update(App *app, double ly, double dt, bool r2_s
     }
 
     app->waveform_frame_grip_snap_active = false;
+    if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) {
+        waveform_frame_grip_cycle_anchor(app, -1);
+        return;
+    }
+    if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
+        waveform_frame_grip_cycle_anchor(app, 1);
+        return;
+    }
     size_t left = app->waveform_frame_grip_left_frame;
     size_t right = app->waveform_frame_grip_right_frame;
     double length = right > left ? (double)(right - left) : 1.0;
     bool changed = false;
     if(fabs(ly) > 0.0) {
         length += ly * length * dt * 1.4;
-        changed = true;
-    }
-    if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) {
-        length *= 1.0 - fmin(0.9, dt * 1.8);
-        changed = true;
-    }
-    if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
-        length *= 1.0 + dt * 1.8;
         changed = true;
     }
     long dpad_step = (long)(length * 0.1 * dt);
@@ -1106,6 +1221,7 @@ void input_update_gamepad(App *app, double dt){
         if(app->waveform_frame_grip_active) {
             app->waveform_frame_grip_active = false;
             app->waveform_frame_grip_snap_active = false;
+            app->waveform_frame_grip_anchor = WAVEFORM_FRAME_GRIP_ANCHOR_NONE;
             app->waveform_frame_grip_l2_seconds = 0.0;
             SDL_strlcpy(app->status_text, "Frame grip ready: R2+South commits", sizeof(app->status_text));
         } else if(!l2_shift) {
