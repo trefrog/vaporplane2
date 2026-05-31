@@ -620,6 +620,101 @@ static void decay_lane_monitors(AudioEngine *a) {
     }
 }
 
+static bool roster_clip_loop_bounds(const RosterClip *clip, size_t *loop_start, size_t *loop_end) {
+    if(!clip || !clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0 || clip->channels <= 0) return false;
+    size_t start = clip->loop_start_frame;
+    size_t end = clip->loop_end_frame;
+    if(end > clip->frame_count) end = clip->frame_count;
+    if(end <= start + 1) {
+        start = 0;
+        end = clip->frame_count;
+    }
+    if(end <= start + 1) return false;
+    if(loop_start) *loop_start = start;
+    if(loop_end) *loop_end = end;
+    return true;
+}
+
+static float roster_sample_at_looped(const RosterClip *clip, double frame, int channel, size_t loop_start, size_t loop_end) {
+    if(!clip || !clip->samples || loop_end <= loop_start) return 0.0f;
+    double loop_len = (double)(loop_end - loop_start);
+    while(frame < (double)loop_start) frame += loop_len;
+    while(frame >= (double)loop_end) frame -= loop_len;
+
+    size_t i0 = (size_t)frame;
+    size_t i1 = i0 + 1 < loop_end ? i0 + 1 : loop_start;
+    double frac = frame - (double)i0;
+    int c = channel < clip->channels ? channel : clip->channels - 1;
+    float s0 = clip->samples[i0 * (size_t)clip->channels + (size_t)c];
+    float s1 = clip->samples[i1 * (size_t)clip->channels + (size_t)c];
+    return (float)((1.0 - frac) * s0 + frac * s1);
+}
+
+static double timeline_tick_step_for_output_rate(const MasterTimeline *timeline, double playhead_tick, int output_rate) {
+    if(!timeline || output_rate <= 0) return 0.0;
+    double ticks_per_second = timeline_ticks_per_second_at_tick(timeline, playhead_tick) *
+                              (double)timeline_effective_tape_speed(timeline);
+    return ticks_per_second / (double)output_rate;
+}
+
+static int mix_timeline_frame_core(const MasterTimeline *timeline,
+                                   const RosterClip *roster,
+                                   int roster_count,
+                                   double playhead_tick,
+                                   int64_t range_start_tick,
+                                   int64_t range_end_tick,
+                                   int output_rate,
+                                   float *left,
+                                   float *right,
+                                   float *lane_left,
+                                   float *lane_right) {
+    if(!timeline || !roster || roster_count <= 0 || range_end_tick <= range_start_tick ||
+       timeline->ticks_per_beat <= 0 || !left || !right) {
+        return 0;
+    }
+    int active_count = 0;
+    for(int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        const TimelineLane *lane = &timeline->lanes[lane_index];
+        float lane_l = 0.0f;
+        float lane_r = 0.0f;
+        if(!lane->muted) {
+            float lane_gain = lane->gain > 0.0f ? lane->gain : 1.0f;
+            for(int i = 0; i < lane->instance_count; ++i) {
+                const TimelineInstance *instance = &lane->instances[i];
+                if(instance->roster_clip_index < 0 || instance->roster_clip_index >= roster_count) continue;
+                if(instance->duration_ticks <= 0) continue;
+                double instance_start = (double)instance->start_tick;
+                double instance_end = (double)(instance->start_tick + instance->duration_ticks);
+                if(playhead_tick < instance_start || playhead_tick >= instance_end) continue;
+
+                const RosterClip *clip = &roster[instance->roster_clip_index];
+                size_t loop_start = 0;
+                size_t loop_end = 0;
+                if(!roster_clip_loop_bounds(clip, &loop_start, &loop_end)) continue;
+                double elapsed_seconds = timeline_seconds_between_ticks(timeline, instance_start, playhead_tick);
+                double instance_duration_seconds = timeline_seconds_between_ticks(timeline, instance_start, instance_end);
+                double source_frame = (double)loop_start + elapsed_seconds * (double)clip->sample_rate;
+                double gain = timeline_declik_gain(elapsed_seconds, instance_duration_seconds, instance_duration_seconds, output_rate);
+                double range_elapsed_seconds = timeline_seconds_between_ticks(timeline, (double)range_start_tick, playhead_tick);
+                double range_duration_seconds = timeline_seconds_between_ticks(timeline, (double)range_start_tick, (double)range_end_tick);
+                double range_gain = timeline_declik_gain(range_elapsed_seconds, range_duration_seconds, range_duration_seconds, output_rate);
+                if(range_gain < gain) gain = range_gain;
+                if(gain <= 0.0) continue;
+
+                float instance_gain = velocity_to_gain(instance->midi_velocity) * lane_gain * (float)gain;
+                lane_l += roster_sample_at_looped(clip, source_frame, 0, loop_start, loop_end) * instance_gain;
+                lane_r += roster_sample_at_looped(clip, source_frame, 1, loop_start, loop_end) * instance_gain;
+                active_count++;
+            }
+        }
+        if(lane_left) lane_left[lane_index] = lane_l;
+        if(lane_right) lane_right[lane_index] = lane_r;
+        *left += lane_l;
+        *right += lane_r;
+    }
+    return active_count;
+}
+
 static int mix_timeline(AudioEngine *a, float *left, float *right) {
     MasterTimeline *timeline = a->timeline;
     if(!timeline || !a->roster || !a->roster_clip_count || !timeline->playing ||
@@ -647,53 +742,27 @@ static int mix_timeline(AudioEngine *a, float *left, float *right) {
         a->metronome_beat_valid = false;
     }
 
-    double ticks_per_second = timeline_ticks_per_second_at_tick(timeline, a->timeline_playhead_tick) *
-                              (double)timeline_effective_tape_speed(timeline);
-    double tick_step = ticks_per_second / (double)a->spec.freq;
+    double tick_step = timeline_tick_step_for_output_rate(timeline, a->timeline_playhead_tick, a->spec.freq);
     if(tick_step <= 0.0) return 0;
 
     sync_transport_to_timeline(a);
     update_timeline_metronome(a, a->timeline_playhead_tick, tick_step);
 
-    int roster_count = *a->roster_clip_count;
-    int active_count = 0;
     float lane_left[TIMELINE_MAX_LANES] = {0};
     float lane_right[TIMELINE_MAX_LANES] = {0};
+    int active_count = mix_timeline_frame_core(timeline,
+                                               a->roster,
+                                               *a->roster_clip_count,
+                                               a->timeline_playhead_tick,
+                                               range_start_tick,
+                                               range_end_tick,
+                                               a->spec.freq,
+                                               left,
+                                               right,
+                                               lane_left,
+                                               lane_right);
     for(int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
-        const TimelineLane *lane = &timeline->lanes[lane_index];
-        if(!lane->muted) {
-            float lane_gain = lane->gain > 0.0f ? lane->gain : 1.0f;
-            for(int i = 0; i < lane->instance_count; ++i) {
-                const TimelineInstance *instance = &lane->instances[i];
-                if(instance->roster_clip_index < 0 || instance->roster_clip_index >= roster_count) continue;
-                if(instance->duration_ticks <= 0) continue;
-                double instance_start = (double)instance->start_tick;
-                double instance_end = (double)(instance->start_tick + instance->duration_ticks);
-                if(a->timeline_playhead_tick < instance_start || a->timeline_playhead_tick >= instance_end) continue;
-
-                const RosterClip *clip = &a->roster[instance->roster_clip_index];
-                if(!clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0) continue;
-                double elapsed_seconds = timeline_seconds_between_ticks(timeline, instance_start, a->timeline_playhead_tick);
-                double source_frame = elapsed_seconds * (double)clip->sample_rate;
-                if(source_frame >= (double)clip->frame_count) continue;
-                double source_duration_seconds = (double)clip->frame_count / (double)clip->sample_rate;
-                double instance_duration_seconds = timeline_seconds_between_ticks(timeline, instance_start, instance_end);
-                double gain = timeline_declik_gain(elapsed_seconds, source_duration_seconds, instance_duration_seconds, a->spec.freq);
-                double range_elapsed_seconds = timeline_seconds_between_ticks(timeline, (double)range_start_tick, a->timeline_playhead_tick);
-                double range_duration_seconds = timeline_seconds_between_ticks(timeline, (double)range_start_tick, (double)range_end_tick);
-                double range_gain = timeline_declik_gain(range_elapsed_seconds, range_duration_seconds, range_duration_seconds, a->spec.freq);
-                if(range_gain < gain) gain = range_gain;
-                if(gain <= 0.0) continue;
-
-                float instance_gain = velocity_to_gain(instance->midi_velocity) * lane_gain * (float)gain;
-                lane_left[lane_index] += roster_sample_at(clip, source_frame, 0) * instance_gain;
-                lane_right[lane_index] += roster_sample_at(clip, source_frame, 1) * instance_gain;
-                active_count++;
-            }
-        }
         update_lane_monitor(a, lane_index, lane_left[lane_index], lane_right[lane_index]);
-        *left += lane_left[lane_index];
-        *right += lane_right[lane_index];
     }
 
     a->timeline_playhead_tick += tick_step;
@@ -716,6 +785,167 @@ static int mix_timeline(AudioEngine *a, float *left, float *right) {
         timeline->playhead_tick = (int64_t)floor(a->timeline_playhead_tick);
     }
     return active_count;
+}
+
+void audio_timeline_render_state_init(AudioTimelineRenderState *state,
+                                      int64_t range_start_tick,
+                                      int64_t range_end_tick) {
+    if(!state) return;
+    state->playhead_tick = (double)range_start_tick;
+    state->range_start_tick = range_start_tick;
+    state->range_end_tick = range_end_tick;
+    state->finished = range_end_tick <= range_start_tick;
+}
+
+void audio_engine_init_offline_timeline_render(AudioEngine *offline,
+                                               const AudioEngine *source,
+                                               RosterClip *roster,
+                                               int *roster_clip_count,
+                                               MasterTimeline *timeline,
+                                               int sample_rate) {
+    if(!offline) return;
+    memset(offline, 0, sizeof(*offline));
+    offline->spec.format = SDL_AUDIO_F32;
+    offline->spec.channels = 2;
+    offline->spec.freq = sample_rate > 0 ? sample_rate : 48000;
+    offline->stream = NULL;
+    offline->clip = NULL;
+    offline->transport = NULL;
+    offline->roster = roster;
+    offline->roster_clip_count = roster_clip_count;
+    offline->timeline = timeline;
+    offline->playback_mode = AUDIO_PLAYBACK_TIMELINE;
+    offline->preview_active = false;
+    offline->preview_roster_clip_index = -1;
+    offline->file_preview_active = false;
+    offline->file_preview_clip = NULL;
+    offline->master_gain = source ? source->master_gain : 1.0f;
+    if(source) {
+        offline->master_fx_chain = source->master_fx_chain;
+        offline->master_reverb_target = source->master_reverb_target;
+    } else {
+        master_fx_chain_init(&offline->master_fx_chain);
+        offline->master_reverb_target = master_reverb_default_params();
+    }
+    offline->master_reverb_current = offline->master_reverb_target;
+    memset(&offline->master_reverb_state, 0, sizeof(offline->master_reverb_state));
+    offline->master_reverb_state.enabled_amount = offline->master_reverb_target.enabled ? 1.0f : 0.0f;
+    master_reverb_update_derived(offline);
+    offline->master_reverb_state.pre_delay_samples = offline->master_reverb_state.target_pre_delay_samples;
+    offline->master_reverb_state.low_cut_coeff = offline->master_reverb_state.target_low_cut_coeff;
+    offline->master_reverb_state.high_cut_coeff = offline->master_reverb_state.target_high_cut_coeff;
+    offline->master_reverb_state.damping_coeff = offline->master_reverb_state.target_damping_coeff;
+    for(int i = 0; i < MASTER_REVERB_FDN_LINES; ++i) {
+        offline->master_reverb_state.delay_samples[i] = offline->master_reverb_state.target_delay_samples[i];
+        offline->master_reverb_state.feedback_gain[i] = offline->master_reverb_state.target_feedback_gain[i];
+    }
+    master_reverb_clear_tail_unlocked(offline);
+    if(offline->master_reverb_target.enabled) offline->master_reverb_state.tail_cleared = false;
+    memset(&offline->meter, 0, sizeof(offline->meter));
+    memset(offline->lane_meters, 0, sizeof(offline->lane_meters));
+    memset(&offline->debug_stats, 0, sizeof(offline->debug_stats));
+}
+
+bool audio_engine_timeline_has_tail_fx(const AudioEngine *a) {
+    if(!a) return false;
+    const MasterFxChain *chain = &a->master_fx_chain;
+    int count = chain->unit_count;
+    if(count < 0) count = 0;
+    if(count > MASTER_FX_CHAIN_MAX_UNITS) count = MASTER_FX_CHAIN_MAX_UNITS;
+    for(int i = 0; i < count; ++i) {
+        const MasterFxUnit *unit = &chain->units[i];
+        if(unit->type == MASTER_FX_UNIT_REVERB && unit->enabled && !unit->bypassed &&
+           a->master_reverb_target.enabled &&
+           a->master_reverb_target.send > 0.0f &&
+           a->master_reverb_target.return_gain > 0.0f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+double audio_engine_timeline_tail_cap_seconds(const AudioEngine *a) {
+    if(!audio_engine_timeline_has_tail_fx(a)) return 0.0;
+    double predelay = (double)a->master_reverb_target.predelay_ms * 0.001;
+    double decay = (double)a->master_reverb_target.decay_seconds;
+    double cap = predelay + decay * 2.0;
+    if(cap < 0.0) cap = 0.0;
+    if(cap > 24.0) cap = 24.0;
+    return cap;
+}
+
+static void audio_engine_process_offline_master(AudioEngine *a, float *left, float *right) {
+    if(!a || !left || !right) return;
+    *left *= a->master_gain;
+    *right *= a->master_gain;
+    master_fx_chain_process(a, left, right);
+}
+
+int audio_engine_render_timeline_block(AudioEngine *a,
+                                       AudioTimelineRenderState *state,
+                                       float *out,
+                                       int frame_count,
+                                       int sample_rate) {
+    if(!out || frame_count <= 0) return 0;
+    SDL_memset(out, 0, (size_t)frame_count * 2u * sizeof(float));
+    if(!a || !state || state->finished || !a->timeline || !a->roster ||
+       !a->roster_clip_count || sample_rate <= 0) {
+        return 0;
+    }
+
+    const MasterTimeline *timeline = a->timeline;
+    int roster_count = *a->roster_clip_count;
+    int active_total = 0;
+    for(int frame = 0; frame < frame_count; ++frame) {
+        if(state->playhead_tick >= (double)state->range_end_tick) {
+            state->finished = true;
+            break;
+        }
+
+        float left = 0.0f;
+        float right = 0.0f;
+        active_total += mix_timeline_frame_core(timeline,
+                                                a->roster,
+                                                roster_count,
+                                                state->playhead_tick,
+                                                state->range_start_tick,
+                                                state->range_end_tick,
+                                                sample_rate,
+                                                &left,
+                                                &right,
+                                                NULL,
+                                                NULL);
+
+        audio_engine_process_offline_master(a, &left, &right);
+        out[frame * 2] = left;
+        out[frame * 2 + 1] = right;
+
+        double tick_step = timeline_tick_step_for_output_rate(timeline, state->playhead_tick, sample_rate);
+        if(tick_step <= 0.0) {
+            state->finished = true;
+            break;
+        }
+        state->playhead_tick += tick_step;
+    }
+    if(state->playhead_tick >= (double)state->range_end_tick) state->finished = true;
+    return active_total;
+}
+
+void audio_engine_render_master_fx_silence_block(AudioEngine *a,
+                                                 float *out,
+                                                 int frame_count,
+                                                 int sample_rate) {
+    if(!out || frame_count <= 0) return;
+    SDL_memset(out, 0, (size_t)frame_count * 2u * sizeof(float));
+    if(!a || sample_rate <= 0) return;
+    a->spec.freq = sample_rate;
+    for(int frame = 0; frame < frame_count; ++frame) {
+        float left = 0.0f;
+        float right = 0.0f;
+        audio_engine_process_offline_master(a, &left, &right);
+        out[frame * 2] = left;
+        out[frame * 2 + 1] = right;
+    }
 }
 
 static void update_master_meter(AudioEngine *a, float left, float right) {

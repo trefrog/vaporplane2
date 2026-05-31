@@ -104,6 +104,7 @@ typedef enum {
 typedef enum {
     PROJECT_MENU_ITEM_SAVE,
     PROJECT_MENU_ITEM_OPEN,
+    PROJECT_MENU_ITEM_EXPORT_TIMELINE_WAV,
     PROJECT_MENU_ITEM_QUIT,
     PROJECT_MENU_ITEM_COUNT
 } ProjectMenuItem;
@@ -269,6 +270,7 @@ void app_project_browser_open_selected(App *app);
 void app_project_browser_preview_selected(App *app);
 bool app_save_project_bundle(App *app, const char *bundle_path);
 bool app_load_project_bundle(App *app, const char *bundle_path);
+bool app_export_timeline_wav(App *app, const char *path);
 void app_timeline_insert_bar_at_cursor(App *app);
 void app_timeline_mark_tempo_at_cursor(App *app);
 void app_timeline_remove_tempo_at_cursor(App *app);

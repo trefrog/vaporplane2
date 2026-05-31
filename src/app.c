@@ -747,6 +747,7 @@ static const char *project_menu_item_label(ProjectMenuItem item) {
     switch (item) {
         case PROJECT_MENU_ITEM_SAVE: return "Save project...";
         case PROJECT_MENU_ITEM_OPEN: return "Open project...";
+        case PROJECT_MENU_ITEM_EXPORT_TIMELINE_WAV: return "Export timeline WAV";
         case PROJECT_MENU_ITEM_QUIT: return "Quit";
         case PROJECT_MENU_ITEM_COUNT:
         default: return "Project";
@@ -2369,6 +2370,12 @@ void app_project_menu_apply(App *app) {
         case PROJECT_MENU_ITEM_OPEN:
             app_project_browser_open(app);
             break;
+        case PROJECT_MENU_ITEM_EXPORT_TIMELINE_WAV:
+            if (app_export_timeline_wav(app, NULL)) {
+                app->project_menu_open = false;
+                app->project_menu_selected = 0;
+            }
+            break;
         case PROJECT_MENU_ITEM_QUIT:
             app->running = false;
             break;
@@ -2899,6 +2906,75 @@ static bool write_project_float_wav_buffer(const float *samples, size_t frame_co
 
     ok = SDL_CloseIO(io) && ok;
     return ok;
+}
+
+typedef struct {
+    SDL_IOStream *io;
+    Uint64 data_bytes;
+    bool failed;
+} FloatWavStreamWriter;
+
+static bool float_wav_stream_open(FloatWavStreamWriter *writer, const char *path) {
+    if (!writer || !path || !path[0]) return false;
+    SDL_memset(writer, 0, sizeof(*writer));
+    writer->io = SDL_IOFromFile(path, "wb+");
+    if (!writer->io) return false;
+
+    Uint16 block_align = (Uint16)(VAPORPLANE_PROJECT_CHANNELS * (VAPORPLANE_PROJECT_WAV_BITS_PER_SAMPLE / 8));
+    Uint32 byte_rate = (Uint32)(VAPORPLANE_PROJECT_SAMPLE_RATE * block_align);
+    bool ok = true;
+    ok = ok && write_fourcc(writer->io, "RIFF");
+    ok = ok && SDL_WriteU32LE(writer->io, 0);
+    ok = ok && write_fourcc(writer->io, "WAVE");
+    ok = ok && write_fourcc(writer->io, "fmt ");
+    ok = ok && SDL_WriteU32LE(writer->io, 16);
+    ok = ok && SDL_WriteU16LE(writer->io, 3);
+    ok = ok && SDL_WriteU16LE(writer->io, (Uint16)VAPORPLANE_PROJECT_CHANNELS);
+    ok = ok && SDL_WriteU32LE(writer->io, (Uint32)VAPORPLANE_PROJECT_SAMPLE_RATE);
+    ok = ok && SDL_WriteU32LE(writer->io, byte_rate);
+    ok = ok && SDL_WriteU16LE(writer->io, block_align);
+    ok = ok && SDL_WriteU16LE(writer->io, (Uint16)VAPORPLANE_PROJECT_WAV_BITS_PER_SAMPLE);
+    ok = ok && write_fourcc(writer->io, "data");
+    ok = ok && SDL_WriteU32LE(writer->io, 0);
+    writer->failed = !ok;
+    return ok;
+}
+
+static bool float_wav_stream_write(FloatWavStreamWriter *writer, const float *samples, int frame_count) {
+    if (!writer || !writer->io || !samples || frame_count <= 0 || writer->failed) return false;
+    Uint64 bytes = (Uint64)frame_count * (Uint64)VAPORPLANE_PROJECT_CHANNELS * sizeof(float);
+    if (bytes > 0xffffffffu || writer->data_bytes + bytes > 0xffffffffu) {
+        writer->failed = true;
+        return false;
+    }
+    if (SDL_WriteIO(writer->io, samples, (size_t)bytes) != (size_t)bytes) {
+        writer->failed = true;
+        return false;
+    }
+    writer->data_bytes += bytes;
+    return true;
+}
+
+static bool float_wav_stream_close(FloatWavStreamWriter *writer) {
+    if (!writer || !writer->io) return false;
+    bool ok = !writer->failed && writer->data_bytes > 0 && writer->data_bytes <= 0xffffffffu;
+    if (ok) {
+        Uint32 data_size = (Uint32)writer->data_bytes;
+        ok = ok && SDL_SeekIO(writer->io, 4, SDL_IO_SEEK_SET) >= 0;
+        ok = ok && SDL_WriteU32LE(writer->io, 36u + data_size);
+        ok = ok && SDL_SeekIO(writer->io, 40, SDL_IO_SEEK_SET) >= 0;
+        ok = ok && SDL_WriteU32LE(writer->io, data_size);
+    }
+    ok = SDL_CloseIO(writer->io) && ok;
+    writer->io = NULL;
+    return ok;
+}
+
+static void float_wav_stream_abort(FloatWavStreamWriter *writer) {
+    if (!writer || !writer->io) return;
+    SDL_CloseIO(writer->io);
+    writer->io = NULL;
+    writer->failed = true;
 }
 
 static bool write_project_float_wav(const RosterClip *clip, const char *path) {
@@ -3479,6 +3555,259 @@ static bool app_save_project_bundle_default(App *app) {
         return false;
     }
     return app_save_project_bundle(app, path);
+}
+
+static bool resolve_render_export_dir(char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    char exports_dir[CLIP_MAX_PATH];
+    const char *base = SDL_GetBasePath();
+    if (base && base[0]) {
+        path_join(exports_dir, sizeof(exports_dir), base, "exports");
+        if (ensure_directory(exports_dir)) {
+            path_join(out, out_size, exports_dir, "renders");
+            if (ensure_directory(out)) return true;
+        }
+    }
+    SDL_strlcpy(exports_dir, "exports", sizeof(exports_dir));
+    if (!ensure_directory(exports_dir)) return false;
+    path_join(out, out_size, exports_dir, "renders");
+    return ensure_directory(out);
+}
+
+static void safe_project_render_filename(const App *app, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    const char *name = app && app->project_name[0] ? app->project_name :
+                       (app && app->project_id[0] ? app->project_id : "vaporplane_timeline");
+    char clean[APP_SAMPLE_NAME_MAX];
+    size_t write = 0;
+    for (size_t read = 0; name[read] && write + 1 < sizeof(clean); ++read) {
+        char c = name[read];
+        bool keep = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '#';
+        clean[write++] = keep ? c : '_';
+    }
+    if (write == 0) clean[write++] = 'r';
+    clean[write] = '\0';
+    SDL_snprintf(out, out_size, "%s.wav", clean);
+}
+
+static bool default_timeline_render_path(const App *app, char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    char dir[CLIP_MAX_PATH];
+    char filename[APP_SAMPLE_NAME_MAX + 8];
+    if (!resolve_render_export_dir(dir, sizeof(dir))) return false;
+    safe_project_render_filename(app, filename, sizeof(filename));
+    path_join(out, out_size, dir, filename);
+    return out[0] != '\0';
+}
+
+static int64_t timeline_last_instance_end_tick(const MasterTimeline *timeline) {
+    int64_t end_tick = 0;
+    if (!timeline) return 0;
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        const TimelineLane *lane = &timeline->lanes[lane_index];
+        for (int i = 0; i < lane->instance_count; ++i) {
+            const TimelineInstance *instance = &lane->instances[i];
+            if (instance->duration_ticks <= 0) continue;
+            int64_t end = instance->start_tick + instance->duration_ticks;
+            if (end > end_tick) end_tick = end;
+        }
+    }
+    return end_tick;
+}
+
+static bool app_timeline_export_range(const App *app, int64_t *start, int64_t *end) {
+    if (!app || !start || !end) return false;
+    int64_t last_end = timeline_last_instance_end_tick(&app->timeline);
+    if (last_end <= 0) return false;
+
+    int64_t s = 0;
+    int64_t e = last_end;
+    if (app->timeline.play_range_custom &&
+        app->timeline.play_range_start_tick >= 0 &&
+        app->timeline.play_range_end_tick > app->timeline.play_range_start_tick) {
+        s = app->timeline.play_range_start_tick;
+        e = app->timeline.play_range_end_tick;
+    }
+    if (s < 0) s = 0;
+    if (e <= s) return false;
+    *start = s;
+    *end = e;
+    return true;
+}
+
+static bool app_timeline_has_renderable_clip_in_range(const App *app, int64_t start_tick, int64_t end_tick) {
+    if (!app || end_tick <= start_tick || app->roster_clip_count <= 0) return false;
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        const TimelineLane *lane = &app->timeline.lanes[lane_index];
+        if (lane->muted) continue;
+        for (int i = 0; i < lane->instance_count; ++i) {
+            const TimelineInstance *instance = &lane->instances[i];
+            if (instance->duration_ticks <= 0) continue;
+            int64_t instance_end = instance->start_tick + instance->duration_ticks;
+            if (instance_end <= start_tick || instance->start_tick >= end_tick) continue;
+            if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
+            const RosterClip *clip = &app->roster[instance->roster_clip_index];
+            if (clip->samples && clip->frame_count > 1 && clip->sample_rate > 0 && clip->channels > 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool app_export_timeline_wav(App *app, const char *path) {
+    if (!app) return false;
+    int64_t start_tick = 0;
+    int64_t end_tick = 0;
+    if (!app_timeline_export_range(app, &start_tick, &end_tick)) {
+        app_set_status(app, "No timeline range to render");
+        return false;
+    }
+    if (!app_timeline_has_renderable_clip_in_range(app, start_tick, end_tick)) {
+        app_set_status(app, "No renderable timeline clips");
+        return false;
+    }
+
+    char output_path[CLIP_MAX_PATH];
+    if (path && path[0]) {
+        SDL_strlcpy(output_path, path, sizeof(output_path));
+    } else if (!default_timeline_render_path(app, output_path, sizeof(output_path))) {
+        app_set_status(app, "Could not create render path");
+        return false;
+    }
+
+    double speed = (double)timeline_effective_tape_speed(&app->timeline);
+    double seconds = timeline_seconds_between_ticks(&app->timeline, (double)start_tick, (double)end_tick);
+    if (speed <= 0.0) speed = 1.0;
+    seconds /= speed;
+    if (seconds <= 0.0) {
+        app_set_status(app, "No timeline range to render");
+        return false;
+    }
+
+    size_t output_frames = (size_t)ceil(seconds * (double)VAPORPLANE_PROJECT_SAMPLE_RATE);
+    if (output_frames == 0) {
+        app_set_status(app, "No timeline range to render");
+        return false;
+    }
+    AudioEngine render_audio;
+    audio_engine_init_offline_timeline_render(&render_audio,
+                                              &app->audio,
+                                              app->roster,
+                                              &app->roster_clip_count,
+                                              &app->timeline,
+                                              VAPORPLANE_PROJECT_SAMPLE_RATE);
+    bool render_tail = audio_engine_timeline_has_tail_fx(&render_audio);
+    double tail_cap_seconds = audio_engine_timeline_tail_cap_seconds(&render_audio);
+    size_t max_tail_frames = render_tail && tail_cap_seconds > 0.0 ?
+        (size_t)ceil(tail_cap_seconds * (double)VAPORPLANE_PROJECT_SAMPLE_RATE) : 0u;
+    if (output_frames > ((size_t)-1) - max_tail_frames ||
+        output_frames + max_tail_frames > ((size_t)-1) / (sizeof(float) * 2u)) {
+        app_set_status(app, "Timeline render is too large");
+        return false;
+    }
+    Uint64 data_size = (Uint64)(output_frames + max_tail_frames) * 2u * sizeof(float);
+    if (data_size > 0xffffffffu) {
+        app_set_status(app, "Timeline render is too large");
+        return false;
+    }
+
+    FloatWavStreamWriter writer;
+    if (!float_wav_stream_open(&writer, output_path)) {
+        app_set_status(app, "Could not write timeline render");
+        return false;
+    }
+
+    AudioTimelineRenderState state;
+    audio_timeline_render_state_init(&state, start_tick, end_tick);
+    size_t written_frames = 0;
+    float peak = 0.0f;
+    bool had_active = false;
+    float block[AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES * 2];
+    while (written_frames < output_frames) {
+        int block_frames = (int)(output_frames - written_frames);
+        if (block_frames > AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES) block_frames = AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES;
+        int active_count = audio_engine_render_timeline_block(&render_audio,
+                                                              &state,
+                                                              block,
+                                                              block_frames,
+                                                              VAPORPLANE_PROJECT_SAMPLE_RATE);
+        if (active_count > 0) had_active = true;
+        for (int frame = 0; frame < block_frames; ++frame) {
+            float left = block[frame * 2];
+            float right = block[frame * 2 + 1];
+            float abs_left = fabsf(left);
+            float abs_right = fabsf(right);
+            if (abs_left > peak) peak = abs_left;
+            if (abs_right > peak) peak = abs_right;
+        }
+        if (!float_wav_stream_write(&writer, block, block_frames)) {
+            float_wav_stream_abort(&writer);
+            SDL_RemovePath(output_path);
+            app_set_status(app, "Could not write timeline render");
+            return false;
+        }
+        written_frames += (size_t)block_frames;
+        if (state.finished) break;
+    }
+
+    if (!had_active) {
+        float_wav_stream_abort(&writer);
+        SDL_RemovePath(output_path);
+        app_set_status(app, "No renderable timeline clips");
+        return false;
+    }
+
+    if (render_tail && max_tail_frames > 0) {
+        size_t tail_frames = 0;
+        while (tail_frames < max_tail_frames) {
+            int block_frames = (int)(max_tail_frames - tail_frames);
+            if (block_frames > AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES) block_frames = AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES;
+            audio_engine_render_master_fx_silence_block(&render_audio,
+                                                        block,
+                                                        block_frames,
+                                                        VAPORPLANE_PROJECT_SAMPLE_RATE);
+            float block_peak = 0.0f;
+            for (int frame = 0; frame < block_frames; ++frame) {
+                float abs_left = fabsf(block[frame * 2]);
+                float abs_right = fabsf(block[frame * 2 + 1]);
+                if (abs_left > block_peak) block_peak = abs_left;
+                if (abs_right > block_peak) block_peak = abs_right;
+                if (abs_left > peak) peak = abs_left;
+                if (abs_right > peak) peak = abs_right;
+            }
+            if (!float_wav_stream_write(&writer, block, block_frames)) {
+                float_wav_stream_abort(&writer);
+                SDL_RemovePath(output_path);
+                app_set_status(app, "Could not write timeline render");
+                return false;
+            }
+            tail_frames += (size_t)block_frames;
+            written_frames += (size_t)block_frames;
+            if (block_frames == AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES && block_peak < 0.0000316f) break;
+        }
+    }
+
+    if (!float_wav_stream_close(&writer)) {
+        SDL_RemovePath(output_path);
+        app_set_status(app, "Could not write timeline render");
+        return false;
+    }
+
+    const char *file = path_basename(output_path);
+    if (peak > 1.0f) {
+        SDL_snprintf(app->status_text, sizeof(app->status_text),
+                     "Rendered %s (CLIPPED peak %.2f)",
+                     file,
+                     peak);
+    } else {
+        SDL_snprintf(app->status_text, sizeof(app->status_text),
+                     "Rendered %s (peak %.2f)",
+                     file,
+                     peak);
+    }
+    return true;
 }
 
 static int compare_project_browser_entries(const void *a, const void *b) {

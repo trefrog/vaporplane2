@@ -12,6 +12,7 @@
 #define MASTER_REVERB_FDN_LINES 8
 #define MASTER_REVERB_PREDELAY_MAX_FRAMES 9600
 #define MASTER_REVERB_DELAY_MAX_FRAMES 8192
+#define AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES 512
 
 typedef enum {
     AUDIO_PLAYBACK_WAVEFORM,
@@ -160,6 +161,13 @@ typedef struct {
     AudioDebugStats debug_stats;
 } AudioEngine;
 
+typedef struct {
+    double playhead_tick;
+    int64_t range_start_tick;
+    int64_t range_end_tick;
+    bool finished;
+} AudioTimelineRenderState;
+
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport);
 void audio_engine_shutdown(AudioEngine *a);
 void audio_engine_set_playhead(AudioEngine *a, size_t frame);
@@ -175,6 +183,26 @@ void audio_engine_stop_file_preview(AudioEngine *a);
 void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick);
 bool audio_engine_timeline_is_playing(const AudioEngine *a);
 int64_t audio_engine_get_timeline_playhead_tick(const AudioEngine *a);
+void audio_timeline_render_state_init(AudioTimelineRenderState *state,
+                                      int64_t range_start_tick,
+                                      int64_t range_end_tick);
+void audio_engine_init_offline_timeline_render(AudioEngine *offline,
+                                               const AudioEngine *source,
+                                               RosterClip *roster,
+                                               int *roster_clip_count,
+                                               MasterTimeline *timeline,
+                                               int sample_rate);
+bool audio_engine_timeline_has_tail_fx(const AudioEngine *a);
+double audio_engine_timeline_tail_cap_seconds(const AudioEngine *a);
+int audio_engine_render_timeline_block(AudioEngine *a,
+                                       AudioTimelineRenderState *state,
+                                       float *out,
+                                       int frame_count,
+                                       int sample_rate);
+void audio_engine_render_master_fx_silence_block(AudioEngine *a,
+                                                 float *out,
+                                                 int frame_count,
+                                                 int sample_rate);
 void audio_engine_get_master_meter(const AudioEngine *a, MasterMeterState *meter);
 void audio_engine_get_master_fx_chain(const AudioEngine *a, MasterFxChain *chain);
 const char *audio_engine_master_fx_unit_label(MasterFxUnitType type);
