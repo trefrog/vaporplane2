@@ -111,6 +111,19 @@ typedef enum {
 } ProjectMenuItem;
 
 typedef enum {
+    WAVEFORM_MENU_ITEM_NORMALIZE,
+    WAVEFORM_MENU_ITEM_CANCEL,
+    WAVEFORM_MENU_ITEM_COUNT
+} WaveformMenuItem;
+
+typedef enum {
+    ROSTER_COMMIT_ITEM_NEW_CLIP,
+    ROSTER_COMMIT_ITEM_REPLACE_CLIP,
+    ROSTER_COMMIT_ITEM_CANCEL,
+    ROSTER_COMMIT_ITEM_COUNT
+} RosterCommitMenuItem;
+
+typedef enum {
     APP_TEXT_ENTRY_DISPLAY_NAME,
     APP_TEXT_ENTRY_FILENAME_SAFE,
     APP_TEXT_ENTRY_SEARCH_FILTER
@@ -148,6 +161,10 @@ typedef struct App {
     char waveform_source_path[CLIP_MAX_PATH];
     size_t waveform_source_offset_frame;
     bool waveform_sidecar_confirm_open;
+    bool waveform_menu_open;
+    int waveform_menu_selected;
+    bool roster_commit_menu_open;
+    int roster_commit_menu_selected;
     bool waveform_frame_grip_active;
     bool waveform_frame_grip_exact_valid;
     size_t waveform_frame_grip_left_frame;
@@ -300,6 +317,13 @@ void app_text_entry_move_key(App *app, int dx, int dy);
 void app_text_entry_insert_selected_key(App *app);
 void app_text_entry_insert_separator(App *app);
 void app_text_entry_toggle_shift(App *app);
+void app_waveform_menu_open(App *app);
+void app_waveform_menu_close(App *app);
+void app_waveform_menu_move(App *app, int delta);
+void app_waveform_menu_apply(App *app);
+void app_roster_commit_menu_close(App *app);
+void app_roster_commit_menu_move(App *app, int delta);
+void app_roster_commit_menu_apply(App *app);
 void app_project_browser_open(App *app);
 void app_project_browser_close(App *app);
 void app_project_browser_refresh(App *app);

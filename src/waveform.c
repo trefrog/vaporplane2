@@ -48,6 +48,12 @@ void waveform_render(SDL_Renderer *r,const AudioClip *clip,const WaveformView *v
     int ymid=h/2;
     SDL_SetRenderDrawColor(r, 45, 40, 70, 255);
     SDL_RenderLine(r, 0, ymid, w, ymid);
+    int y_positive_full_scale = ymid - (int)((float)ymid * 0.8f);
+    int y_negative_full_scale = ymid + (int)((float)ymid * 0.8f);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 82, 76, 110, 92);
+    SDL_RenderLine(r, 0, y_positive_full_scale, w, y_positive_full_scale);
+    SDL_RenderLine(r, 0, y_negative_full_scale, w, y_negative_full_scale);
     if(!clip || !clip->samples || clip->frame_count<2) return;
     double start=v->view_center-v->view_span*0.5, end=v->view_center+v->view_span*0.5;
     if(start<0){end-=start;start=0;} if(end>1){start-=(end-1);end=1;} if(start<0)start=0;

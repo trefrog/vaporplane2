@@ -756,6 +756,23 @@ static const char *project_menu_item_label(ProjectMenuItem item) {
     }
 }
 
+static const char *waveform_menu_item_label(WaveformMenuItem item) {
+    switch (item) {
+        case WAVEFORM_MENU_ITEM_NORMALIZE: return "Normalize";
+        case WAVEFORM_MENU_ITEM_CANCEL:
+        default: return "Cancel";
+    }
+}
+
+static const char *roster_commit_menu_item_label(RosterCommitMenuItem item) {
+    switch (item) {
+        case ROSTER_COMMIT_ITEM_NEW_CLIP: return "New roster clip";
+        case ROSTER_COMMIT_ITEM_REPLACE_CLIP: return "Replace source clip";
+        case ROSTER_COMMIT_ITEM_CANCEL:
+        default: return "Cancel";
+    }
+}
+
 static bool app_save_project_bundle_default(App *app);
 static void app_project_browser_clear_preview(App *app);
 static bool write_project_preview_wav(App *app, const char *path);
@@ -1209,6 +1226,8 @@ static void app_set_waveform_source_generated(App *app) {
     app->waveform_source_path[0] = '\0';
     app->waveform_source_offset_frame = 0;
     app->waveform_sidecar_confirm_open = false;
+    app->waveform_menu_open = false;
+    app->roster_commit_menu_open = false;
 }
 
 static void app_set_waveform_source_wav(App *app, const char *path) {
@@ -1218,6 +1237,8 @@ static void app_set_waveform_source_wav(App *app, const char *path) {
     SDL_strlcpy(app->waveform_source_path, path ? path : "", sizeof(app->waveform_source_path));
     capture_base_name(&app->clip, app->waveform_source_name, sizeof(app->waveform_source_name));
     app->waveform_sidecar_confirm_open = false;
+    app->waveform_menu_open = false;
+    app->roster_commit_menu_open = false;
 }
 
 static void app_set_waveform_source_roster(App *app, int roster_index, const RosterClip *clip) {
@@ -1231,6 +1252,8 @@ static void app_set_waveform_source_roster(App *app, int roster_index, const Ros
                 clip && clip->source_path[0] ? clip->source_path : "",
                 sizeof(app->waveform_source_path));
     app->waveform_sidecar_confirm_open = false;
+    app->waveform_menu_open = false;
+    app->roster_commit_menu_open = false;
 }
 
 void app_clear_waveform_frame_grip(App *app) {
@@ -1299,18 +1322,35 @@ static TempoLockParams capture_tempo_params(const App *app) {
     return params;
 }
 
-void app_capture_current_loop_to_roster(App *app) {
+typedef struct {
+    float *samples;
+    size_t start_frame;
+    size_t end_frame;
+    size_t frame_count;
+    size_t byte_count;
+    TempoLockParams tempo;
+} CurrentLoopCapture;
+
+static void current_loop_capture_destroy(CurrentLoopCapture *capture) {
+    if (!capture) return;
+    SDL_free(capture->samples);
+    SDL_memset(capture, 0, sizeof(*capture));
+}
+
+static bool app_prepare_current_loop_capture(App *app, CurrentLoopCapture *capture, bool require_roster_room) {
+    if (!app || !capture) return false;
+    SDL_memset(capture, 0, sizeof(*capture));
     if (audio_engine_timeline_is_playing(&app->audio)) {
         app_set_status(app, "Stop timeline before capture");
-        return;
+        return false;
     }
     if (!app->clip.samples || app->clip.frame_count < 2) {
         app_set_status(app, "No clip to capture");
-        return;
+        return false;
     }
-    if (app->roster_clip_count >= APP_MAX_ROSTER_CLIPS) {
+    if (require_roster_room && app->roster_clip_count >= APP_MAX_ROSTER_CLIPS) {
         app_set_status(app, "Roster full");
-        return;
+        return false;
     }
 
     size_t start = app->clip.loop_start_frame;
@@ -1318,38 +1358,38 @@ void app_capture_current_loop_to_roster(App *app) {
     if (end > app->clip.frame_count) end = app->clip.frame_count;
     if (end <= start || end - start < APP_MIN_CAPTURE_FRAMES) {
         app_set_status(app, "Captured loop is too short");
-        return;
+        return false;
     }
 
     size_t frame_count = end - start;
     if (frame_count > APP_MAX_CAPTURE_FRAMES) {
         app_set_status(app, "Clip too large to capture");
-        return;
+        return false;
     }
     if (app->clip.channels <= 0 || app->clip.sample_rate <= 0) {
         app_set_status(app, "No clip to capture");
-        return;
+        return false;
     }
     size_t channels = (size_t)app->clip.channels;
     if (frame_count > SIZE_MAX / channels) {
         app_set_status(app, "Clip too large to capture");
-        return;
+        return false;
     }
     size_t sample_count = frame_count * channels;
     if (sample_count > SIZE_MAX / sizeof(float)) {
         app_set_status(app, "Clip too large to capture");
-        return;
+        return false;
     }
     size_t byte_count = sample_count * sizeof(float);
     if (byte_count > APP_MAX_CAPTURE_BYTES) {
         app_set_status(app, "Clip too large to capture");
-        return;
+        return false;
     }
 
     float *samples = (float *)SDL_malloc(byte_count);
     if (!samples) {
         app_set_status(app, "Memory allocation failed");
-        return;
+        return false;
     }
     SDL_memcpy(samples, app->clip.samples + start * channels, byte_count);
 
@@ -1359,20 +1399,42 @@ void app_capture_current_loop_to_roster(App *app) {
     if (tempo.beat_unit <= 0) tempo.beat_unit = 4;
     if (tempo.target_bars <= 0.0) tempo.target_bars = 4.0;
 
+    capture->samples = samples;
+    capture->start_frame = start;
+    capture->end_frame = end;
+    capture->frame_count = frame_count;
+    capture->byte_count = byte_count;
+    capture->tempo = tempo;
+    return true;
+}
+
+static void app_open_roster_commit_menu(App *app) {
+    if (!app) return;
+    app->roster_commit_menu_open = true;
+    app->roster_commit_menu_selected = 0;
+    app->waveform_menu_open = false;
+    app->sample_selector_open = false;
+    app_set_status(app, "Commit roster edit");
+}
+
+static void app_capture_current_loop_to_roster_new(App *app) {
+    CurrentLoopCapture capture;
+    if (!app_prepare_current_loop_capture(app, &capture, true)) return;
+
     if (app->audio.stream && !SDL_LockAudioStream(app->audio.stream)) {
-        SDL_free(samples);
+        current_loop_capture_destroy(&capture);
         app_set_status(app, "Could not lock audio stream");
         return;
     }
     if (app->timeline.playing) {
         if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
-        SDL_free(samples);
+        current_loop_capture_destroy(&capture);
         app_set_status(app, "Stop timeline before capture");
         return;
     }
     if (app->roster_clip_count >= APP_MAX_ROSTER_CLIPS) {
         if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
-        SDL_free(samples);
+        current_loop_capture_destroy(&capture);
         app_set_status(app, "Roster full");
         return;
     }
@@ -1391,26 +1453,27 @@ void app_capture_current_loop_to_roster(App *app) {
     SDL_snprintf(next.name, sizeof(next.name), "%s#%03d", base, number);
     const char *source_path = app->waveform_source_path[0] ? app->waveform_source_path : app->clip.file_path;
     SDL_strlcpy(next.source_path, source_path, sizeof(next.source_path));
-    next.source_loop_start_frame = app->waveform_source_offset_frame + start;
-    next.source_loop_end_frame = app->waveform_source_offset_frame + end;
+    next.source_loop_start_frame = app->waveform_source_offset_frame + capture.start_frame;
+    next.source_loop_end_frame = app->waveform_source_offset_frame + capture.end_frame;
     next.source_sample_rate = app->clip.sample_rate;
     next.loop_start_frame = 0;
-    next.loop_end_frame = frame_count;
+    next.loop_end_frame = capture.frame_count;
     next.sample_rate = app->clip.sample_rate;
     next.channels = app->clip.channels;
-    next.frame_count = frame_count;
-    next.samples = samples;
-    next.source_bpm = tempo.bpm;
-    next.beats_per_bar = tempo.beats_per_bar;
-    next.beat_unit = tempo.beat_unit;
-    next.target_bars = tempo.target_bars;
-    next.target_beats = tempo.target_bars * (double)tempo.beats_per_bar;
+    next.frame_count = capture.frame_count;
+    next.samples = capture.samples;
+    capture.samples = NULL;
+    next.source_bpm = capture.tempo.bpm;
+    next.beats_per_bar = capture.tempo.beats_per_bar;
+    next.beat_unit = capture.tempo.beat_unit;
+    next.target_bars = capture.tempo.target_bars;
+    next.target_beats = capture.tempo.target_bars * (double)capture.tempo.beats_per_bar;
     next.midi_note = app_next_available_midi_note(app);
     next.midi_channel = 0;
     next.midi_velocity = 100;
-    if (tempo.downbeat_frame > start) {
-        size_t offset = tempo.downbeat_frame - start;
-        next.downbeat_offset_frames = offset < frame_count ? offset : frame_count - 1;
+    if (capture.tempo.downbeat_frame > capture.start_frame) {
+        size_t offset = capture.tempo.downbeat_frame - capture.start_frame;
+        next.downbeat_offset_frames = offset < capture.frame_count ? offset : capture.frame_count - 1;
     } else {
         next.downbeat_offset_frames = 0;
     }
@@ -1460,6 +1523,73 @@ void app_capture_current_loop_to_roster(App *app) {
 
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Captured %s to roster", app->roster[roster_index].name);
+}
+
+static void app_replace_source_roster_clip_from_waveform(App *app) {
+    if (!app || app->waveform_source_mode != WAVEFORM_SOURCE_ROSTER ||
+        app->waveform_source_roster_index < 0 ||
+        app->waveform_source_roster_index >= app->roster_clip_count) {
+        app_set_status(app, "No source roster clip");
+        return;
+    }
+
+    int roster_index = app->waveform_source_roster_index;
+    CurrentLoopCapture capture;
+    if (!app_prepare_current_loop_capture(app, &capture, false)) return;
+
+    app_stop_active_audio(app);
+    if (app->audio.stream && !SDL_LockAudioStream(app->audio.stream)) {
+        current_loop_capture_destroy(&capture);
+        app_set_status(app, "Could not lock audio stream");
+        return;
+    }
+
+    RosterClip *clip = &app->roster[roster_index];
+    SDL_free(clip->samples);
+    clip->samples = capture.samples;
+    capture.samples = NULL;
+    clip->sample_rate = app->clip.sample_rate;
+    clip->channels = app->clip.channels;
+    clip->frame_count = capture.frame_count;
+    clip->source_sample_rate = app->clip.sample_rate;
+    clip->source_loop_start_frame = app->waveform_source_offset_frame + capture.start_frame;
+    clip->source_loop_end_frame = app->waveform_source_offset_frame + capture.end_frame;
+    const char *source_path = app->waveform_source_path[0] ? app->waveform_source_path : app->clip.file_path;
+    SDL_strlcpy(clip->source_path, source_path, sizeof(clip->source_path));
+    clip->loop_start_frame = 0;
+    clip->loop_end_frame = capture.frame_count;
+    clip->source_bpm = capture.tempo.bpm;
+    clip->beats_per_bar = capture.tempo.beats_per_bar;
+    clip->beat_unit = capture.tempo.beat_unit;
+    clip->target_bars = capture.tempo.target_bars;
+    clip->target_beats = capture.tempo.target_bars * (double)capture.tempo.beats_per_bar;
+    if (capture.tempo.downbeat_frame > capture.start_frame) {
+        size_t offset = capture.tempo.downbeat_frame - capture.start_frame;
+        clip->downbeat_offset_frames = offset < capture.frame_count ? offset : capture.frame_count - 1;
+    } else {
+        clip->downbeat_offset_frames = 0;
+    }
+
+    if (app->audio.stream) {
+        SDL_ClearAudioStream(app->audio.stream);
+        SDL_UnlockAudioStream(app->audio.stream);
+    }
+
+    app->selected_roster_clip = roster_index;
+    app->roster_commit_menu_open = false;
+    app->roster_commit_menu_selected = 0;
+    app_open_selected_roster_clip_waveform(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Replaced roster clip: %s", app->roster[roster_index].name);
+}
+
+void app_capture_current_loop_to_roster(App *app) {
+    if (app && app->waveform_source_mode == WAVEFORM_SOURCE_ROSTER &&
+        app->waveform_source_roster_index >= 0 &&
+        app->waveform_source_roster_index < app->roster_clip_count) {
+        app_open_roster_commit_menu(app);
+        return;
+    }
+    app_capture_current_loop_to_roster_new(app);
 }
 
 void app_open_selected_roster_clip_waveform(App *app) {
@@ -2406,6 +2536,118 @@ void app_project_menu_apply(App *app) {
             break;
         case PROJECT_MENU_ITEM_COUNT:
         default:
+            break;
+    }
+}
+
+void app_waveform_menu_open(App *app) {
+    if (!app || app->view_mode != APP_VIEW_WAVEFORM) return;
+    app->waveform_menu_open = true;
+    app->waveform_menu_selected = 0;
+    app->sample_selector_open = false;
+    app->project_menu_open = false;
+    app_timeline_clear_context_menu(app);
+    app_set_status(app, "Waveform menu");
+}
+
+void app_waveform_menu_close(App *app) {
+    if (!app) return;
+    app->waveform_menu_open = false;
+    app->waveform_menu_selected = 0;
+    app_set_status(app, "Waveform menu closed");
+}
+
+void app_waveform_menu_move(App *app, int delta) {
+    if (!app || !app->waveform_menu_open || delta == 0) return;
+    int selected = app->waveform_menu_selected + delta;
+    while (selected < 0) selected += (int)WAVEFORM_MENU_ITEM_COUNT;
+    selected %= (int)WAVEFORM_MENU_ITEM_COUNT;
+    app->waveform_menu_selected = selected;
+}
+
+static bool app_normalize_waveform_clip(App *app) {
+    if (!app || !app->clip.samples || app->clip.frame_count < 1 || app->clip.channels <= 0) {
+        app_set_status(app, "No waveform to normalize");
+        return false;
+    }
+    size_t sample_count = app->clip.frame_count * (size_t)app->clip.channels;
+    float peak = 0.0f;
+    for (size_t i = 0; i < sample_count; ++i) {
+        float abs_sample = fabsf(app->clip.samples[i]);
+        if (abs_sample > peak) peak = abs_sample;
+    }
+    if (peak <= 0.0000001f) {
+        app_set_status(app, "Cannot normalize silence");
+        return false;
+    }
+
+    float gain = 1.0f / peak;
+    app_stop_active_audio(app);
+    if (app->audio.stream && !SDL_LockAudioStream(app->audio.stream)) {
+        app_set_status(app, "Could not lock audio stream");
+        return false;
+    }
+
+    for (size_t i = 0; i < sample_count; ++i) app->clip.samples[i] *= gain;
+
+    if (app->audio.stream) {
+        SDL_ClearAudioStream(app->audio.stream);
+        SDL_UnlockAudioStream(app->audio.stream);
+    }
+    double gain_db = 20.0 * log10((double)gain);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Normalized waveform %+4.1f dB", gain_db);
+    return true;
+}
+
+void app_waveform_menu_apply(App *app) {
+    if (!app || !app->waveform_menu_open) return;
+    WaveformMenuItem item = (WaveformMenuItem)clamp_int(app->waveform_menu_selected, 0, WAVEFORM_MENU_ITEM_COUNT - 1);
+    switch (item) {
+        case WAVEFORM_MENU_ITEM_NORMALIZE:
+            if (app_normalize_waveform_clip(app)) {
+                app->waveform_menu_open = false;
+                app->waveform_menu_selected = 0;
+            }
+            break;
+        case WAVEFORM_MENU_ITEM_CANCEL:
+        default:
+            app_waveform_menu_close(app);
+            break;
+    }
+}
+
+void app_roster_commit_menu_close(App *app) {
+    if (!app) return;
+    app->roster_commit_menu_open = false;
+    app->roster_commit_menu_selected = 0;
+    app_set_status(app, "Roster edit cancelled");
+}
+
+void app_roster_commit_menu_move(App *app, int delta) {
+    if (!app || !app->roster_commit_menu_open || delta == 0) return;
+    int selected = app->roster_commit_menu_selected + delta;
+    while (selected < 0) selected += (int)ROSTER_COMMIT_ITEM_COUNT;
+    selected %= (int)ROSTER_COMMIT_ITEM_COUNT;
+    app->roster_commit_menu_selected = selected;
+}
+
+void app_roster_commit_menu_apply(App *app) {
+    if (!app || !app->roster_commit_menu_open) return;
+    RosterCommitMenuItem item = (RosterCommitMenuItem)clamp_int(app->roster_commit_menu_selected,
+                                                                0,
+                                                                ROSTER_COMMIT_ITEM_COUNT - 1);
+    switch (item) {
+        case ROSTER_COMMIT_ITEM_NEW_CLIP:
+            app->roster_commit_menu_open = false;
+            app->roster_commit_menu_selected = 0;
+            app_capture_current_loop_to_roster_new(app);
+            break;
+        case ROSTER_COMMIT_ITEM_REPLACE_CLIP:
+            app_replace_source_roster_clip_from_waveform(app);
+            break;
+        case ROSTER_COMMIT_ITEM_CANCEL:
+        default:
+            app_roster_commit_menu_close(app);
             break;
     }
 }
@@ -5673,6 +5915,7 @@ void app_apply_tempo_lock_and_capture(App *app) {
 
     int previous_count = app->roster_clip_count;
     app_capture_current_loop_to_roster(app);
+    if (app->roster_commit_menu_open) return;
     if (app->roster_clip_count > previous_count) {
         SDL_snprintf(app->status_text, sizeof(app->status_text),
                      "Tempo locked and captured %s to roster",
@@ -6071,6 +6314,101 @@ static void render_project_menu(App *app, float anchor_x, float anchor_y, int w,
             SDL_SetRenderDrawColor(app->renderer, selected ? 226 : 210, selected ? 252 : 218, selected ? 246 : 226, 255);
         }
         SDL_RenderDebugText(app->renderer, menu.x + 18.0f, item_y, project_menu_item_label(item));
+        item_y += 22.0f;
+    }
+}
+
+static void render_waveform_menu(App *app, int w, int h) {
+    if (!app || !app->waveform_menu_open) return;
+    const int item_count = (int)WAVEFORM_MENU_ITEM_COUNT;
+    SDL_FRect menu = {
+        64.0f,
+        96.0f,
+        260.0f,
+        58.0f + (float)item_count * 22.0f
+    };
+    float menu_pad = 18.0f;
+    if (menu.x + menu.w > (float)w - menu_pad) menu.x = (float)w - menu_pad - menu.w;
+    if (menu.y + menu.h > (float)h - menu_pad) menu.y = (float)h - menu_pad - menu.h;
+    if (menu.x < menu_pad) menu.x = menu_pad;
+    if (menu.y < menu_pad) menu.y = menu_pad;
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_FRect shadow = { menu.x + 10.0f, menu.y + 12.0f, menu.w + 18.0f, menu.h + 18.0f };
+    SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 140);
+    SDL_RenderFillRect(app->renderer, &shadow);
+    SDL_SetRenderDrawColor(app->renderer, 12, 13, 20, 238);
+    SDL_RenderFillRect(app->renderer, &menu);
+    SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 255);
+    SDL_RenderRect(app->renderer, &menu);
+    SDL_SetRenderDrawColor(app->renderer, 230, 238, 242, 255);
+    SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 10.0f, "WAVEFORM");
+    SDL_SetRenderDrawColor(app->renderer, 178, 190, 204, 255);
+    SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 28.0f, "sample");
+
+    float item_y = menu.y + 50.0f;
+    for (int i = 0; i < item_count; ++i) {
+        WaveformMenuItem item = (WaveformMenuItem)i;
+        SDL_FRect row = { menu.x + 8.0f, item_y - 4.0f, menu.w - 16.0f, 20.0f };
+        bool selected = i == app->waveform_menu_selected;
+        if (selected) {
+            SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 52);
+            SDL_RenderFillRect(app->renderer, &row);
+            SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 255);
+            SDL_RenderRect(app->renderer, &row);
+        }
+        SDL_SetRenderDrawColor(app->renderer, selected ? 226 : 210, selected ? 252 : 218, selected ? 246 : 226, 255);
+        SDL_RenderDebugText(app->renderer, menu.x + 18.0f, item_y, waveform_menu_item_label(item));
+        item_y += 22.0f;
+    }
+}
+
+static void render_roster_commit_menu(App *app, int w, int h) {
+    if (!app || !app->roster_commit_menu_open) return;
+    const int item_count = (int)ROSTER_COMMIT_ITEM_COUNT;
+    SDL_FRect menu = {
+        64.0f,
+        96.0f,
+        330.0f,
+        78.0f + (float)item_count * 22.0f
+    };
+    float menu_pad = 18.0f;
+    if (menu.x + menu.w > (float)w - menu_pad) menu.x = (float)w - menu_pad - menu.w;
+    if (menu.y + menu.h > (float)h - menu_pad) menu.y = (float)h - menu_pad - menu.h;
+    if (menu.x < menu_pad) menu.x = menu_pad;
+    if (menu.y < menu_pad) menu.y = menu_pad;
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_FRect shadow = { menu.x + 10.0f, menu.y + 12.0f, menu.w + 18.0f, menu.h + 18.0f };
+    SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 148);
+    SDL_RenderFillRect(app->renderer, &shadow);
+    SDL_SetRenderDrawColor(app->renderer, 12, 13, 20, 242);
+    SDL_RenderFillRect(app->renderer, &menu);
+    SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+    SDL_RenderRect(app->renderer, &menu);
+    SDL_SetRenderDrawColor(app->renderer, 235, 242, 245, 255);
+    SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 10.0f, "SEND ROSTER EDIT");
+    SDL_SetRenderDrawColor(app->renderer, 178, 190, 204, 255);
+    SDL_RenderDebugTextFormat(app->renderer,
+                              menu.x + 12.0f,
+                              menu.y + 28.0f,
+                              "source: %s",
+                              app->waveform_source_name[0] ? app->waveform_source_name : "roster");
+    SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 46.0f, "South/Enter confirms");
+
+    float item_y = menu.y + 70.0f;
+    for (int i = 0; i < item_count; ++i) {
+        RosterCommitMenuItem item = (RosterCommitMenuItem)i;
+        SDL_FRect row = { menu.x + 8.0f, item_y - 4.0f, menu.w - 16.0f, 20.0f };
+        bool selected = i == app->roster_commit_menu_selected;
+        if (selected) {
+            SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 48);
+            SDL_RenderFillRect(app->renderer, &row);
+            SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+            SDL_RenderRect(app->renderer, &row);
+        }
+        SDL_SetRenderDrawColor(app->renderer, selected ? 255 : 220, selected ? 242 : 224, selected ? 190 : 230, 255);
+        SDL_RenderDebugText(app->renderer, menu.x + 18.0f, item_y, roster_commit_menu_item_label(item));
         item_y += 22.0f;
     }
 }
@@ -7688,6 +8026,20 @@ static void app_render_overlay(App *app) {
         return;
     }
 
+    if (app->roster_commit_menu_open) {
+        int w = 0, h = 0;
+        SDL_GetRenderOutputSize(app->renderer, &w, &h);
+        render_roster_commit_menu(app, w, h);
+        return;
+    }
+
+    if (app->waveform_menu_open) {
+        int w = 0, h = 0;
+        SDL_GetRenderOutputSize(app->renderer, &w, &h);
+        render_waveform_menu(app, w, h);
+        return;
+    }
+
     if (app->controls_legend_open) app_render_controls_legend(app);
 }
 
@@ -7712,6 +8064,10 @@ bool app_init(App *app){
     app->project_browser_selected = 0;
     app->project_browser_dir[0] = '\0';
     app->project_browser_preview_clip_loaded = false;
+    app->waveform_menu_open = false;
+    app->waveform_menu_selected = 0;
+    app->roster_commit_menu_open = false;
+    app->roster_commit_menu_selected = 0;
     app->text_entry_open = false;
     app->text_entry_mode = APP_TEXT_ENTRY_DISPLAY_NAME;
     app->text_entry_action = APP_TEXT_ENTRY_ACTION_NONE;
