@@ -696,6 +696,7 @@ static int timeline_context_menu_items(const App *app,
             break;
         case TIMELINE_CONTEXT_SCOPE_ROSTER:
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_RENAME_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_FREE;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_PULSE;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_INSERT_PULSE;
@@ -732,6 +733,7 @@ static const char *timeline_context_item_label(TimelineContextMenuItem item) {
         case TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO: return "Remove tempo";
         case TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE: return "Remove instance";
         case TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM: return "Open waveform";
+        case TIMELINE_CONTEXT_ITEM_RENAME_ROSTER: return "Rename roster clip";
         case TIMELINE_CONTEXT_ITEM_PLACE_FREE: return "Place free";
         case TIMELINE_CONTEXT_ITEM_PLACE_PULSE: return "Place pulse";
         case TIMELINE_CONTEXT_ITEM_INSERT_PULSE: return "Insert pulse";
@@ -745,7 +747,7 @@ static const char *timeline_context_item_label(TimelineContextMenuItem item) {
 
 static const char *project_menu_item_label(ProjectMenuItem item) {
     switch (item) {
-        case PROJECT_MENU_ITEM_SAVE: return "Save project...";
+        case PROJECT_MENU_ITEM_SAVE: return "Save As...";
         case PROJECT_MENU_ITEM_OPEN: return "Open project...";
         case PROJECT_MENU_ITEM_EXPORT_TIMELINE_WAV: return "Export timeline WAV";
         case PROJECT_MENU_ITEM_QUIT: return "Quit";
@@ -756,6 +758,19 @@ static const char *project_menu_item_label(ProjectMenuItem item) {
 
 static bool app_save_project_bundle_default(App *app);
 static void app_project_browser_clear_preview(App *app);
+static bool write_project_preview_wav(App *app, const char *path);
+static void safe_project_render_stem(const App *app, char *out, size_t out_size);
+static bool app_export_timeline_wav_named(App *app, const char *filename_text);
+static bool app_export_roster_clip_wav_named(App *app, int roster_index, const char *filename_text);
+static bool app_rename_roster_clip_named(App *app, int roster_index, const char *display_name);
+static void roster_export_filename(const RosterClip *clip, char *out, size_t out_size);
+static void app_text_entry_open(App *app,
+                                AppTextEntryMode mode,
+                                AppTextEntryAction action,
+                                const char *title,
+                                const char *prompt,
+                                const char *initial_text,
+                                int max_length);
 
 static void timeline_effective_play_range(const MasterTimeline *timeline, int64_t *start, int64_t *end) {
     int64_t length = timeline->length_ticks > 0 ? timeline->length_ticks : 0;
@@ -2362,20 +2377,30 @@ void app_project_menu_apply(App *app) {
     ProjectMenuItem item = (ProjectMenuItem)clamp_int(app->project_menu_selected, 0, PROJECT_MENU_ITEM_COUNT - 1);
     switch (item) {
         case PROJECT_MENU_ITEM_SAVE:
-            if (app_save_project_bundle_default(app)) {
-                app->project_menu_open = false;
-                app->project_menu_selected = 0;
-            }
+            app_text_entry_open(app,
+                                APP_TEXT_ENTRY_DISPLAY_NAME,
+                                APP_TEXT_ENTRY_ACTION_SAVE_AS_PROJECT,
+                                "SAVE AS",
+                                "Name",
+                                app->project_name[0] ? app->project_name : "",
+                                APP_SAMPLE_NAME_MAX - 1);
             break;
         case PROJECT_MENU_ITEM_OPEN:
             app_project_browser_open(app);
             break;
         case PROJECT_MENU_ITEM_EXPORT_TIMELINE_WAV:
-            if (app_export_timeline_wav(app, NULL)) {
-                app->project_menu_open = false;
-                app->project_menu_selected = 0;
-            }
+        {
+            char initial[APP_SAMPLE_NAME_MAX];
+            safe_project_render_stem(app, initial, sizeof(initial));
+            app_text_entry_open(app,
+                                APP_TEXT_ENTRY_FILENAME_SAFE,
+                                APP_TEXT_ENTRY_ACTION_EXPORT_TIMELINE_WAV,
+                                "EXPORT TIMELINE WAV",
+                                "File",
+                                initial,
+                                APP_SAMPLE_NAME_MAX - 1);
             break;
+        }
         case PROJECT_MENU_ITEM_QUIT:
             app->running = false;
             break;
@@ -2491,6 +2516,20 @@ void app_timeline_context_menu_apply(App *app) {
             }
             app_open_selected_roster_clip_waveform(app);
             break;
+        case TIMELINE_CONTEXT_ITEM_RENAME_ROSTER:
+            if (app->timeline_context_menu_roster_index >= 0 &&
+                app->timeline_context_menu_roster_index < app->roster_clip_count) {
+                app->selected_roster_clip = app->timeline_context_menu_roster_index;
+                app_text_entry_open(app,
+                                    APP_TEXT_ENTRY_DISPLAY_NAME,
+                                    APP_TEXT_ENTRY_ACTION_RENAME_ROSTER_CLIP,
+                                    "RENAME ROSTER CLIP",
+                                    "Name",
+                                    app->roster[app->timeline_context_menu_roster_index].name,
+                                    APP_ROSTER_CLIP_NAME_MAX - 1);
+                app->text_entry_target_roster_index = app->timeline_context_menu_roster_index;
+            }
+            break;
         case TIMELINE_CONTEXT_ITEM_PLACE_FREE:
         case TIMELINE_CONTEXT_ITEM_PLACE_PULSE:
         case TIMELINE_CONTEXT_ITEM_INSERT_PULSE:
@@ -2510,8 +2549,21 @@ void app_timeline_context_menu_apply(App *app) {
             if (app->timeline_context_menu_roster_index >= 0 &&
                 app->timeline_context_menu_roster_index < app->roster_clip_count) {
                 app->selected_roster_clip = app->timeline_context_menu_roster_index;
+                char initial[APP_ROSTER_CLIP_NAME_MAX + 8];
+                roster_export_filename(&app->roster[app->timeline_context_menu_roster_index],
+                                       initial,
+                                       sizeof(initial));
+                char *dot = SDL_strrchr(initial, '.');
+                if (dot) *dot = '\0';
+                app_text_entry_open(app,
+                                    APP_TEXT_ENTRY_FILENAME_SAFE,
+                                    APP_TEXT_ENTRY_ACTION_EXPORT_ROSTER_WAV,
+                                    "EXPORT ROSTER WAV",
+                                    "File",
+                                    initial,
+                                    APP_ROSTER_CLIP_NAME_MAX - 1);
+                app->text_entry_target_roster_index = app->timeline_context_menu_roster_index;
             }
-            app_export_selected_roster_clip(app);
             break;
         case TIMELINE_CONTEXT_ITEM_DELETE_ROSTER:
             app->timeline_context_menu_scope = TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE;
@@ -3016,64 +3068,6 @@ static bool write_project_float_wav(const RosterClip *clip, const char *path) {
     return ok;
 }
 
-static float roster_clip_sample_at_for_preview(const RosterClip *clip, double frame, int channel, size_t loop_start, size_t loop_end) {
-    if (!clip || !clip->samples || clip->frame_count == 0 || clip->channels <= 0 || loop_end <= loop_start) return 0.0f;
-    double loop_len = (double)(loop_end - loop_start);
-    while (frame < (double)loop_start) frame += loop_len;
-    while (frame >= (double)loop_end) frame -= loop_len;
-    size_t i0 = (size_t)frame;
-    size_t i1 = i0 + 1 < loop_end ? i0 + 1 : loop_start;
-    double frac = frame - (double)i0;
-    int c = channel < clip->channels ? channel : clip->channels - 1;
-    float s0 = clip->samples[i0 * (size_t)clip->channels + (size_t)c];
-    float s1 = clip->samples[i1 * (size_t)clip->channels + (size_t)c];
-    return (float)((1.0 - frac) * s0 + frac * s1);
-}
-
-static bool write_project_preview_wav(const App *app, const char *path) {
-    if (!app || !path) return false;
-    const RosterClip *clip = NULL;
-    for (int i = 0; i < app->roster_clip_count; ++i) {
-        const RosterClip *candidate = &app->roster[i];
-        if (candidate->samples && candidate->frame_count > 0 &&
-            candidate->channels > 0 && candidate->sample_rate > 0) {
-            clip = candidate;
-            break;
-        }
-    }
-    if (!clip) return false;
-
-    size_t loop_start = clip->loop_start_frame;
-    size_t loop_end = clip->loop_end_frame;
-    if (loop_end > clip->frame_count) loop_end = clip->frame_count;
-    if (loop_end <= loop_start + 1) {
-        loop_start = 0;
-        loop_end = clip->frame_count;
-    }
-    if (loop_end <= loop_start + 1) return false;
-
-    const size_t preview_frames = (size_t)VAPORPLANE_PROJECT_SAMPLE_RATE * 7u;
-    float *buffer = (float *)SDL_calloc(preview_frames * VAPORPLANE_PROJECT_CHANNELS, sizeof(float));
-    if (!buffer) return false;
-
-    double source_frame = (double)loop_start;
-    double source_step = (double)clip->sample_rate / (double)VAPORPLANE_PROJECT_SAMPLE_RATE;
-    if (source_step <= 0.0) source_step = 1.0;
-    float gain = app->audio.master_gain;
-    if (gain <= 0.0f) gain = 1.0f;
-    for (size_t frame = 0; frame < preview_frames; ++frame) {
-        buffer[frame * 2] = roster_clip_sample_at_for_preview(clip, source_frame, 0, loop_start, loop_end) * gain;
-        buffer[frame * 2 + 1] = roster_clip_sample_at_for_preview(clip, source_frame, 1, loop_start, loop_end) * gain;
-        source_frame += source_step;
-        double loop_len = (double)(loop_end - loop_start);
-        while (source_frame >= (double)loop_end) source_frame -= loop_len;
-    }
-
-    bool ok = write_project_float_wav_buffer(buffer, preview_frames, path);
-    SDL_free(buffer);
-    return ok;
-}
-
 typedef struct {
     Uint8 *data;
     size_t size;
@@ -3446,6 +3440,10 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
         if (app) app_set_status(app, "No project path");
         return false;
     }
+    if (app->roster_clip_count <= 0 && !timeline_has_instances(&app->timeline)) {
+        app_set_status(app, "Nothing to save yet");
+        return false;
+    }
     app_project_browser_clear_preview(app);
     if (path_exists_any(bundle_path)) {
         app_set_status(app, "Project bundle already exists");
@@ -3548,6 +3546,364 @@ static bool unique_project_bundle_path(char *out, size_t out_size) {
     return false;
 }
 
+static void app_text_entry_open(App *app,
+                                AppTextEntryMode mode,
+                                AppTextEntryAction action,
+                                const char *title,
+                                const char *prompt,
+                                const char *initial_text,
+                                int max_length) {
+    if (!app) return;
+    app->text_entry_open = true;
+    app->text_entry_mode = mode;
+    app->text_entry_action = action;
+    SDL_strlcpy(app->text_entry_title, title ? title : "TEXT ENTRY", sizeof(app->text_entry_title));
+    SDL_strlcpy(app->text_entry_prompt, prompt ? prompt : "Name", sizeof(app->text_entry_prompt));
+    SDL_strlcpy(app->text_entry_text, initial_text ? initial_text : "", sizeof(app->text_entry_text));
+    app->text_entry_text[sizeof(app->text_entry_text) - 1] = '\0';
+    app->text_entry_error[0] = '\0';
+    app->text_entry_max_length = clamp_int(max_length, 1, (int)sizeof(app->text_entry_text) - 1);
+    app->text_entry_text[app->text_entry_max_length] = '\0';
+    app->text_entry_caret = (int)SDL_strlen(app->text_entry_text);
+    app->text_entry_key_row = 0;
+    app->text_entry_key_col = 0;
+    app->text_entry_uppercase = false;
+    app->text_entry_target_roster_index = -1;
+    app->project_menu_open = false;
+    app->project_menu_selected = 0;
+    if (app->window) SDL_StartTextInput(app->window);
+    app_set_status(app, "Text entry");
+}
+
+static bool text_entry_char_allowed(AppTextEntryMode mode, char c) {
+    if ((unsigned char)c < 32 || c == 127) return false;
+    bool alnum = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+    if (mode == APP_TEXT_ENTRY_SEARCH_FILTER) return true;
+    if (mode == APP_TEXT_ENTRY_FILENAME_SAFE) return alnum || c == '-' || c == '_' || c == '#';
+    return alnum || c == ' ' || c == '-' || c == '_' || c == '\'' ||
+           c == '#' || c == '.' || c == '(' || c == ')';
+}
+
+static void app_text_entry_set_error(App *app, const char *text) {
+    if (!app) return;
+    SDL_strlcpy(app->text_entry_error, text ? text : "", sizeof(app->text_entry_error));
+    if (text && text[0]) app_set_status(app, text);
+}
+
+void app_text_entry_insert_text(App *app, const char *text) {
+    if (!app || !app->text_entry_open || !text) return;
+    app->text_entry_error[0] = '\0';
+    for (size_t i = 0; text[i]; ++i) {
+        char c = text[i];
+        if (!text_entry_char_allowed(app->text_entry_mode, c)) continue;
+        int len = (int)SDL_strlen(app->text_entry_text);
+        if (len >= app->text_entry_max_length) break;
+        app->text_entry_caret = clamp_int(app->text_entry_caret, 0, len);
+        SDL_memmove(&app->text_entry_text[app->text_entry_caret + 1],
+                    &app->text_entry_text[app->text_entry_caret],
+                    (size_t)(len - app->text_entry_caret + 1));
+        app->text_entry_text[app->text_entry_caret] = c;
+        app->text_entry_caret++;
+    }
+}
+
+void app_text_entry_backspace(App *app) {
+    if (!app || !app->text_entry_open) return;
+    int len = (int)SDL_strlen(app->text_entry_text);
+    app->text_entry_caret = clamp_int(app->text_entry_caret, 0, len);
+    if (app->text_entry_caret <= 0) return;
+    SDL_memmove(&app->text_entry_text[app->text_entry_caret - 1],
+                &app->text_entry_text[app->text_entry_caret],
+                (size_t)(len - app->text_entry_caret + 1));
+    app->text_entry_caret--;
+    app->text_entry_error[0] = '\0';
+}
+
+void app_text_entry_delete_forward(App *app) {
+    if (!app || !app->text_entry_open) return;
+    int len = (int)SDL_strlen(app->text_entry_text);
+    app->text_entry_caret = clamp_int(app->text_entry_caret, 0, len);
+    if (app->text_entry_caret >= len) return;
+    SDL_memmove(&app->text_entry_text[app->text_entry_caret],
+                &app->text_entry_text[app->text_entry_caret + 1],
+                (size_t)(len - app->text_entry_caret));
+    app->text_entry_error[0] = '\0';
+}
+
+void app_text_entry_move_caret(App *app, int delta) {
+    if (!app || !app->text_entry_open || delta == 0) return;
+    int len = (int)SDL_strlen(app->text_entry_text);
+    app->text_entry_caret = clamp_int(app->text_entry_caret + delta, 0, len);
+}
+
+static const char *text_entry_keyboard_row(int row) {
+    static const char *rows[] = {
+        "qwertyuiop",
+        "asdfghjkl",
+        "zxcvbnm-_'",
+        "1234567890"
+    };
+    if (row < 0 || row >= 4) return rows[0];
+    return rows[row];
+}
+
+static int text_entry_keyboard_row_len(int row) {
+    return (int)SDL_strlen(text_entry_keyboard_row(row));
+}
+
+void app_text_entry_move_key(App *app, int dx, int dy) {
+    if (!app || !app->text_entry_open) return;
+    int row = clamp_int(app->text_entry_key_row + dy, 0, 3);
+    int col = app->text_entry_key_col + dx;
+    int len = text_entry_keyboard_row_len(row);
+    while (col < 0) col += len;
+    col %= len;
+    app->text_entry_key_row = row;
+    app->text_entry_key_col = col;
+}
+
+void app_text_entry_insert_selected_key(App *app) {
+    if (!app || !app->text_entry_open) return;
+    const char *row = text_entry_keyboard_row(app->text_entry_key_row);
+    int len = (int)SDL_strlen(row);
+    if (len <= 0) return;
+    int col = clamp_int(app->text_entry_key_col, 0, len - 1);
+    char c = row[col];
+    if (app->text_entry_uppercase && c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    char text[2] = { c, '\0' };
+    app_text_entry_insert_text(app, text);
+}
+
+void app_text_entry_insert_separator(App *app) {
+    if (!app || !app->text_entry_open) return;
+    const char *separator = app->text_entry_mode == APP_TEXT_ENTRY_FILENAME_SAFE ? "_" : " ";
+    app_text_entry_insert_text(app, separator);
+}
+
+void app_text_entry_toggle_shift(App *app) {
+    if (!app || !app->text_entry_open) return;
+    app->text_entry_uppercase = !app->text_entry_uppercase;
+}
+
+void app_text_entry_cancel(App *app) {
+    if (!app || !app->text_entry_open) return;
+    app->text_entry_open = false;
+    app->text_entry_action = APP_TEXT_ENTRY_ACTION_NONE;
+    app->text_entry_target_roster_index = -1;
+    app->text_entry_error[0] = '\0';
+    if (app->window) SDL_StopTextInput(app->window);
+    app_set_status(app, "Text entry canceled");
+}
+
+static bool sanitize_project_bundle_leaf(const char *display_name, char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!display_name) return false;
+
+    size_t start = 0;
+    size_t end = SDL_strlen(display_name);
+    while (start < end && isspace((unsigned char)display_name[start])) start++;
+    while (end > start && isspace((unsigned char)display_name[end - 1])) end--;
+    if (end <= start) return false;
+
+    char clean[APP_SAMPLE_NAME_MAX];
+    size_t write = 0;
+    bool last_underscore = false;
+    for (size_t i = start; i < end && write + 1 < sizeof(clean); ++i) {
+        char c = display_name[i];
+        bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '#';
+        bool dot = c == '.';
+        bool whitespace = isspace((unsigned char)c);
+        char out_c = (safe || dot) ? c : '_';
+        if (whitespace) out_c = '_';
+        if (out_c == '_') {
+            if (last_underscore) continue;
+            last_underscore = true;
+        } else {
+            last_underscore = false;
+        }
+        clean[write++] = out_c;
+    }
+    while (write > 0 && clean[0] == '.') {
+        SDL_memmove(clean, clean + 1, write - 1);
+        write--;
+    }
+    while (write > 0 && clean[write - 1] == '_') write--;
+    if (write == 0) return false;
+    clean[write] = '\0';
+
+    size_t suffix_len = SDL_strlen(VAPORPLANE_PROJECT_BUNDLE_SUFFIX);
+    size_t clean_len = SDL_strlen(clean);
+    if (clean_len > suffix_len &&
+        SDL_strcasecmp(clean + clean_len - suffix_len, VAPORPLANE_PROJECT_BUNDLE_SUFFIX) == 0) {
+        SDL_strlcpy(out, clean, out_size);
+    } else {
+        SDL_snprintf(out, out_size, "%s%s", clean, VAPORPLANE_PROJECT_BUNDLE_SUFFIX);
+    }
+    return out[0] != '\0';
+}
+
+static void trim_display_name(const char *input, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!input) return;
+    size_t start = 0;
+    size_t end = SDL_strlen(input);
+    while (start < end && isspace((unsigned char)input[start])) start++;
+    while (end > start && isspace((unsigned char)input[end - 1])) end--;
+    size_t len = end - start;
+    if (len >= out_size) len = out_size - 1;
+    SDL_memcpy(out, input + start, len);
+    out[len] = '\0';
+}
+
+static bool sanitize_wav_filename_leaf(const char *filename_text, char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!filename_text) return false;
+
+    char trimmed[APP_SAMPLE_NAME_MAX];
+    trim_display_name(filename_text, trimmed, sizeof(trimmed));
+    if (!trimmed[0]) return false;
+
+    char clean[APP_SAMPLE_NAME_MAX + 8];
+    size_t write = 0;
+    bool last_underscore = false;
+    for (size_t read = 0; trimmed[read] && write + 1 < sizeof(clean); ++read) {
+        char c = trimmed[read];
+        bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '#';
+        bool dot = c == '.';
+        bool whitespace = isspace((unsigned char)c);
+        char out_c = (safe || dot) ? c : '_';
+        if (whitespace) out_c = '_';
+        if (out_c == '_') {
+            if (last_underscore) continue;
+            last_underscore = true;
+        } else {
+            last_underscore = false;
+        }
+        clean[write++] = out_c;
+    }
+    while (write > 0 && clean[0] == '.') {
+        SDL_memmove(clean, clean + 1, write - 1);
+        write--;
+    }
+    while (write > 0 && clean[write - 1] == '_') write--;
+    if (write == 0) return false;
+    clean[write] = '\0';
+
+    const char *suffix = ".wav";
+    size_t suffix_len = SDL_strlen(suffix);
+    size_t clean_len = SDL_strlen(clean);
+    if (clean_len > suffix_len &&
+        SDL_strcasecmp(clean + clean_len - suffix_len, suffix) == 0) {
+        SDL_strlcpy(out, clean, out_size);
+    } else {
+        SDL_snprintf(out, out_size, "%s%s", clean, suffix);
+    }
+    return out[0] != '\0';
+}
+
+static bool app_save_project_bundle_named(App *app, const char *display_name) {
+    if (!app) return false;
+    char trimmed[APP_SAMPLE_NAME_MAX];
+    trim_display_name(display_name, trimmed, sizeof(trimmed));
+    if (!trimmed[0]) {
+        app_text_entry_set_error(app, "Enter a project name");
+        return false;
+    }
+
+    char leaf[APP_SAMPLE_NAME_MAX + 16];
+    if (!sanitize_project_bundle_leaf(trimmed, leaf, sizeof(leaf))) {
+        app_text_entry_set_error(app, "Enter a project name");
+        return false;
+    }
+
+    char dir[CLIP_MAX_PATH];
+    if (!resolve_project_export_dir(dir, sizeof(dir))) {
+        app_text_entry_set_error(app, "Could not open project folder");
+        return false;
+    }
+    char path[CLIP_MAX_PATH];
+    path_join(path, sizeof(path), dir, leaf);
+    if (path_exists_any(path)) {
+        app_text_entry_set_error(app, "Project already exists");
+        return false;
+    }
+
+    char previous_id[APP_STABLE_ID_MAX];
+    char previous_name[APP_SAMPLE_NAME_MAX];
+    SDL_strlcpy(previous_id, app->project_id, sizeof(previous_id));
+    SDL_strlcpy(previous_name, app->project_name, sizeof(previous_name));
+    SDL_strlcpy(app->project_name, trimmed, sizeof(app->project_name));
+    if (!app_save_project_bundle(app, path)) {
+        SDL_strlcpy(app->project_id, previous_id, sizeof(app->project_id));
+        SDL_strlcpy(app->project_name, previous_name, sizeof(app->project_name));
+        if (!app->text_entry_error[0]) app_text_entry_set_error(app, app->status_text[0] ? app->status_text : "Could not save project");
+        return false;
+    }
+    return true;
+}
+
+static bool app_rename_roster_clip_named(App *app, int roster_index, const char *display_name) {
+    if (!app || roster_index < 0 || roster_index >= app->roster_clip_count) {
+        app_text_entry_set_error(app, "No roster clip selected");
+        return false;
+    }
+
+    char trimmed[APP_ROSTER_CLIP_NAME_MAX];
+    trim_display_name(display_name, trimmed, sizeof(trimmed));
+    if (!trimmed[0]) {
+        app_text_entry_set_error(app, "Enter a roster name");
+        return false;
+    }
+
+    SDL_strlcpy(app->roster[roster_index].name, trimmed, sizeof(app->roster[roster_index].name));
+    if (app->waveform_source_mode == WAVEFORM_SOURCE_ROSTER &&
+        app->waveform_source_roster_index == roster_index) {
+        SDL_strlcpy(app->waveform_source_name, trimmed, sizeof(app->waveform_source_name));
+    }
+    app->selected_roster_clip = roster_index;
+    app_timeline_clear_context_menu(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Renamed roster clip: %s", trimmed);
+    return true;
+}
+
+void app_text_entry_confirm(App *app) {
+    if (!app || !app->text_entry_open) return;
+    bool ok = false;
+    switch (app->text_entry_action) {
+        case APP_TEXT_ENTRY_ACTION_SAVE_AS_PROJECT:
+            ok = app_save_project_bundle_named(app, app->text_entry_text);
+            break;
+        case APP_TEXT_ENTRY_ACTION_EXPORT_TIMELINE_WAV:
+            ok = app_export_timeline_wav_named(app, app->text_entry_text);
+            break;
+        case APP_TEXT_ENTRY_ACTION_EXPORT_ROSTER_WAV:
+            ok = app_export_roster_clip_wav_named(app,
+                                                  app->text_entry_target_roster_index,
+                                                  app->text_entry_text);
+            break;
+        case APP_TEXT_ENTRY_ACTION_RENAME_ROSTER_CLIP:
+            ok = app_rename_roster_clip_named(app,
+                                              app->text_entry_target_roster_index,
+                                              app->text_entry_text);
+            break;
+        case APP_TEXT_ENTRY_ACTION_NONE:
+        default:
+            ok = true;
+            break;
+    }
+    if (!ok) return;
+    app->text_entry_open = false;
+    app->text_entry_action = APP_TEXT_ENTRY_ACTION_NONE;
+    app->text_entry_target_roster_index = -1;
+    app->text_entry_error[0] = '\0';
+    if (app->window) SDL_StopTextInput(app->window);
+}
+
 static bool app_save_project_bundle_default(App *app) {
     char path[CLIP_MAX_PATH];
     if (!unique_project_bundle_path(path, sizeof(path))) {
@@ -3574,7 +3930,7 @@ static bool resolve_render_export_dir(char *out, size_t out_size) {
     return ensure_directory(out);
 }
 
-static void safe_project_render_filename(const App *app, char *out, size_t out_size) {
+static void safe_project_render_stem(const App *app, char *out, size_t out_size) {
     if (!out || out_size == 0) return;
     const char *name = app && app->project_name[0] ? app->project_name :
                        (app && app->project_id[0] ? app->project_id : "vaporplane_timeline");
@@ -3588,7 +3944,13 @@ static void safe_project_render_filename(const App *app, char *out, size_t out_s
     }
     if (write == 0) clean[write++] = 'r';
     clean[write] = '\0';
-    SDL_snprintf(out, out_size, "%s.wav", clean);
+    SDL_strlcpy(out, clean, out_size);
+}
+
+static void safe_project_render_filename(const App *app, char *out, size_t out_size) {
+    char stem[APP_SAMPLE_NAME_MAX];
+    safe_project_render_stem(app, stem, sizeof(stem));
+    SDL_snprintf(out, out_size, "%s.wav", stem[0] ? stem : "vaporplane_timeline");
 }
 
 static bool default_timeline_render_path(const App *app, char *out, size_t out_size) {
@@ -3599,6 +3961,36 @@ static bool default_timeline_render_path(const App *app, char *out, size_t out_s
     safe_project_render_filename(app, filename, sizeof(filename));
     path_join(out, out_size, dir, filename);
     return out[0] != '\0';
+}
+
+static bool app_export_timeline_wav_named(App *app, const char *filename_text) {
+    if (!app) return false;
+    char leaf[APP_SAMPLE_NAME_MAX + 8];
+    if (!sanitize_wav_filename_leaf(filename_text, leaf, sizeof(leaf))) {
+        app_text_entry_set_error(app, "Enter a file name");
+        return false;
+    }
+
+    char dir[CLIP_MAX_PATH];
+    if (!resolve_render_export_dir(dir, sizeof(dir))) {
+        app_text_entry_set_error(app, "Could not open render folder");
+        return false;
+    }
+
+    char path[CLIP_MAX_PATH];
+    path_join(path, sizeof(path), dir, leaf);
+    if (path_exists_any(path)) {
+        app_text_entry_set_error(app, "File already exists");
+        return false;
+    }
+
+    if (!app_export_timeline_wav(app, path)) {
+        app_text_entry_set_error(app, app->status_text[0] ? app->status_text : "Could not export timeline WAV");
+        return false;
+    }
+    app->project_menu_open = false;
+    app->project_menu_selected = 0;
+    return true;
 }
 
 static int64_t timeline_last_instance_end_tick(const MasterTimeline *timeline) {
@@ -3654,6 +4046,104 @@ static bool app_timeline_has_renderable_clip_in_range(const App *app, int64_t st
         }
     }
     return false;
+}
+
+static bool app_timeline_first_renderable_range(const App *app, int64_t *start_tick, int64_t *end_tick) {
+    if (!app || !start_tick || !end_tick || app->roster_clip_count <= 0) return false;
+    bool found = false;
+    int64_t first = 0;
+    int64_t last = 0;
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        const TimelineLane *lane = &app->timeline.lanes[lane_index];
+        if (lane->muted) continue;
+        for (int i = 0; i < lane->instance_count; ++i) {
+            const TimelineInstance *instance = &lane->instances[i];
+            if (instance->duration_ticks <= 0) continue;
+            if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
+            const RosterClip *clip = &app->roster[instance->roster_clip_index];
+            if (!clip->samples || clip->frame_count <= 1 || clip->sample_rate <= 0 || clip->channels <= 0) continue;
+            int64_t end = instance->start_tick + instance->duration_ticks;
+            if (!found || instance->start_tick < first) first = instance->start_tick;
+            if (!found || end > last) last = end;
+            found = true;
+        }
+    }
+    if (!found || last <= first) return false;
+    *start_tick = first;
+    *end_tick = last;
+    return true;
+}
+
+static bool app_timeline_preview_range(const App *app, int64_t *start_tick, int64_t *end_tick) {
+    if (!app || !start_tick || !end_tick) return false;
+    if (app->timeline.play_range_custom &&
+        app->timeline.play_range_start_tick >= 0 &&
+        app->timeline.play_range_end_tick > app->timeline.play_range_start_tick) {
+        int64_t start = app->timeline.play_range_start_tick;
+        int64_t end = app->timeline.play_range_end_tick;
+        if (!app_timeline_has_renderable_clip_in_range(app, start, end)) return false;
+        *start_tick = start;
+        *end_tick = end;
+        return true;
+    }
+    return app_timeline_first_renderable_range(app, start_tick, end_tick);
+}
+
+static bool write_project_preview_wav(App *app, const char *path) {
+    if (!app || !path || !path[0]) return false;
+    int64_t start_tick = 0;
+    int64_t end_tick = 0;
+    if (!app_timeline_preview_range(app, &start_tick, &end_tick)) return false;
+
+    FloatWavStreamWriter writer;
+    if (!float_wav_stream_open(&writer, path)) return false;
+
+    AudioEngine render_audio;
+    audio_engine_init_offline_timeline_render(&render_audio,
+                                              &app->audio,
+                                              app->roster,
+                                              &app->roster_clip_count,
+                                              &app->timeline,
+                                              VAPORPLANE_PROJECT_SAMPLE_RATE);
+
+    const size_t preview_frames = (size_t)VAPORPLANE_PROJECT_SAMPLE_RATE * 7u;
+    AudioTimelineRenderState state;
+    audio_timeline_render_state_init(&state, start_tick, end_tick);
+    size_t written_frames = 0;
+    bool had_active = false;
+    float block[AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES * 2];
+
+    while (written_frames < preview_frames) {
+        int block_frames = (int)(preview_frames - written_frames);
+        if (block_frames > AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES) block_frames = AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES;
+        int active_count = 0;
+        if (!state.finished) {
+            active_count = audio_engine_render_timeline_block(&render_audio,
+                                                              &state,
+                                                              block,
+                                                              block_frames,
+                                                              VAPORPLANE_PROJECT_SAMPLE_RATE);
+        } else {
+            audio_engine_render_master_fx_silence_block(&render_audio,
+                                                        block,
+                                                        block_frames,
+                                                        VAPORPLANE_PROJECT_SAMPLE_RATE);
+        }
+        if (active_count > 0) had_active = true;
+        if (!float_wav_stream_write(&writer, block, block_frames)) {
+            float_wav_stream_abort(&writer);
+            SDL_RemovePath(path);
+            return false;
+        }
+        written_frames += (size_t)block_frames;
+    }
+
+    if (!had_active || !float_wav_stream_close(&writer)) {
+        float_wav_stream_abort(&writer);
+        SDL_RemovePath(path);
+        return false;
+    }
+    return true;
 }
 
 bool app_export_timeline_wav(App *app, const char *path) {
@@ -4877,6 +5367,65 @@ static void app_use_cwd_roster_export_dir(App *app) {
     SDL_strlcpy(app->roster_export_dir, dir, sizeof(app->roster_export_dir));
     app->roster_export_dir_is_base_path = false;
     SDL_CreateDirectory(app->roster_export_dir);
+}
+
+static bool app_export_roster_clip_wav_to_path(App *app, int roster_index, const char *path) {
+    if (!app || roster_index < 0 || roster_index >= app->roster_clip_count || !path || !path[0]) {
+        app_set_status(app, "No roster clip selected");
+        return false;
+    }
+    bool exported = write_roster_clip_wav(&app->roster[roster_index], path);
+    if (!exported) {
+        app_set_status(app, "Could not export roster WAV");
+        return false;
+    }
+    app->selected_roster_clip = roster_index;
+    app_timeline_clear_context_menu(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Exported %s", path);
+    return true;
+}
+
+static bool app_export_roster_clip_wav_named(App *app, int roster_index, const char *filename_text) {
+    if (!app || roster_index < 0 || roster_index >= app->roster_clip_count) {
+        app_text_entry_set_error(app, "No roster clip selected");
+        return false;
+    }
+
+    char leaf[APP_SAMPLE_NAME_MAX + 8];
+    if (!sanitize_wav_filename_leaf(filename_text, leaf, sizeof(leaf))) {
+        app_text_entry_set_error(app, "Enter a file name");
+        return false;
+    }
+
+    if (!SDL_CreateDirectory(app->roster_export_dir)) {
+        if (app->roster_export_dir_is_base_path) app_use_cwd_roster_export_dir(app);
+        if (!SDL_CreateDirectory(app->roster_export_dir)) {
+            app_text_entry_set_error(app, "Could not create roster export folder");
+            return false;
+        }
+    }
+
+    char path[CLIP_MAX_PATH];
+    path_join(path, sizeof(path), app->roster_export_dir, leaf);
+    if (path_exists_any(path)) {
+        app_text_entry_set_error(app, "File already exists");
+        return false;
+    }
+
+    if (app_export_roster_clip_wav_to_path(app, roster_index, path)) return true;
+
+    if (app->roster_export_dir_is_base_path) {
+        app_use_cwd_roster_export_dir(app);
+        path_join(path, sizeof(path), app->roster_export_dir, leaf);
+        if (path_exists_any(path)) {
+            app_text_entry_set_error(app, "File already exists");
+            return false;
+        }
+        if (app_export_roster_clip_wav_to_path(app, roster_index, path)) return true;
+    }
+
+    app_text_entry_set_error(app, app->status_text[0] ? app->status_text : "Could not export roster WAV");
+    return false;
 }
 
 void app_export_selected_roster_clip(App *app) {
@@ -6908,7 +7457,127 @@ static void render_project_browser(App *app) {
     SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 46.0f, selected->path);
 }
 
+static void text_with_caret_display(const App *app, char *out, size_t out_size, int max_chars) {
+    if (!out || out_size == 0 || !app) return;
+    char with_caret[APP_SAMPLE_NAME_MAX + 4];
+    int len = (int)SDL_strlen(app->text_entry_text);
+    int caret = clamp_int(app->text_entry_caret, 0, len);
+    SDL_memcpy(with_caret, app->text_entry_text, (size_t)caret);
+    with_caret[caret] = '|';
+    SDL_strlcpy(with_caret + caret + 1,
+                app->text_entry_text + caret,
+                sizeof(with_caret) - (size_t)caret - 1u);
+    int total = (int)SDL_strlen(with_caret);
+    if (total <= max_chars) {
+        SDL_strlcpy(out, with_caret, out_size);
+        return;
+    }
+    int start = total - max_chars + 1;
+    SDL_snprintf(out, out_size, "<%s", with_caret + start);
+}
+
+static void render_text_entry(App *app) {
+    if (!app || !app->text_entry_open) return;
+
+    int w = 0, h = 0;
+    SDL_GetRenderOutputSize(app->renderer, &w, &h);
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(app->renderer, 4, 5, 9, 225);
+    SDL_FRect veil = { 0.0f, 0.0f, (float)w, (float)h };
+    SDL_RenderFillRect(app->renderer, &veil);
+
+    SDL_FRect panel = { ((float)w - 640.0f) * 0.5f, ((float)h - 380.0f) * 0.5f, 640.0f, 380.0f };
+    if (panel.x < 18.0f) panel.x = 18.0f;
+    if (panel.y < 18.0f) panel.y = 18.0f;
+    if (panel.x + panel.w > (float)w - 18.0f) panel.w = (float)w - 36.0f;
+    if (panel.y + panel.h > (float)h - 18.0f) panel.h = (float)h - 36.0f;
+
+    SDL_SetRenderDrawColor(app->renderer, 12, 14, 22, 244);
+    SDL_RenderFillRect(app->renderer, &panel);
+    SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 255);
+    SDL_RenderRect(app->renderer, &panel);
+
+    SDL_SetRenderDrawColor(app->renderer, 230, 238, 242, 255);
+    SDL_RenderDebugText(app->renderer, panel.x + 18.0f, panel.y + 16.0f, app->text_entry_title);
+    SDL_SetRenderDrawColor(app->renderer, 178, 190, 204, 255);
+    SDL_RenderDebugText(app->renderer, panel.x + 18.0f, panel.y + 34.0f,
+                        "A insert   B backspace   X separator   Y shift   L/R caret   Start confirm   Back cancel");
+
+    char field[96];
+    text_with_caret_display(app, field, sizeof(field), 60);
+    SDL_SetRenderDrawColor(app->renderer, 226, 236, 242, 255);
+    SDL_RenderDebugTextFormat(app->renderer, panel.x + 28.0f, panel.y + 72.0f,
+                              "%-7s %s",
+                              app->text_entry_prompt,
+                              field);
+
+    SDL_SetRenderDrawColor(app->renderer, 176, 188, 202, 255);
+    if (app->text_entry_action == APP_TEXT_ENTRY_ACTION_SAVE_AS_PROJECT) {
+        char folder_leaf[APP_SAMPLE_NAME_MAX + 16];
+        if (!sanitize_project_bundle_leaf(app->text_entry_text, folder_leaf, sizeof(folder_leaf))) {
+            SDL_strlcpy(folder_leaf, "Untitled.vapor", sizeof(folder_leaf));
+        }
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 28.0f, panel.y + 94.0f,
+                                  "Folder: %s",
+                                  folder_leaf);
+    } else if (app->text_entry_action == APP_TEXT_ENTRY_ACTION_EXPORT_TIMELINE_WAV ||
+               app->text_entry_action == APP_TEXT_ENTRY_ACTION_EXPORT_ROSTER_WAV) {
+        char wav_leaf[APP_SAMPLE_NAME_MAX + 8];
+        if (!sanitize_wav_filename_leaf(app->text_entry_text, wav_leaf, sizeof(wav_leaf))) {
+            SDL_strlcpy(wav_leaf, "Untitled.wav", sizeof(wav_leaf));
+        }
+        SDL_RenderDebugTextFormat(app->renderer, panel.x + 28.0f, panel.y + 94.0f,
+                                  "File:   %s",
+                                  wav_leaf);
+    } else if (app->text_entry_action == APP_TEXT_ENTRY_ACTION_RENAME_ROSTER_CLIP) {
+        SDL_RenderDebugText(app->renderer,
+                            panel.x + 28.0f,
+                            panel.y + 94.0f,
+                            "Timeline instances use the roster name");
+    }
+
+    if (app->text_entry_error[0]) {
+        SDL_SetRenderDrawColor(app->renderer, 255, 116, 112, 255);
+        SDL_RenderDebugText(app->renderer, panel.x + 28.0f, panel.y + 118.0f, app->text_entry_error);
+    }
+
+    const float key_w = 46.0f;
+    const float key_h = 32.0f;
+    const float key_gap = 8.0f;
+    float grid_y = panel.y + 158.0f;
+    for (int row = 0; row < 4; ++row) {
+        const char *keys = text_entry_keyboard_row(row);
+        int len = (int)SDL_strlen(keys);
+        float row_w = (float)len * key_w + (float)(len - 1) * key_gap;
+        float x = panel.x + (panel.w - row_w) * 0.5f;
+        float y = grid_y + (float)row * (key_h + key_gap);
+        for (int col = 0; col < len; ++col) {
+            bool selected = row == app->text_entry_key_row && col == app->text_entry_key_col;
+            SDL_FRect key_rect = { x + (float)col * (key_w + key_gap), y, key_w, key_h };
+            SDL_SetRenderDrawColor(app->renderer, selected ? 42 : 22, selected ? 70 : 26, selected ? 78 : 36, 245);
+            SDL_RenderFillRect(app->renderer, &key_rect);
+            SDL_SetRenderDrawColor(app->renderer, selected ? 255 : 82, selected ? 220 : 110, selected ? 130 : 126, 255);
+            SDL_RenderRect(app->renderer, &key_rect);
+            char label = keys[col];
+            if (app->text_entry_uppercase && label >= 'a' && label <= 'z') label = (char)(label - 'a' + 'A');
+            SDL_SetRenderDrawColor(app->renderer, selected ? 255 : 218, selected ? 245 : 228, selected ? 210 : 235, 255);
+            SDL_RenderDebugTextFormat(app->renderer, key_rect.x + 19.0f, key_rect.y + 11.0f, "%c", label);
+        }
+    }
+
+    SDL_SetRenderDrawColor(app->renderer, 176, 188, 202, 255);
+    SDL_RenderDebugTextFormat(app->renderer, panel.x + 18.0f, panel.y + panel.h - 28.0f,
+                              "mode: %s   shift: %s",
+                              app->text_entry_mode == APP_TEXT_ENTRY_DISPLAY_NAME ? "DISPLAY_NAME" :
+                              (app->text_entry_mode == APP_TEXT_ENTRY_FILENAME_SAFE ? "FILENAME_SAFE" : "SEARCH_FILTER"),
+                              app->text_entry_uppercase ? "ON" : "off");
+}
+
 static void app_render_overlay(App *app) {
+    if (app->text_entry_open) {
+        render_text_entry(app);
+        return;
+    }
     if (app->project_browser_open) {
         render_project_browser(app);
         return;
@@ -7043,6 +7712,19 @@ bool app_init(App *app){
     app->project_browser_selected = 0;
     app->project_browser_dir[0] = '\0';
     app->project_browser_preview_clip_loaded = false;
+    app->text_entry_open = false;
+    app->text_entry_mode = APP_TEXT_ENTRY_DISPLAY_NAME;
+    app->text_entry_action = APP_TEXT_ENTRY_ACTION_NONE;
+    app->text_entry_title[0] = '\0';
+    app->text_entry_prompt[0] = '\0';
+    app->text_entry_text[0] = '\0';
+    app->text_entry_error[0] = '\0';
+    app->text_entry_caret = 0;
+    app->text_entry_max_length = APP_SAMPLE_NAME_MAX - 1;
+    app->text_entry_key_row = 0;
+    app->text_entry_key_col = 0;
+    app->text_entry_uppercase = false;
+    app->text_entry_target_roster_index = -1;
     app_resolve_roster_export_dir(app);
     app_refresh_sample_list(app);
     clip_init_generated(&app->clip, 48000, 2.0f);
@@ -7151,12 +7833,16 @@ void app_run(App *app){
             TempoLockParams *guide = app_get_active_tempo_params(app, &guide_params) ? &guide_params : NULL;
             waveform_render(app->renderer,&app->clip,&app->view,audio_engine_get_playhead_frame(&app->audio),guide);
         }
-        if (app->view_mode != APP_VIEW_LANE_INSPECTOR && app->view_mode != APP_VIEW_MASTER_MIX) app_render_overlay(app);
+        if (app->text_entry_open ||
+            (app->view_mode != APP_VIEW_LANE_INSPECTOR && app->view_mode != APP_VIEW_MASTER_MIX)) {
+            app_render_overlay(app);
+        }
         app_render_debug_overlay(app);
         SDL_RenderPresent(app->renderer);
     }
 }
 void app_shutdown(App *app){
+    if(app->text_entry_open && app->window) SDL_StopTextInput(app->window);
     app_project_browser_clear_preview(app);
     audio_engine_shutdown(&app->audio);
     clip_destroy(&app->clip);

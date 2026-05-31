@@ -92,6 +92,7 @@ typedef enum {
     TIMELINE_CONTEXT_ITEM_REMOVE_TEMPO,
     TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE,
     TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM,
+    TIMELINE_CONTEXT_ITEM_RENAME_ROSTER,
     TIMELINE_CONTEXT_ITEM_PLACE_FREE,
     TIMELINE_CONTEXT_ITEM_PLACE_PULSE,
     TIMELINE_CONTEXT_ITEM_INSERT_PULSE,
@@ -108,6 +109,20 @@ typedef enum {
     PROJECT_MENU_ITEM_QUIT,
     PROJECT_MENU_ITEM_COUNT
 } ProjectMenuItem;
+
+typedef enum {
+    APP_TEXT_ENTRY_DISPLAY_NAME,
+    APP_TEXT_ENTRY_FILENAME_SAFE,
+    APP_TEXT_ENTRY_SEARCH_FILTER
+} AppTextEntryMode;
+
+typedef enum {
+    APP_TEXT_ENTRY_ACTION_NONE,
+    APP_TEXT_ENTRY_ACTION_SAVE_AS_PROJECT,
+    APP_TEXT_ENTRY_ACTION_EXPORT_TIMELINE_WAV,
+    APP_TEXT_ENTRY_ACTION_EXPORT_ROSTER_WAV,
+    APP_TEXT_ENTRY_ACTION_RENAME_ROSTER_CLIP
+} AppTextEntryAction;
 
 typedef struct App {
     SDL_Window *window;
@@ -160,6 +175,19 @@ typedef struct App {
     char status_text[160];
     char project_id[APP_STABLE_ID_MAX];
     char project_name[APP_SAMPLE_NAME_MAX];
+    bool text_entry_open;
+    AppTextEntryMode text_entry_mode;
+    AppTextEntryAction text_entry_action;
+    char text_entry_title[64];
+    char text_entry_prompt[64];
+    char text_entry_text[APP_SAMPLE_NAME_MAX];
+    char text_entry_error[96];
+    int text_entry_caret;
+    int text_entry_max_length;
+    int text_entry_key_row;
+    int text_entry_key_col;
+    bool text_entry_uppercase;
+    int text_entry_target_roster_index;
 
     bool tempo_lock_mode;
     double transport_bpm;
@@ -262,6 +290,16 @@ void app_project_menu_open(App *app);
 void app_project_menu_close(App *app);
 void app_project_menu_move(App *app, int delta);
 void app_project_menu_apply(App *app);
+void app_text_entry_cancel(App *app);
+void app_text_entry_confirm(App *app);
+void app_text_entry_insert_text(App *app, const char *text);
+void app_text_entry_backspace(App *app);
+void app_text_entry_delete_forward(App *app);
+void app_text_entry_move_caret(App *app, int delta);
+void app_text_entry_move_key(App *app, int dx, int dy);
+void app_text_entry_insert_selected_key(App *app);
+void app_text_entry_insert_separator(App *app);
+void app_text_entry_toggle_shift(App *app);
 void app_project_browser_open(App *app);
 void app_project_browser_close(App *app);
 void app_project_browser_refresh(App *app);

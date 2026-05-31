@@ -899,7 +899,12 @@ int audio_engine_render_timeline_block(AudioEngine *a,
     for(int frame = 0; frame < frame_count; ++frame) {
         if(state->playhead_tick >= (double)state->range_end_tick) {
             state->finished = true;
-            break;
+            float left = 0.0f;
+            float right = 0.0f;
+            audio_engine_process_offline_master(a, &left, &right);
+            out[frame * 2] = left;
+            out[frame * 2 + 1] = right;
+            continue;
         }
 
         float left = 0.0f;

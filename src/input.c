@@ -11,6 +11,8 @@ static double tempo_bpm_dpad_repeat_timer = 0.0;
 static int timeline_cursor_stick_direction = 0;
 static double timeline_cursor_stick_repeat_timer = 0.0;
 static double timeline_cursor_stick_held_seconds = 0.0;
+static int text_entry_stick_x_direction = 0;
+static int text_entry_stick_y_direction = 0;
 
 static bool button_pressed(SDL_Gamepad *gamepad, SDL_GamepadButton button);
 
@@ -599,6 +601,26 @@ bool input_handle_event(App *app, const SDL_Event *e){
         app_close_gamepad(app);
         SDL_memset(previous_buttons, 0, sizeof(previous_buttons));
     }
+    if(app->text_entry_open) {
+        if(e->type == SDL_EVENT_TEXT_INPUT) {
+            app_text_entry_insert_text(app, e->text.text);
+            return true;
+        }
+        if(e->type != SDL_EVENT_KEY_DOWN) return true;
+        switch(e->key.key) {
+            case SDLK_ESCAPE: app_text_entry_cancel(app); break;
+            case SDLK_RETURN: app_text_entry_confirm(app); break;
+            case SDLK_BACKSPACE: app_text_entry_backspace(app); break;
+            case SDLK_DELETE: app_text_entry_delete_forward(app); break;
+            case SDLK_LEFT: app_text_entry_move_caret(app, -1); break;
+            case SDLK_RIGHT: app_text_entry_move_caret(app, 1); break;
+            case SDLK_UP: app_text_entry_move_key(app, 0, -1); break;
+            case SDLK_DOWN: app_text_entry_move_key(app, 0, 1); break;
+            case SDLK_TAB: app_text_entry_move_key(app, (SDL_GetModState() & SDL_KMOD_SHIFT) ? -1 : 1, 0); break;
+            default: break;
+        }
+        return true;
+    }
     if(e->type!=SDL_EVENT_KEY_DOWN) return true;
     if(e->key.key==SDLK_F12) {
         app_toggle_debug_overlay(app);
@@ -710,6 +732,32 @@ void input_update_gamepad(App *app, double dt){
            button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_BACK)) {
             app->controls_legend_open = false;
         }
+        return;
+    }
+
+    if(app->text_entry_open) {
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_text_entry_move_key(app, -1, 0);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_text_entry_move_key(app, 1, 0);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_text_entry_move_key(app, 0, -1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_text_entry_move_key(app, 0, 1);
+
+        double lx_entry = axis_value(app->gamepad, SDL_GAMEPAD_AXIS_LEFTX);
+        double ly_entry = axis_value(app->gamepad, SDL_GAMEPAD_AXIS_LEFTY);
+        int x_dir = lx_entry < -0.55 ? -1 : (lx_entry > 0.55 ? 1 : 0);
+        int y_dir = ly_entry < -0.55 ? -1 : (ly_entry > 0.55 ? 1 : 0);
+        if(x_dir != 0 && x_dir != text_entry_stick_x_direction) app_text_entry_move_key(app, x_dir, 0);
+        if(y_dir != 0 && y_dir != text_entry_stick_y_direction) app_text_entry_move_key(app, 0, y_dir);
+        text_entry_stick_x_direction = x_dir;
+        text_entry_stick_y_direction = y_dir;
+
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) app_text_entry_insert_selected_key(app);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_EAST)) app_text_entry_backspace(app);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_WEST)) app_text_entry_insert_separator(app);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_NORTH)) app_text_entry_toggle_shift(app);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) app_text_entry_move_caret(app, -1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) app_text_entry_move_caret(app, 1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_START)) app_text_entry_confirm(app);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_BACK)) app_text_entry_cancel(app);
         return;
     }
 
