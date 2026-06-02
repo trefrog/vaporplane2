@@ -121,13 +121,20 @@ typedef enum {
 } ProjectMenuItem;
 
 typedef enum {
+    WAVEFORM_MENU_ITEM_RENDER_TEMPO,
+    WAVEFORM_MENU_ITEM_RENDER_PITCH,
+    WAVEFORM_MENU_ITEM_RENDER_RATE,
     WAVEFORM_MENU_ITEM_NORMALIZE,
-    WAVEFORM_MENU_ITEM_RENDER_TEMPO_MINUS_25,
-    WAVEFORM_MENU_ITEM_RENDER_PITCH_MINUS_3,
-    WAVEFORM_MENU_ITEM_RENDER_RATE_MINUS_20,
     WAVEFORM_MENU_ITEM_CANCEL,
     WAVEFORM_MENU_ITEM_COUNT
 } WaveformMenuItem;
+
+typedef enum {
+    WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM,
+    WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT,
+    WAVEFORM_RENDER_DIALOG_PITCH_SEMITONES,
+    WAVEFORM_RENDER_DIALOG_RATE_PERCENT
+} WaveformRenderDialogMode;
 
 typedef enum {
     ROSTER_COMMIT_ITEM_NEW_CLIP,
@@ -185,6 +192,12 @@ typedef struct App {
     bool waveform_sidecar_confirm_open;
     bool waveform_menu_open;
     int waveform_menu_selected;
+    bool waveform_render_dialog_open;
+    WaveformRenderDialogMode waveform_render_dialog_mode;
+    double waveform_render_source_bpm;
+    double waveform_render_value;
+    int waveform_render_step_index;
+    char waveform_render_error[96];
     bool roster_commit_menu_open;
     int roster_commit_menu_selected;
     bool waveform_frame_grip_active;
@@ -357,6 +370,10 @@ void app_waveform_menu_open(App *app);
 void app_waveform_menu_close(App *app);
 void app_waveform_menu_move(App *app, int delta);
 void app_waveform_menu_apply(App *app);
+void app_waveform_render_dialog_cancel(App *app);
+void app_waveform_render_dialog_confirm(App *app);
+void app_waveform_render_dialog_adjust(App *app, int direction);
+void app_waveform_render_dialog_cycle_step(App *app, int direction);
 void app_roster_commit_menu_close(App *app);
 void app_roster_commit_menu_move(App *app, int delta);
 void app_roster_commit_menu_apply(App *app);

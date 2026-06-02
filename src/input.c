@@ -812,6 +812,18 @@ bool input_handle_event(App *app, const SDL_Event *e){
         }
         return true;
     }
+    if(app->waveform_render_dialog_open) {
+        switch(e->key.key) {
+            case SDLK_ESCAPE: app_waveform_render_dialog_cancel(app); break;
+            case SDLK_RETURN: app_waveform_render_dialog_confirm(app); break;
+            case SDLK_UP: app_waveform_render_dialog_adjust(app, 1); break;
+            case SDLK_DOWN: app_waveform_render_dialog_adjust(app, -1); break;
+            case SDLK_LEFT: app_waveform_render_dialog_cycle_step(app, -1); break;
+            case SDLK_RIGHT: app_waveform_render_dialog_cycle_step(app, 1); break;
+            default: break;
+        }
+        return true;
+    }
     if(app->waveform_menu_open) {
         switch(e->key.key) {
             case SDLK_ESCAPE: app_waveform_menu_close(app); break;
@@ -946,6 +958,17 @@ void input_update_gamepad(App *app, double dt){
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) app_roster_commit_menu_apply(app);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_EAST) ||
            button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_START)) app_roster_commit_menu_close(app);
+        return;
+    }
+
+    if(app->waveform_render_dialog_open) {
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_waveform_render_dialog_adjust(app, 1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_waveform_render_dialog_adjust(app, -1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) app_waveform_render_dialog_cycle_step(app, -1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) app_waveform_render_dialog_cycle_step(app, 1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) app_waveform_render_dialog_confirm(app);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_EAST) ||
+           button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_START)) app_waveform_render_dialog_cancel(app);
         return;
     }
 

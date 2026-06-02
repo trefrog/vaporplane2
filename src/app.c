@@ -846,16 +846,7 @@ static const char *project_menu_item_label(ProjectMenuItem item) {
     }
 }
 
-static const char *waveform_menu_item_label(WaveformMenuItem item) {
-    switch (item) {
-        case WAVEFORM_MENU_ITEM_NORMALIZE: return "Normalize";
-        case WAVEFORM_MENU_ITEM_RENDER_TEMPO_MINUS_25: return "Render tempo -25";
-        case WAVEFORM_MENU_ITEM_RENDER_PITCH_MINUS_3: return "Render pitch -3st";
-        case WAVEFORM_MENU_ITEM_RENDER_RATE_MINUS_20: return "Render rate -20";
-        case WAVEFORM_MENU_ITEM_CANCEL:
-        default: return "Cancel";
-    }
-}
+static const char *waveform_menu_item_label(const App *app, WaveformMenuItem item);
 
 static const char *roster_commit_menu_item_label(RosterCommitMenuItem item) {
     switch (item) {
@@ -1497,6 +1488,7 @@ static void app_set_waveform_source_generated(App *app) {
     app->waveform_source_offset_frame = 0;
     app->waveform_sidecar_confirm_open = false;
     app->waveform_menu_open = false;
+    app->waveform_render_dialog_open = false;
     app->roster_commit_menu_open = false;
 }
 
@@ -1508,6 +1500,7 @@ static void app_set_waveform_source_wav(App *app, const char *path) {
     capture_base_name(&app->clip, app->waveform_source_name, sizeof(app->waveform_source_name));
     app->waveform_sidecar_confirm_open = false;
     app->waveform_menu_open = false;
+    app->waveform_render_dialog_open = false;
     app->roster_commit_menu_open = false;
 }
 
@@ -1523,6 +1516,7 @@ static void app_set_waveform_source_roster(App *app, int roster_index, const Ros
                 sizeof(app->waveform_source_path));
     app->waveform_sidecar_confirm_open = false;
     app->waveform_menu_open = false;
+    app->waveform_render_dialog_open = false;
     app->roster_commit_menu_open = false;
 }
 
@@ -1592,6 +1586,45 @@ static bool app_get_trusted_tempo_params(const App *app, TempoLockParams *params
         return true;
     }
     return false;
+}
+
+static bool tempo_params_are_explicitly_calibrated(const App *app, const TempoLockParams *params) {
+    if (!app || !params) return false;
+    if (!app->clip.clip_tempo_locked) return false;
+    if (params->bpm <= 0.0) return false;
+    if (params->beats_per_bar <= 0 || params->beat_unit <= 0) return false;
+    if (params->target_bars <= 0.0) return false;
+    if (app->clip.frame_count < 2) return false;
+    if (app->clip.loop_end_frame <= app->clip.loop_start_frame ||
+        app->clip.loop_end_frame > app->clip.frame_count) {
+        return false;
+    }
+    if (params->downbeat_frame < app->clip.loop_start_frame ||
+        params->downbeat_frame >= app->clip.loop_end_frame) {
+        return false;
+    }
+    return true;
+}
+
+static bool app_get_explicit_loop_calibration(const App *app, TempoLockParams *params) {
+    TempoLockParams tempo;
+    SDL_memset(&tempo, 0, sizeof(tempo));
+    if (!app || !app_get_trusted_tempo_params(app, &tempo)) return false;
+    if (!tempo_params_are_explicitly_calibrated(app, &tempo)) return false;
+    if (params) *params = tempo;
+    return true;
+}
+
+static const char *waveform_menu_item_label(const App *app, WaveformMenuItem item) {
+    switch (item) {
+        case WAVEFORM_MENU_ITEM_NORMALIZE: return "Normalize";
+        case WAVEFORM_MENU_ITEM_RENDER_TEMPO:
+            return app_get_explicit_loop_calibration(app, NULL) ? "Render tempo to BPM..." : "Render tempo percent...";
+        case WAVEFORM_MENU_ITEM_RENDER_PITCH: return "Render pitch semitones...";
+        case WAVEFORM_MENU_ITEM_RENDER_RATE: return "Render rate percent...";
+        case WAVEFORM_MENU_ITEM_CANCEL:
+        default: return "Cancel";
+    }
 }
 
 typedef struct {
@@ -1668,13 +1701,7 @@ static bool app_prepare_current_loop_capture(App *app, CurrentLoopCapture *captu
 
     TempoLockParams tempo;
     SDL_memset(&tempo, 0, sizeof(tempo));
-    bool tempo_calibrated = app_get_trusted_tempo_params(app, &tempo);
-    if (tempo_calibrated) {
-        if (tempo.bpm <= 0.0) tempo.bpm = 120.0;
-        if (tempo.beats_per_bar <= 0) tempo.beats_per_bar = 4;
-        if (tempo.beat_unit <= 0) tempo.beat_unit = 4;
-        if (tempo.target_bars <= 0.0) tempo.target_bars = 4.0;
-    }
+    bool tempo_calibrated = app_get_explicit_loop_calibration(app, &tempo);
 
     capture->samples = samples;
     capture->start_frame = start;
@@ -1691,6 +1718,7 @@ static void app_open_roster_commit_menu(App *app) {
     app->roster_commit_menu_open = true;
     app->roster_commit_menu_selected = 0;
     app->waveform_menu_open = false;
+    app->waveform_render_dialog_open = false;
     app->sample_selector_open = false;
     app_set_status(app, "Commit roster edit");
 }
@@ -1814,15 +1842,65 @@ static void app_capture_current_loop_to_roster_new(App *app) {
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Captured %s to roster", app->roster[roster_index].name);
 }
 
-static bool app_render_current_loop_to_roster(App *app, VpStretchMode mode, float amount, const char *name_suffix) {
+static void waveform_render_name_suffix(WaveformRenderDialogMode dialog_mode,
+                                        double source_bpm,
+                                        double value,
+                                        char *out,
+                                        size_t out_size) {
+    if (!out || out_size == 0) return;
+    switch (dialog_mode) {
+        case WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM:
+            SDL_snprintf(out, out_size, "tempo %.2fto%.2f", source_bpm, value);
+            break;
+        case WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT:
+            SDL_snprintf(out, out_size, "tempo %+.2f", value);
+            break;
+        case WAVEFORM_RENDER_DIALOG_PITCH_SEMITONES:
+            SDL_snprintf(out, out_size, "pitch %+.2fst", value);
+            break;
+        case WAVEFORM_RENDER_DIALOG_RATE_PERCENT:
+            SDL_snprintf(out, out_size, "rate %+.2f", value);
+            break;
+        default:
+            SDL_strlcpy(out, "render", out_size);
+            break;
+    }
+}
+
+static bool app_render_current_loop_to_roster(App *app, WaveformRenderDialogMode dialog_mode, double value) {
     CurrentLoopCapture capture;
     if (!app_prepare_current_loop_capture(app, &capture, true)) return false;
 
     VpStretchRequest request;
     request.sample_rate = app->clip.sample_rate;
     request.channels = app->clip.channels;
-    request.amount = amount;
-    request.mode = mode;
+
+    double render_amount = value;
+    switch (dialog_mode) {
+        case WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM:
+            if (!capture.tempo_calibrated || capture.tempo.bpm <= 0.0 || value <= 0.0) {
+                current_loop_capture_destroy(&capture);
+                app_set_status(app, "No calibrated source BPM");
+                return false;
+            }
+            render_amount = (value / capture.tempo.bpm - 1.0) * 100.0;
+            request.mode = VP_STRETCH_TEMPO_PERCENT;
+            break;
+        case WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT:
+            request.mode = VP_STRETCH_TEMPO_PERCENT;
+            break;
+        case WAVEFORM_RENDER_DIALOG_PITCH_SEMITONES:
+            request.mode = VP_STRETCH_PITCH_SEMITONES;
+            break;
+        case WAVEFORM_RENDER_DIALOG_RATE_PERCENT:
+            request.mode = VP_STRETCH_RATE_PERCENT;
+            break;
+        default:
+            current_loop_capture_destroy(&capture);
+            app_set_status(app, "Invalid render mode");
+            return false;
+    }
+    request.amount = (float)render_amount;
 
     float *rendered = NULL;
     int64_t rendered_frames_i64 = 0;
@@ -1896,7 +1974,13 @@ static bool app_render_current_loop_to_roster(App *app, VpStretchMode mode, floa
     } else {
         capture_base_name(&app->clip, base, sizeof(base));
     }
-    SDL_snprintf(next.name, sizeof(next.name), "%s %s", base, name_suffix ? name_suffix : "render");
+    char suffix[64];
+    waveform_render_name_suffix(dialog_mode,
+                                capture.tempo_calibrated ? capture.tempo.bpm : 0.0,
+                                value,
+                                suffix,
+                                sizeof(suffix));
+    SDL_snprintf(next.name, sizeof(next.name), "%s %s", base, suffix);
     const char *source_path = app->waveform_source_path[0] ? app->waveform_source_path : app->clip.file_path;
     SDL_strlcpy(next.source_path, source_path, sizeof(next.source_path));
     next.source_loop_start_frame = app->waveform_source_offset_frame + capture.start_frame;
@@ -1913,21 +1997,33 @@ static bool app_render_current_loop_to_roster(App *app, VpStretchMode mode, floa
     next.midi_velocity = 127;
     next.color = roster_color_for_append(app);
 
-    bool preserve_trusted_tempo = capture.tempo_calibrated &&
-        (mode == VP_STRETCH_TEMPO_PERCENT || mode == VP_STRETCH_PITCH_SEMITONES);
-    if (preserve_trusted_tempo) {
-        double source_bpm = capture.tempo.bpm > 0.0 ? capture.tempo.bpm : 0.0;
-        if (mode == VP_STRETCH_TEMPO_PERCENT && source_bpm > 0.0) {
-            next.source_bpm = source_bpm * (1.0 + (double)amount / 100.0);
-        } else {
-            next.source_bpm = source_bpm;
+    if (capture.tempo_calibrated) {
+        double output_bpm = capture.tempo.bpm;
+        switch (dialog_mode) {
+            case WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM:
+                output_bpm = value;
+                break;
+            case WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT:
+            case WAVEFORM_RENDER_DIALOG_RATE_PERCENT:
+                output_bpm = capture.tempo.bpm * (1.0 + value / 100.0);
+                break;
+            case WAVEFORM_RENDER_DIALOG_PITCH_SEMITONES:
+            default:
+                output_bpm = capture.tempo.bpm;
+                break;
         }
-        next.tempo_calibrated = next.source_bpm > 0.0;
-        next.beats_per_bar = capture.tempo.beats_per_bar > 0 ? capture.tempo.beats_per_bar : 4;
-        next.beat_unit = capture.tempo.beat_unit > 0 ? capture.tempo.beat_unit : 4;
-        next.target_bars = capture.tempo.target_bars > 0.0 ? capture.tempo.target_bars : 0.0;
+        next.tempo_calibrated = output_bpm > 0.0 &&
+            capture.tempo.beats_per_bar > 0 &&
+            capture.tempo.beat_unit > 0 &&
+            capture.tempo.target_bars > 0.0;
+        next.source_bpm = next.tempo_calibrated ? output_bpm : 0.0;
+        next.beats_per_bar = next.tempo_calibrated ? capture.tempo.beats_per_bar : 4;
+        next.beat_unit = next.tempo_calibrated ? capture.tempo.beat_unit : 4;
+        next.target_bars = next.tempo_calibrated ? capture.tempo.target_bars : 0.0;
         next.target_beats = next.target_bars > 0.0 ? next.target_bars * (double)next.beats_per_bar : 0.0;
-        if (capture.tempo.downbeat_frame > capture.start_frame && capture.frame_count > 0) {
+        if (next.tempo_calibrated &&
+            capture.tempo.downbeat_frame > capture.start_frame &&
+            capture.frame_count > 0) {
             size_t input_offset = capture.tempo.downbeat_frame - capture.start_frame;
             double scale = (double)rendered_frames / (double)capture.frame_count;
             size_t output_offset = (size_t)llround((double)input_offset * scale);
@@ -3135,6 +3231,7 @@ void app_waveform_menu_open(App *app) {
     if (!app || app->view_mode != APP_VIEW_WAVEFORM) return;
     app->waveform_menu_open = true;
     app->waveform_menu_selected = 0;
+    app->waveform_render_dialog_open = false;
     app->sample_selector_open = false;
     app->project_menu_open = false;
     app_timeline_clear_context_menu(app);
@@ -3146,6 +3243,122 @@ void app_waveform_menu_close(App *app) {
     app->waveform_menu_open = false;
     app->waveform_menu_selected = 0;
     app_set_status(app, "Waveform menu closed");
+}
+
+static const double waveform_render_steps[] = { 0.01, 0.10, 1.00, 10.00 };
+
+static int waveform_render_step_count(void) {
+    return (int)(sizeof(waveform_render_steps) / sizeof(waveform_render_steps[0]));
+}
+
+static double waveform_render_step_for_index(int index) {
+    int count = waveform_render_step_count();
+    if (count <= 0) return 1.0;
+    index = clamp_int(index, 0, count - 1);
+    return waveform_render_steps[index];
+}
+
+static const char *waveform_render_dialog_title(WaveformRenderDialogMode mode) {
+    switch (mode) {
+        case WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM: return "RENDER TEMPO TO BPM";
+        case WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT: return "RENDER TEMPO PERCENT";
+        case WAVEFORM_RENDER_DIALOG_PITCH_SEMITONES: return "RENDER PITCH";
+        case WAVEFORM_RENDER_DIALOG_RATE_PERCENT: return "RENDER RATE";
+        default: return "RENDER";
+    }
+}
+
+static const char *waveform_render_dialog_unit(WaveformRenderDialogMode mode) {
+    switch (mode) {
+        case WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM: return "BPM";
+        case WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT: return "%";
+        case WAVEFORM_RENDER_DIALOG_PITCH_SEMITONES: return "st";
+        case WAVEFORM_RENDER_DIALOG_RATE_PERCENT: return "%";
+        default: return "";
+    }
+}
+
+static double waveform_render_dialog_clamp_value(WaveformRenderDialogMode mode, double value) {
+    switch (mode) {
+        case WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM:
+            return clamp_double(value, TIMELINE_MIN_BPM, TIMELINE_MAX_BPM);
+        case WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT:
+        case WAVEFORM_RENDER_DIALOG_RATE_PERCENT:
+            return clamp_double(value, -50.0, 100.0);
+        case WAVEFORM_RENDER_DIALOG_PITCH_SEMITONES:
+            return clamp_double(value, -24.0, 24.0);
+        default:
+            return value;
+    }
+}
+
+static void app_waveform_render_dialog_open_mode(App *app, WaveformRenderDialogMode mode) {
+    if (!app) return;
+    TempoLockParams tempo;
+    SDL_memset(&tempo, 0, sizeof(tempo));
+    bool calibrated = app_get_explicit_loop_calibration(app, &tempo);
+    if (mode == WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM && !calibrated) {
+        mode = WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT;
+    }
+    app->waveform_render_dialog_open = true;
+    app->waveform_render_dialog_mode = mode;
+    app->waveform_render_source_bpm = calibrated ? tempo.bpm : 0.0;
+    app->waveform_render_value = mode == WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM ? tempo.bpm : 0.0;
+    app->waveform_render_value = waveform_render_dialog_clamp_value(mode, app->waveform_render_value);
+    app->waveform_render_step_index = 2;
+    app->waveform_render_error[0] = '\0';
+    app->waveform_menu_open = false;
+    app->roster_commit_menu_open = false;
+    app->sample_selector_open = false;
+    app_set_status(app, waveform_render_dialog_title(mode));
+}
+
+void app_waveform_render_dialog_cancel(App *app) {
+    if (!app) return;
+    app->waveform_render_dialog_open = false;
+    app->waveform_render_error[0] = '\0';
+    app_set_status(app, "Render canceled");
+}
+
+void app_waveform_render_dialog_adjust(App *app, int direction) {
+    if (!app || !app->waveform_render_dialog_open || direction == 0) return;
+    double step = waveform_render_step_for_index(app->waveform_render_step_index);
+    app->waveform_render_value += step * (double)direction;
+    app->waveform_render_value = waveform_render_dialog_clamp_value(app->waveform_render_dialog_mode,
+                                                                     app->waveform_render_value);
+    app->waveform_render_error[0] = '\0';
+}
+
+void app_waveform_render_dialog_cycle_step(App *app, int direction) {
+    if (!app || !app->waveform_render_dialog_open || direction == 0) return;
+    int count = waveform_render_step_count();
+    if (count <= 0) return;
+    int index = app->waveform_render_step_index + direction;
+    while (index < 0) index += count;
+    index %= count;
+    app->waveform_render_step_index = index;
+    app->waveform_render_error[0] = '\0';
+}
+
+void app_waveform_render_dialog_confirm(App *app) {
+    if (!app || !app->waveform_render_dialog_open) return;
+    WaveformRenderDialogMode mode = app->waveform_render_dialog_mode;
+    double value = waveform_render_dialog_clamp_value(mode, app->waveform_render_value);
+    app->waveform_render_value = value;
+    if (mode == WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM &&
+        app->waveform_render_source_bpm <= 0.0) {
+        SDL_strlcpy(app->waveform_render_error, "No calibrated source BPM", sizeof(app->waveform_render_error));
+        app_set_status(app, app->waveform_render_error);
+        return;
+    }
+    if (app_render_current_loop_to_roster(app, mode, value)) {
+        app->waveform_render_dialog_open = false;
+        app->waveform_render_error[0] = '\0';
+    } else {
+        SDL_strlcpy(app->waveform_render_error,
+                    app->status_text[0] ? app->status_text : "Render failed",
+                    sizeof(app->waveform_render_error));
+    }
 }
 
 void app_waveform_menu_move(App *app, int delta) {
@@ -3200,32 +3413,17 @@ void app_waveform_menu_apply(App *app) {
                 app->waveform_menu_selected = 0;
             }
             break;
-        case WAVEFORM_MENU_ITEM_RENDER_TEMPO_MINUS_25:
-            if (app_render_current_loop_to_roster(app,
-                                                  VP_STRETCH_TEMPO_PERCENT,
-                                                  -25.0f,
-                                                  "tempo -25")) {
-                app->waveform_menu_open = false;
-                app->waveform_menu_selected = 0;
-            }
+        case WAVEFORM_MENU_ITEM_RENDER_TEMPO:
+            app_waveform_render_dialog_open_mode(app,
+                app_get_explicit_loop_calibration(app, NULL) ?
+                    WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM :
+                    WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT);
             break;
-        case WAVEFORM_MENU_ITEM_RENDER_PITCH_MINUS_3:
-            if (app_render_current_loop_to_roster(app,
-                                                  VP_STRETCH_PITCH_SEMITONES,
-                                                  -3.0f,
-                                                  "pitch -3st")) {
-                app->waveform_menu_open = false;
-                app->waveform_menu_selected = 0;
-            }
+        case WAVEFORM_MENU_ITEM_RENDER_PITCH:
+            app_waveform_render_dialog_open_mode(app, WAVEFORM_RENDER_DIALOG_PITCH_SEMITONES);
             break;
-        case WAVEFORM_MENU_ITEM_RENDER_RATE_MINUS_20:
-            if (app_render_current_loop_to_roster(app,
-                                                  VP_STRETCH_RATE_PERCENT,
-                                                  -20.0f,
-                                                  "rate -20")) {
-                app->waveform_menu_open = false;
-                app->waveform_menu_selected = 0;
-            }
+        case WAVEFORM_MENU_ITEM_RENDER_RATE:
+            app_waveform_render_dialog_open_mode(app, WAVEFORM_RENDER_DIALOG_RATE_PERCENT);
             break;
         case WAVEFORM_MENU_ITEM_CANCEL:
         default:
@@ -8241,8 +8439,82 @@ static void render_waveform_menu(App *app, int w, int h) {
             SDL_RenderRect(app->renderer, &row);
         }
         SDL_SetRenderDrawColor(app->renderer, selected ? 226 : 210, selected ? 252 : 218, selected ? 246 : 226, 255);
-        SDL_RenderDebugText(app->renderer, menu.x + 18.0f, item_y, waveform_menu_item_label(item));
+        SDL_RenderDebugText(app->renderer, menu.x + 18.0f, item_y, waveform_menu_item_label(app, item));
         item_y += 22.0f;
+    }
+}
+
+static void render_waveform_render_dialog(App *app, int w, int h) {
+    if (!app || !app->waveform_render_dialog_open) return;
+    SDL_FRect panel = {
+        (float)w * 0.5f - 210.0f,
+        (float)h * 0.5f - 92.0f,
+        420.0f,
+        184.0f
+    };
+    const float pad = 18.0f;
+    if (panel.x < pad) panel.x = pad;
+    if (panel.y < pad) panel.y = pad;
+    if (panel.x + panel.w > (float)w - pad) panel.x = (float)w - pad - panel.w;
+    if (panel.y + panel.h > (float)h - pad) panel.y = (float)h - pad - panel.h;
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_FRect shadow = { panel.x + 12.0f, panel.y + 14.0f, panel.w + 18.0f, panel.h + 18.0f };
+    SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 150);
+    SDL_RenderFillRect(app->renderer, &shadow);
+    SDL_SetRenderDrawColor(app->renderer, 12, 13, 20, 244);
+    SDL_RenderFillRect(app->renderer, &panel);
+    SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 255);
+    SDL_RenderRect(app->renderer, &panel);
+
+    WaveformRenderDialogMode mode = app->waveform_render_dialog_mode;
+    double step = waveform_render_step_for_index(app->waveform_render_step_index);
+    const char *unit = waveform_render_dialog_unit(mode);
+
+    SDL_SetRenderDrawColor(app->renderer, 235, 242, 245, 255);
+    SDL_RenderDebugText(app->renderer, panel.x + 18.0f, panel.y + 16.0f, waveform_render_dialog_title(mode));
+    SDL_SetRenderDrawColor(app->renderer, 178, 190, 204, 255);
+    if (mode == WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM) {
+        SDL_RenderDebugTextFormat(app->renderer,
+                                  panel.x + 18.0f,
+                                  panel.y + 40.0f,
+                                  "source BPM %.2f",
+                                  app->waveform_render_source_bpm);
+    } else {
+        SDL_RenderDebugText(app->renderer, panel.x + 18.0f, panel.y + 40.0f, "offline render");
+    }
+
+    SDL_FRect value_box = { panel.x + 18.0f, panel.y + 66.0f, panel.w - 36.0f, 40.0f };
+    SDL_SetRenderDrawColor(app->renderer, 25, 31, 42, 250);
+    SDL_RenderFillRect(app->renderer, &value_box);
+    SDL_SetRenderDrawColor(app->renderer, 90, 130, 146, 255);
+    SDL_RenderRect(app->renderer, &value_box);
+    SDL_SetRenderDrawColor(app->renderer, 226, 252, 246, 255);
+    if (mode == WAVEFORM_RENDER_DIALOG_TEMPO_TO_BPM) {
+        SDL_RenderDebugTextFormat(app->renderer,
+                                  value_box.x + 14.0f,
+                                  value_box.y + 13.0f,
+                                  "value %.2f %s",
+                                  app->waveform_render_value,
+                                  unit);
+    } else {
+        SDL_RenderDebugTextFormat(app->renderer,
+                                  value_box.x + 14.0f,
+                                  value_box.y + 13.0f,
+                                  "value %+.2f %s",
+                                  app->waveform_render_value,
+                                  unit);
+    }
+    SDL_SetRenderDrawColor(app->renderer, 178, 190, 204, 255);
+    SDL_RenderDebugTextFormat(app->renderer,
+                              panel.x + 18.0f,
+                              panel.y + 118.0f,
+                              "step %.2f   Up/Down adjust   L1/R1 step",
+                              step);
+    SDL_RenderDebugText(app->renderer, panel.x + 18.0f, panel.y + 136.0f, "South/Enter renders   East/Escape cancels");
+    if (app->waveform_render_error[0]) {
+        SDL_SetRenderDrawColor(app->renderer, 255, 150, 132, 255);
+        SDL_RenderDebugText(app->renderer, panel.x + 18.0f, panel.y + 158.0f, app->waveform_render_error);
     }
 }
 
@@ -10202,6 +10474,13 @@ static void app_render_overlay(App *app) {
         return;
     }
 
+    if (app->waveform_render_dialog_open) {
+        int w = 0, h = 0;
+        SDL_GetRenderOutputSize(app->renderer, &w, &h);
+        render_waveform_render_dialog(app, w, h);
+        return;
+    }
+
     if (app->waveform_menu_open) {
         int w = 0, h = 0;
         SDL_GetRenderOutputSize(app->renderer, &w, &h);
@@ -10235,6 +10514,12 @@ bool app_init(App *app){
     app->project_browser_preview_clip_loaded = false;
     app->waveform_menu_open = false;
     app->waveform_menu_selected = 0;
+    app->waveform_render_dialog_open = false;
+    app->waveform_render_dialog_mode = WAVEFORM_RENDER_DIALOG_TEMPO_PERCENT;
+    app->waveform_render_source_bpm = 0.0;
+    app->waveform_render_value = 0.0;
+    app->waveform_render_step_index = 2;
+    app->waveform_render_error[0] = '\0';
     app->roster_commit_menu_open = false;
     app->roster_commit_menu_selected = 0;
     app->text_entry_open = false;
