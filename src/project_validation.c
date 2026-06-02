@@ -126,6 +126,14 @@ static bool path_starts_with_samples_dir(const char *path) {
            path[len + 1] != '\0';
 }
 
+static bool path_starts_with_patterns_dir(const char *path) {
+    size_t len = SDL_strlen(VAPORPLANE_PROJECT_PATTERNS_DIRNAME);
+    return path &&
+           SDL_strncmp(path, VAPORPLANE_PROJECT_PATTERNS_DIRNAME, len) == 0 &&
+           (path[len] == '/' || path[len] == '\\') &&
+           path[len + 1] != '\0';
+}
+
 static const char *range_strstr_local(const char *start, const char *end, const char *needle) {
     if (!start || !end || !needle || start > end) return NULL;
     size_t needle_len = SDL_strlen(needle);
@@ -466,11 +474,6 @@ static bool validate_manifest(ProjectValidationResult *out,
         }
         sample_count++;
     }
-    if (sample_count <= 0) {
-        result_set(out, PROJECT_VALIDATION_INVALID, "missing sample file", "project contains no sample mappings");
-        return false;
-    }
-
     bool binding_seen[16][128];
     SDL_memset(binding_seen, 0, sizeof(binding_seen));
     if (!json_find_array_range(json, end, "roster_clips", &array_start, &array_end)) {
@@ -512,8 +515,84 @@ static bool validate_manifest(ProjectValidationResult *out,
         }
         roster_count++;
     }
-    if (roster_count <= 0) {
-        result_set(out, PROJECT_VALIDATION_INVALID, "missing roster clips", "project contains no roster clips");
+
+    int pattern_count = 0;
+    if (json_find_array_range(json, end, "patterns", &array_start, &array_end)) {
+        cursor = array_start + 1;
+        while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
+            char pattern_id[PROJECT_VALIDATION_ID_MAX];
+            char midi_file[CLIP_MAX_PATH];
+            if (!json_get_string_range(object_start, object_end, "pattern_id", pattern_id, sizeof(pattern_id)) ||
+                !json_get_string_range(object_start, object_end, "midi_file", midi_file, sizeof(midi_file))) {
+                result_set(out, PROJECT_VALIDATION_INVALID, "broken pattern mapping", "pattern entry is missing pattern_id or midi_file");
+                return false;
+            }
+            if (!project_validation_is_safe_relative_path(midi_file) ||
+                !path_starts_with_patterns_dir(midi_file)) {
+                result_set(out, PROJECT_VALIDATION_INVALID, "unsafe relative path", "pattern MIDI path escapes the patterns folder");
+                return false;
+            }
+            if (mode == PROJECT_VALIDATION_FULL) {
+                char pattern_path[CLIP_MAX_PATH];
+                path_join_local(pattern_path, sizeof(pattern_path), bundle_path, midi_file);
+                if (!path_exists_local(pattern_path)) {
+                    result_set(out, PROJECT_VALIDATION_INVALID, "pattern MIDI missing", "referenced pattern MIDI does not exist");
+                    return false;
+                }
+                if (!check_midi_structure(pattern_path)) {
+                    result_set(out, PROJECT_VALIDATION_INVALID, "invalid pattern MIDI", "pattern MIDI is not a structurally valid Standard MIDI File");
+                    return false;
+                }
+            }
+            const char *binding_start = NULL;
+            const char *binding_end = NULL;
+            if (json_find_compound_range(object_start, object_end, "midi_binding", '{', '}', &binding_start, &binding_end)) {
+                int channel = 16;
+                int note = 24 + pattern_count;
+                json_get_int_range(binding_start, binding_end, "channel", &channel);
+                json_get_int_range(binding_start, binding_end, "note", &note);
+                if (channel < 1 || channel > 16 || note < 0 || note > 127) {
+                    result_set(out, PROJECT_VALIDATION_INVALID, "invalid MIDI binding", "pattern MIDI binding is out of range");
+                    return false;
+                }
+                if (binding_seen[channel - 1][note]) {
+                    result_set(out, PROJECT_VALIDATION_INVALID, "duplicate MIDI binding", "two materials use the same MIDI channel/note");
+                    return false;
+                }
+                binding_seen[channel - 1][note] = true;
+            }
+            pattern_count++;
+        }
+    }
+
+    if (json_find_array_range(json, end, "drum_samples", &array_start, &array_end)) {
+        cursor = array_start + 1;
+        while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
+            if (sample_count >= PROJECT_VALIDATION_MAX_SAMPLES) {
+                result_set(out, PROJECT_VALIDATION_INVALID, "too many samples", "project manifest exceeds validator sample capacity");
+                return false;
+            }
+            ValidationSampleRef *sample = &samples[sample_count];
+            char kit_id[PROJECT_VALIDATION_ID_MAX];
+            int note = 0;
+            if (!json_get_string_range(object_start, object_end, "kit_id", kit_id, sizeof(kit_id)) ||
+                !json_get_int_range(object_start, object_end, "note", &note) ||
+                !json_get_string_range(object_start, object_end, "path", sample->path, sizeof(sample->path))) {
+                result_set(out, PROJECT_VALIDATION_INVALID, "broken drum sample mapping", "drum sample entry is missing kit_id, note, or path");
+                return false;
+            }
+            if (!project_validation_is_safe_relative_path(sample->path) ||
+                !path_starts_with_samples_dir(sample->path)) {
+                result_set(out, PROJECT_VALIDATION_INVALID, "unsafe relative path", "drum sample path escapes the samples folder");
+                return false;
+            }
+            SDL_snprintf(sample->sample_id, sizeof(sample->sample_id), "drum_%d", sample_count + 1);
+            sample_count++;
+        }
+    }
+
+    if (roster_count <= 0 && pattern_count <= 0) {
+        result_set(out, PROJECT_VALIDATION_INVALID, "missing materials", "project contains no roster clips or patterns");
         return false;
     }
 

@@ -18,7 +18,7 @@ static void clip_defaults(AudioClip *clip) {
     clip->beat_unit = 4;
     clip->downbeat_frame = clip->loop_start_frame;
     clip->playback_rate = 1.0;
-    clip->gain = 0.9f;
+    clip->gain = 1.0f;
 }
 
 static bool json_number_value(const char *json, const char *key, double *out) {

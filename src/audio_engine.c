@@ -8,6 +8,7 @@
 #define TIMELINE_DECLICK_FRAMES 512
 #define MASTER_METER_CLIP_FLASH_SECONDS 0.35f
 #define LANE_MONITOR_CLIP_HOLD_SECONDS 0.60f
+#define DRUM_PAD_SOURCE_GAIN 1.0f
 
 static int timeline_total_instance_count(const MasterTimeline *timeline) {
     if(!timeline) return 0;
@@ -409,13 +410,18 @@ static void master_fx_chain_init(MasterFxChain *chain) {
     chain->units[0].type = MASTER_FX_UNIT_REVERB;
     chain->units[0].enabled = false;
     chain->units[0].bypassed = true;
-    chain->unit_count = 1;
+    chain->units[1].type = MASTER_FX_UNIT_SOFT_CLIP_LIMITER;
+    chain->units[1].enabled = true;
+    chain->units[1].bypassed = false;
+    chain->unit_count = 2;
 }
 
 void audio_engine_init_master_fx(AudioEngine *a) {
     if(!a) return;
     master_fx_chain_init(&a->master_fx_chain);
     master_reverb_init(a);
+    a->master_limiter_state.gain = 1.0f;
+    a->meter.limiter_gain = 1.0f;
 }
 
 static float read_fractional_delay(const float *buffer, int buffer_size, int write_index, float delay_samples) {
@@ -582,6 +588,49 @@ static void master_fx_chain_process(AudioEngine *a, float *left, float *right) {
     }
 }
 
+static bool master_limiter_active(const AudioEngine *a) {
+    if(!a) return false;
+    const MasterFxChain *chain = &a->master_fx_chain;
+    int count = chain->unit_count;
+    if(count < 0) count = 0;
+    if(count > MASTER_FX_CHAIN_MAX_UNITS) count = MASTER_FX_CHAIN_MAX_UNITS;
+    for(int i = 0; i < count; ++i) {
+        const MasterFxUnit *unit = &chain->units[i];
+        if(unit->type == MASTER_FX_UNIT_SOFT_CLIP_LIMITER) {
+            return unit->enabled && !unit->bypassed;
+        }
+    }
+    return false;
+}
+
+static void master_limiter_process(AudioEngine *a, float *left, float *right) {
+    if(!a || !left || !right) return;
+    MasterLimiterState *state = &a->master_limiter_state;
+    if(!master_limiter_active(a)) {
+        state->gain = 1.0f;
+        a->meter.limiter_gain = 1.0f;
+        return;
+    }
+    if(state->gain <= 0.0f || state->gain > 1.0f) state->gain = 1.0f;
+    float peak = fmaxf(fabsf(*left), fabsf(*right));
+    float target_gain = 1.0f;
+    if(peak > MASTER_LIMITER_CEILING && peak > 0.0f) {
+        target_gain = MASTER_LIMITER_CEILING / peak;
+    }
+    if(target_gain < state->gain) {
+        state->gain = target_gain;
+    } else {
+        int sample_rate = a->spec.freq > 0 ? a->spec.freq : 48000;
+        float release_seconds = MASTER_LIMITER_RELEASE_MS * 0.001f;
+        float release_coeff = 1.0f - expf(-1.0f / ((float)sample_rate * release_seconds));
+        state->gain += (1.0f - state->gain) * release_coeff;
+        if(state->gain > 1.0f) state->gain = 1.0f;
+    }
+    *left *= state->gain;
+    *right *= state->gain;
+    a->meter.limiter_gain = state->gain;
+}
+
 static void write_lane_analyzer_sample(AudioEngine *a, int lane_index, float left, float right) {
     if(!a->lane_analyzer_active || a->active_analyzer_lane != lane_index) return;
     float mono = (left + right) * 0.5f;
@@ -650,6 +699,43 @@ static float roster_sample_at_looped(const RosterClip *clip, double frame, int c
     return (float)((1.0 - frac) * s0 + frac * s1);
 }
 
+static float audio_clip_one_shot_sample_at(const AudioClip *clip, double frame, int channel) {
+    /* Drum pads use decoded sample values at unity; all musical gain comes after this read. */
+    if(!clip || !clip->samples || clip->frame_count == 0 || clip->channels <= 0) return 0.0f;
+    if(frame < 0.0 || frame >= (double)clip->frame_count) return 0.0f;
+    size_t i0 = (size_t)frame;
+    size_t i1 = i0 + 1 < clip->frame_count ? i0 + 1 : i0;
+    double frac = frame - (double)i0;
+    int c = channel < clip->channels ? channel : clip->channels - 1;
+    float s0 = clip->samples[i0 * (size_t)clip->channels + (size_t)c];
+    float s1 = clip->samples[i1 * (size_t)clip->channels + (size_t)c];
+    return (float)((1.0 - frac) * s0 + frac * s1);
+}
+
+static const DrumKit *resolve_lane_drum_kit(const TimelineLane *lane,
+                                            const DrumKit *kits,
+                                            int kit_count) {
+    if(!lane || !kits || kit_count <= 0) return NULL;
+    if(lane->drum_kit_index >= 0 && lane->drum_kit_index < kit_count) {
+        const DrumKit *kit = &kits[lane->drum_kit_index];
+        if(!lane->drum_kit_id[0] || SDL_strcmp(lane->drum_kit_id, kit->kit_id) == 0) return kit;
+    }
+    if(lane->drum_kit_id[0]) {
+        for(int i = 0; i < kit_count; ++i) {
+            if(SDL_strcmp(lane->drum_kit_id, kits[i].kit_id) == 0) return &kits[i];
+        }
+    }
+    return NULL;
+}
+
+static const DrumPad *drum_kit_pad_for_note(const DrumKit *kit, int note) {
+    if(!kit) return NULL;
+    for(int i = 0; i < kit->pad_count; ++i) {
+        if(kit->pads[i].note == note && kit->pads[i].loaded) return &kit->pads[i];
+    }
+    return NULL;
+}
+
 static double timeline_tick_step_for_output_rate(const MasterTimeline *timeline, double playhead_tick, int output_rate) {
     if(!timeline || output_rate <= 0) return 0.0;
     double ticks_per_second = timeline_ticks_per_second_at_tick(timeline, playhead_tick) *
@@ -660,6 +746,10 @@ static double timeline_tick_step_for_output_rate(const MasterTimeline *timeline,
 static int mix_timeline_frame_core(const MasterTimeline *timeline,
                                    const RosterClip *roster,
                                    int roster_count,
+                                   const DrumPattern *patterns,
+                                   int pattern_count,
+                                   const DrumKit *kits,
+                                   int kit_count,
                                    double playhead_tick,
                                    int64_t range_start_tick,
                                    int64_t range_end_tick,
@@ -668,7 +758,7 @@ static int mix_timeline_frame_core(const MasterTimeline *timeline,
                                    float *right,
                                    float *lane_left,
                                    float *lane_right) {
-    if(!timeline || !roster || roster_count <= 0 || range_end_tick <= range_start_tick ||
+    if(!timeline || range_end_tick <= range_start_tick ||
        timeline->ticks_per_beat <= 0 || !left || !right) {
         return 0;
     }
@@ -681,10 +771,42 @@ static int mix_timeline_frame_core(const MasterTimeline *timeline,
             float lane_gain = lane->gain > 0.0f ? lane->gain : 1.0f;
             for(int i = 0; i < lane->instance_count; ++i) {
                 const TimelineInstance *instance = &lane->instances[i];
-                if(instance->roster_clip_index < 0 || instance->roster_clip_index >= roster_count) continue;
                 if(instance->duration_ticks <= 0) continue;
                 double instance_start = (double)instance->start_tick;
                 double instance_end = (double)(instance->start_tick + instance->duration_ticks);
+                if(instance->kind == TIMELINE_INSTANCE_DRUM_PATTERN) {
+                    if(lane->type != TIMELINE_LANE_DRUMS) continue;
+                    if(!patterns || instance->pattern_index < 0 || instance->pattern_index >= pattern_count) continue;
+                    const DrumPattern *pattern = &patterns[instance->pattern_index];
+                    const DrumKit *kit = resolve_lane_drum_kit(lane, kits, kit_count);
+                    if(!kit) continue;
+                    double range_elapsed_seconds = timeline_seconds_between_ticks(timeline, (double)range_start_tick, playhead_tick);
+                    double range_duration_seconds = timeline_seconds_between_ticks(timeline, (double)range_start_tick, (double)range_end_tick);
+                    double range_gain = timeline_declik_gain(range_elapsed_seconds, range_duration_seconds, range_duration_seconds, output_rate);
+                    if(range_gain <= 0.0) continue;
+                    for(int event_index = 0; event_index < pattern->event_count; ++event_index) {
+                        const DrumPatternEvent *event = &pattern->events[event_index];
+                        if(event->tick < 0 || event->tick >= instance->duration_ticks) continue;
+                        double event_start = instance_start + (double)event->tick;
+                        if(playhead_tick < event_start) continue;
+                        const DrumPad *pad = drum_kit_pad_for_note(kit, event->note);
+                        if(!pad || pad->clip.sample_rate <= 0) continue;
+                        double elapsed_seconds = timeline_seconds_between_ticks(timeline, event_start, playhead_tick);
+                        double source_frame = elapsed_seconds * (double)pad->clip.sample_rate;
+                        if(source_frame < 0.0 || source_frame >= (double)pad->clip.frame_count) continue;
+                        float instance_gain = DRUM_PAD_SOURCE_GAIN *
+                                              velocity_to_gain(event->velocity) *
+                                              velocity_to_gain(instance->midi_velocity) *
+                                              lane_gain *
+                                              (float)range_gain;
+                        lane_l += audio_clip_one_shot_sample_at(&pad->clip, source_frame, 0) * instance_gain;
+                        lane_r += audio_clip_one_shot_sample_at(&pad->clip, source_frame, 1) * instance_gain;
+                        active_count++;
+                    }
+                    continue;
+                }
+                if(lane->type != TIMELINE_LANE_AUDIO) continue;
+                if(!roster || instance->roster_clip_index < 0 || instance->roster_clip_index >= roster_count) continue;
                 if(playhead_tick < instance_start || playhead_tick >= instance_end) continue;
 
                 const RosterClip *clip = &roster[instance->roster_clip_index];
@@ -717,7 +839,7 @@ static int mix_timeline_frame_core(const MasterTimeline *timeline,
 
 static int mix_timeline(AudioEngine *a, float *left, float *right) {
     MasterTimeline *timeline = a->timeline;
-    if(!timeline || !a->roster || !a->roster_clip_count || !timeline->playing ||
+    if(!timeline || !timeline->playing ||
        timeline->length_ticks <= 0 || timeline_total_instance_count(timeline) <= 0 ||
        timeline->ticks_per_beat <= 0) {
         decay_lane_monitors(a);
@@ -752,7 +874,11 @@ static int mix_timeline(AudioEngine *a, float *left, float *right) {
     float lane_right[TIMELINE_MAX_LANES] = {0};
     int active_count = mix_timeline_frame_core(timeline,
                                                a->roster,
-                                               *a->roster_clip_count,
+                                               a->roster_clip_count ? *a->roster_clip_count : 0,
+                                               a->drum_patterns,
+                                               a->drum_pattern_count ? *a->drum_pattern_count : 0,
+                                               a->drum_kits,
+                                               a->drum_kit_count ? *a->drum_kit_count : 0,
                                                a->timeline_playhead_tick,
                                                range_start_tick,
                                                range_end_tick,
@@ -813,6 +939,10 @@ void audio_engine_init_offline_timeline_render(AudioEngine *offline,
     offline->transport = NULL;
     offline->roster = roster;
     offline->roster_clip_count = roster_clip_count;
+    offline->drum_patterns = source ? source->drum_patterns : NULL;
+    offline->drum_pattern_count = source ? source->drum_pattern_count : NULL;
+    offline->drum_kits = source ? source->drum_kits : NULL;
+    offline->drum_kit_count = source ? source->drum_kit_count : NULL;
     offline->timeline = timeline;
     offline->playback_mode = AUDIO_PLAYBACK_TIMELINE;
     offline->preview_active = false;
@@ -879,6 +1009,7 @@ static void audio_engine_process_offline_master(AudioEngine *a, float *left, flo
     *left *= a->master_gain;
     *right *= a->master_gain;
     master_fx_chain_process(a, left, right);
+    master_limiter_process(a, left, right);
 }
 
 int audio_engine_render_timeline_block(AudioEngine *a,
@@ -888,13 +1019,12 @@ int audio_engine_render_timeline_block(AudioEngine *a,
                                        int sample_rate) {
     if(!out || frame_count <= 0) return 0;
     SDL_memset(out, 0, (size_t)frame_count * 2u * sizeof(float));
-    if(!a || !state || state->finished || !a->timeline || !a->roster ||
-       !a->roster_clip_count || sample_rate <= 0) {
+    if(!a || !state || state->finished || !a->timeline || sample_rate <= 0) {
         return 0;
     }
 
     const MasterTimeline *timeline = a->timeline;
-    int roster_count = *a->roster_clip_count;
+    int roster_count = a->roster_clip_count ? *a->roster_clip_count : 0;
     int active_total = 0;
     for(int frame = 0; frame < frame_count; ++frame) {
         if(state->playhead_tick >= (double)state->range_end_tick) {
@@ -912,6 +1042,10 @@ int audio_engine_render_timeline_block(AudioEngine *a,
         active_total += mix_timeline_frame_core(timeline,
                                                 a->roster,
                                                 roster_count,
+                                                a->drum_patterns,
+                                                a->drum_pattern_count ? *a->drum_pattern_count : 0,
+                                                a->drum_kits,
+                                                a->drum_kit_count ? *a->drum_kit_count : 0,
                                                 state->playhead_tick,
                                                 state->range_start_tick,
                                                 state->range_end_tick,
@@ -1026,6 +1160,7 @@ static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right
     if(a->playback_mode == AUDIO_PLAYBACK_TIMELINE) {
         master_fx_chain_process(a, &final_left, &final_right);
     }
+    master_limiter_process(a, &final_left, &final_right);
     update_master_meter(a, final_left, final_right);
     *out_left = clamp_output(final_left);
     *out_right = clamp_output(final_right);
@@ -1062,7 +1197,7 @@ static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int addi
 }
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport){
-    memset(a,0,sizeof(*a)); a->clip=clip;a->transport=transport;a->master_gain=0.9f; a->playhead_frame=0; a->playback_mode=AUDIO_PLAYBACK_WAVEFORM; a->active_analyzer_lane=-1; a->lane_analyzer_active=false;
+    memset(a,0,sizeof(*a)); a->clip=clip;a->transport=transport;a->master_gain=1.0f; a->playhead_frame=0; a->playback_mode=AUDIO_PLAYBACK_WAVEFORM; a->active_analyzer_lane=-1; a->lane_analyzer_active=false;
     audio_engine_init_master_fx(a);
     a->spec.format=SDL_AUDIO_F32; a->spec.channels=2; a->spec.freq=48000;
     a->debug_stats.sample_rate = a->spec.freq;
@@ -1093,6 +1228,19 @@ void audio_engine_set_timeline(AudioEngine *a, RosterClip *roster, int *roster_c
     a->timeline = timeline;
     a->timeline_playhead_tick = timeline ? (double)timeline->playhead_tick : 0.0;
     a->metronome_beat_valid = false;
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+}
+
+void audio_engine_set_drum_materials(AudioEngine *a,
+                                     DrumPattern *patterns,
+                                     int *pattern_count,
+                                     DrumKit *kits,
+                                     int *kit_count) {
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    a->drum_patterns = patterns;
+    a->drum_pattern_count = pattern_count;
+    a->drum_kits = kits;
+    a->drum_kit_count = kit_count;
     if(a->stream) SDL_UnlockAudioStream(a->stream);
 }
 

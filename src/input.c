@@ -648,13 +648,34 @@ static bool handle_timeline_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
 }
 
 static bool handle_lane_inspector_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
-    (void)mod;
     switch(key) {
         case SDLK_ESCAPE: app_close_lane_inspector(app); return true;
         case SDLK_RETURN: app_toggle_inspected_lane_mute(app); return true;
         case SDLK_LEFT: app_cycle_inspected_lane_palette(app, -1); return true;
         case SDLK_RIGHT: app_cycle_inspected_lane_palette(app, 1); return true;
+        case SDLK_T: app_toggle_inspected_lane_type(app); return true;
+        case SDLK_K: app_cycle_inspected_lane_kit(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1); return true;
+        case SDLK_N: app_create_drum_pattern(app); return true;
+        case SDLK_D: app_open_drum_machine_for_selected_pattern(app); return true;
         case SDLK_SPACE: app_toggle_timeline_playback(app); return true;
+        case SDLK_HOME: app_rewind_timeline(app); return true;
+        case SDLK_M: toggle_metronome(app); return true;
+        default: return true;
+    }
+}
+
+static bool handle_drum_machine_key(App *app, SDL_Keycode key, SDL_Keymod mod) {
+    (void)mod;
+    switch(key) {
+        case SDLK_ESCAPE: app_close_drum_machine(app); return true;
+        case SDLK_LEFT: app_drum_machine_move_cursor(app, -1, 0); return true;
+        case SDLK_RIGHT: app_drum_machine_move_cursor(app, 1, 0); return true;
+        case SDLK_UP: app_drum_machine_move_cursor(app, 0, -1); return true;
+        case SDLK_DOWN: app_drum_machine_move_cursor(app, 0, 1); return true;
+        case SDLK_RETURN:
+        case SDLK_SPACE: app_drum_machine_toggle_step(app); return true;
+        case SDLK_LEFTBRACKET: app_drum_machine_adjust_velocity(app, -8); return true;
+        case SDLK_RIGHTBRACKET: app_drum_machine_adjust_velocity(app, 8); return true;
         case SDLK_HOME: app_rewind_timeline(app); return true;
         case SDLK_M: toggle_metronome(app); return true;
         default: return true;
@@ -810,6 +831,7 @@ bool input_handle_event(App *app, const SDL_Event *e){
         if(app->view_mode == APP_VIEW_TIMELINE) app_timeline_cycle_focus(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1);
         else if(app->view_mode == APP_VIEW_MASTER_MIX) app_master_mix_cycle_focus(app, (mod & SDL_KMOD_SHIFT) ? -1 : 1);
         else if(app->view_mode == APP_VIEW_LANE_INSPECTOR) return true;
+        else if(app->view_mode == APP_VIEW_DRUM_MACHINE) return true;
         else {
             if(!app->sample_selector_open) app_refresh_sample_list(app);
             app->sample_selector_open = !app->sample_selector_open;
@@ -817,6 +839,7 @@ bool input_handle_event(App *app, const SDL_Event *e){
         return true;
     }
     if(app->view_mode == APP_VIEW_LANE_INSPECTOR) return handle_lane_inspector_key(app, e->key.key, mod);
+    if(app->view_mode == APP_VIEW_DRUM_MACHINE) return handle_drum_machine_key(app, e->key.key, mod);
     if(app->view_mode == APP_VIEW_MASTER_MIX) return handle_master_mix_key(app, e->key.key, mod);
     if(app->view_mode == APP_VIEW_TIMELINE) return handle_timeline_key(app, e->key.key, mod);
     if(app->tempo_lock_mode) return handle_tempo_lock_key(app, e->key.key, mod);
@@ -990,6 +1013,30 @@ void input_update_gamepad(App *app, double dt){
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_master_mix_cycle_focus(app, -1);
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_master_mix_cycle_focus(app, 1);
         }
+        return;
+    }
+
+    if(app->view_mode == APP_VIEW_DRUM_MACHINE) {
+        if(r2_shift) {
+            if(south_pressed) app_toggle_timeline_playback(app);
+            if(east_pressed) app_rewind_timeline(app);
+            if(south_pressed || east_pressed) return;
+        }
+        if(back_pressed) toggle_metronome(app);
+        if(east_pressed) {
+            app_close_drum_machine(app);
+            return;
+        }
+        if(south_pressed) {
+            app_drum_machine_toggle_step(app);
+            return;
+        }
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_drum_machine_move_cursor(app, -1, 0);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_drum_machine_move_cursor(app, 1, 0);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_drum_machine_move_cursor(app, 0, -1);
+        if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_drum_machine_move_cursor(app, 0, 1);
+        if(left_shoulder_pressed) app_drum_machine_adjust_velocity(app, -8);
+        if(right_shoulder_pressed) app_drum_machine_adjust_velocity(app, 8);
         return;
     }
 

@@ -8,13 +8,19 @@
 
 #define APP_MAX_ROSTER_CLIPS 64
 #define TIMELINE_MAX_LANES 8
-#define APP_MAX_TIMELINE_INSTANCES_PER_LANE 32
+#define APP_MAX_TIMELINE_INSTANCES_PER_LANE 128
 #define TIMELINE_MAX_TEMPO_EVENTS 64
 #define APP_ROSTER_CLIP_NAME_MAX 128
+#define APP_MAX_DRUM_KITS 16
+#define APP_MAX_DRUM_PADS 64
+#define APP_MAX_DRUM_PATTERNS 64
+#define APP_MAX_DRUM_PATTERN_EVENTS 256
 #define APP_MIN_CAPTURE_FRAMES 64
 #define APP_MAX_CAPTURE_FRAMES (48000 * 60 * 5)
 #define APP_MAX_CAPTURE_BYTES (64u * 1024u * 1024u)
 #define APP_STABLE_ID_MAX 48
+#define DRUM_MIDI_CHANNEL 9
+#define DRUM_PATTERN_LOCATOR_CHANNEL 15
 #define TIMELINE_MIN_BPM 30.0
 #define TIMELINE_MAX_BPM 300.0
 #define TIMELINE_DEFAULT_BPM 120.0
@@ -49,8 +55,56 @@ typedef struct {
     SDL_Color color;
 } RosterClip;
 
+typedef enum {
+    TIMELINE_INSTANCE_AUDIO_CLIP,
+    TIMELINE_INSTANCE_DRUM_PATTERN
+} TimelineInstanceKind;
+
+typedef enum {
+    TIMELINE_LANE_AUDIO,
+    TIMELINE_LANE_DRUMS
+} TimelineLaneType;
+
 typedef struct {
+    char name[APP_ROSTER_CLIP_NAME_MAX];
+    int note;
+    char source_path[CLIP_MAX_PATH];
+    AudioClip clip;
+    bool loaded;
+    bool project_local;
+} DrumPad;
+
+typedef struct {
+    char kit_id[APP_STABLE_ID_MAX];
+    char name[APP_ROSTER_CLIP_NAME_MAX];
+    char root_path[CLIP_MAX_PATH];
+    DrumPad pads[APP_MAX_DRUM_PADS];
+    int pad_count;
+    bool project_local;
+} DrumKit;
+
+typedef struct {
+    int64_t tick;
+    int note;
+    int velocity;
+    int64_t duration_ticks;
+} DrumPatternEvent;
+
+typedef struct {
+    char pattern_id[APP_STABLE_ID_MAX];
+    char name[APP_ROSTER_CLIP_NAME_MAX];
+    int64_t length_ticks;
+    int locator_channel;
+    int locator_note;
+    SDL_Color color;
+    DrumPatternEvent events[APP_MAX_DRUM_PATTERN_EVENTS];
+    int event_count;
+} DrumPattern;
+
+typedef struct {
+    TimelineInstanceKind kind;
     int roster_clip_index;
+    int pattern_index;
     int64_t start_tick;
     int64_t duration_ticks;
     int midi_note;
@@ -64,9 +118,14 @@ typedef struct {
 } TimelineInstanceRef;
 
 typedef struct {
+    TimelineLaneType type;
     int palette_index;
     float gain;
     bool muted;
+    int midi_channel;
+    int drum_kit_index;
+    char drum_kit_id[APP_STABLE_ID_MAX];
+    int drum_step_resolution;
     TimelineInstance instances[APP_MAX_TIMELINE_INSTANCES_PER_LANE];
     int instance_count;
 } TimelineLane;

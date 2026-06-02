@@ -38,7 +38,8 @@ typedef enum {
     APP_VIEW_WAVEFORM,
     APP_VIEW_TIMELINE,
     APP_VIEW_MASTER_MIX,
-    APP_VIEW_LANE_INSPECTOR
+    APP_VIEW_LANE_INSPECTOR,
+    APP_VIEW_DRUM_MACHINE
 } AppViewMode;
 
 typedef enum {
@@ -83,7 +84,9 @@ typedef enum {
     TIMELINE_CONTEXT_SCOPE_TIMELINE,
     TIMELINE_CONTEXT_SCOPE_INSTANCE,
     TIMELINE_CONTEXT_SCOPE_ROSTER,
-    TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE
+    TIMELINE_CONTEXT_SCOPE_PATTERN,
+    TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE,
+    TIMELINE_CONTEXT_SCOPE_CONFIRM_PATTERN_DELETE
 } TimelineContextMenuScope;
 
 typedef enum {
@@ -100,6 +103,12 @@ typedef enum {
     TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER,
     TIMELINE_CONTEXT_ITEM_DELETE_ROSTER,
     TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_ROSTER,
+    TIMELINE_CONTEXT_ITEM_NEW_PATTERN,
+    TIMELINE_CONTEXT_ITEM_EDIT_PATTERN,
+    TIMELINE_CONTEXT_ITEM_RENAME_PATTERN,
+    TIMELINE_CONTEXT_ITEM_DUPLICATE_PATTERN,
+    TIMELINE_CONTEXT_ITEM_DELETE_PATTERN,
+    TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_PATTERN,
     TIMELINE_CONTEXT_ITEM_CANCEL
 } TimelineContextMenuItem;
 
@@ -143,6 +152,7 @@ typedef enum {
     APP_TEXT_ENTRY_ACTION_EXPORT_TIMELINE_WAV,
     APP_TEXT_ENTRY_ACTION_EXPORT_ROSTER_WAV,
     APP_TEXT_ENTRY_ACTION_RENAME_ROSTER_CLIP,
+    APP_TEXT_ENTRY_ACTION_RENAME_DRUM_PATTERN,
     APP_TEXT_ENTRY_ACTION_APPLY_LANE_VELOCITY
 } AppTextEntryAction;
 
@@ -215,6 +225,7 @@ typedef struct App {
     int text_entry_key_col;
     bool text_entry_uppercase;
     int text_entry_target_roster_index;
+    int text_entry_target_pattern_index;
     int text_entry_target_lane_index;
 
     bool tempo_lock_mode;
@@ -229,6 +240,10 @@ typedef struct App {
 
     RosterClip roster[APP_MAX_ROSTER_CLIPS];
     int roster_clip_count;
+    DrumKit drum_kits[APP_MAX_DRUM_KITS];
+    int drum_kit_count;
+    DrumPattern drum_patterns[APP_MAX_DRUM_PATTERNS];
+    int drum_pattern_count;
     MasterTimeline timeline;
     TimelineFocusZone timeline_focus_zone;
     TimelineTapeControlMode timeline_tape_control_mode;
@@ -241,11 +256,14 @@ typedef struct App {
     int timeline_context_menu_selected;
     TimelineInstanceRef timeline_context_menu_instance;
     int timeline_context_menu_roster_index;
+    int timeline_context_menu_pattern_index;
     int64_t timeline_context_menu_tick;
     TimelineEditMode timeline_edit_mode;
     TimelinePlacementMode timeline_edit_placement_mode;
     TimelineInstanceRef timeline_edit_instance;
+    TimelineInstanceKind timeline_edit_instance_kind;
     int timeline_edit_roster_clip_index;
+    int timeline_edit_pattern_index;
     int timeline_edit_original_lane;
     int64_t timeline_edit_original_start_tick;
     TimelineSeamSide timeline_edit_original_seam_side;
@@ -256,6 +274,10 @@ typedef struct App {
     bool timeline_edit_ghost_valid;
     int selected_roster_clip;
     bool selected_roster_clip_armed;
+    int selected_drum_pattern;
+    bool selected_drum_pattern_armed;
+    int drum_machine_step;
+    int drum_machine_pad;
     int selected_timeline_lane;
     int inspected_timeline_lane;
     int lane_analyzer_visual_lane;
@@ -375,6 +397,16 @@ void app_open_lane_inspector(App *app, int lane_index);
 void app_close_lane_inspector(App *app);
 void app_toggle_inspected_lane_mute(App *app);
 void app_cycle_inspected_lane_palette(App *app, int direction);
+void app_toggle_inspected_lane_type(App *app);
+void app_cycle_inspected_lane_kit(App *app, int direction);
+void app_create_drum_pattern(App *app);
+void app_duplicate_selected_drum_pattern(App *app);
+void app_delete_selected_drum_pattern(App *app);
+void app_open_drum_machine_for_selected_pattern(App *app);
+void app_close_drum_machine(App *app);
+void app_drum_machine_move_cursor(App *app, int dx, int dy);
+void app_drum_machine_toggle_step(App *app);
+void app_drum_machine_adjust_velocity(App *app, int delta);
 BpmSource app_bpm_source(const App *app);
 const char *app_bpm_source_label(const App *app);
 bool app_get_active_tempo_params(const App *app, TempoLockParams *params);

@@ -13,6 +13,8 @@
 #define MASTER_REVERB_PREDELAY_MAX_FRAMES 9600
 #define MASTER_REVERB_DELAY_MAX_FRAMES 8192
 #define AUDIO_TIMELINE_OFFLINE_BLOCK_FRAMES 512
+#define MASTER_LIMITER_CEILING 0.98f
+#define MASTER_LIMITER_RELEASE_MS 80.0f
 
 typedef enum {
     AUDIO_PLAYBACK_WAVEFORM,
@@ -102,10 +104,15 @@ typedef struct {
     float peak_r;
     float rms_l;
     float rms_r;
+    float limiter_gain;
     unsigned int clip_count;
     float clip_flash_seconds;
     unsigned int histogram[4];
 } MasterMeterState;
+
+typedef struct {
+    float gain;
+} MasterLimiterState;
 
 typedef struct {
     float peak_l;
@@ -134,6 +141,10 @@ typedef struct {
     Transport *transport;
     RosterClip *roster;
     int *roster_clip_count;
+    DrumPattern *drum_patterns;
+    int *drum_pattern_count;
+    DrumKit *drum_kits;
+    int *drum_kit_count;
     MasterTimeline *timeline;
     AudioPlaybackMode playback_mode;
     double playhead_frame;
@@ -151,6 +162,7 @@ typedef struct {
     MasterReverbParams master_reverb_target;
     MasterReverbParams master_reverb_current;
     MasterReverbState master_reverb_state;
+    MasterLimiterState master_limiter_state;
     MasterMeterState meter;
     LaneMonitorState lane_meters[TIMELINE_MAX_LANES];
     float lane_analyzer_samples[LANE_ANALYZER_WINDOW_SIZE];
@@ -173,6 +185,11 @@ void audio_engine_shutdown(AudioEngine *a);
 void audio_engine_set_playhead(AudioEngine *a, size_t frame);
 size_t audio_engine_get_playhead_frame(const AudioEngine *a);
 void audio_engine_set_timeline(AudioEngine *a, RosterClip *roster, int *roster_clip_count, MasterTimeline *timeline);
+void audio_engine_set_drum_materials(AudioEngine *a,
+                                     DrumPattern *patterns,
+                                     int *pattern_count,
+                                     DrumKit *kits,
+                                     int *kit_count);
 void audio_engine_set_playback_mode(AudioEngine *a, AudioPlaybackMode mode);
 void audio_engine_start_timeline(AudioEngine *a);
 void audio_engine_stop_timeline(AudioEngine *a, bool rewind);

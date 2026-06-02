@@ -217,6 +217,22 @@ static void roster_clip_destroy(RosterClip *clip) {
     SDL_memset(clip, 0, sizeof(*clip));
 }
 
+static void drum_kit_destroy(DrumKit *kit) {
+    if (!kit) return;
+    for (int i = 0; i < kit->pad_count; ++i) {
+        clip_destroy(&kit->pads[i].clip);
+    }
+    SDL_memset(kit, 0, sizeof(*kit));
+}
+
+static void app_clear_drum_kits(App *app) {
+    if (!app) return;
+    for (int i = 0; i < app->drum_kit_count; ++i) {
+        drum_kit_destroy(&app->drum_kits[i]);
+    }
+    app->drum_kit_count = 0;
+}
+
 static const char *path_basename(const char *path) {
     const char *base = path && path[0] ? path : "generated";
     for (const char *p = base; *p; ++p) {
@@ -316,7 +332,8 @@ static bool timeline_has_instances(const MasterTimeline *timeline) {
 static bool app_uses_timeline_transport(const App *app) {
     return app->view_mode == APP_VIEW_TIMELINE ||
            app->view_mode == APP_VIEW_MASTER_MIX ||
-           app->view_mode == APP_VIEW_LANE_INSPECTOR;
+           app->view_mode == APP_VIEW_LANE_INSPECTOR ||
+           app->view_mode == APP_VIEW_DRUM_MACHINE;
 }
 
 static const char *master_mix_focus_label(MasterMixFocusSection section) {
@@ -336,13 +353,51 @@ static void clamp_timeline_view(App *app);
 static void timeline_init_lanes(MasterTimeline *timeline) {
     for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
         TimelineLane *lane = &timeline->lanes[lane_index];
+        if (lane->type != TIMELINE_LANE_DRUMS) lane->type = TIMELINE_LANE_AUDIO;
+        lane->midi_channel = lane->type == TIMELINE_LANE_DRUMS ? DRUM_MIDI_CHANNEL : 0;
+        if (lane->type == TIMELINE_LANE_AUDIO) {
+            lane->drum_kit_index = -1;
+            lane->drum_kit_id[0] = '\0';
+        }
+        if (lane->drum_step_resolution <= 0) lane->drum_step_resolution = 16;
         lane->palette_index = lane_index % lane_palette_count();
         if (lane->gain <= 0.0f) lane->gain = 1.0f;
         if (lane->instance_count < 0) lane->instance_count = 0;
         if (lane->instance_count > APP_MAX_TIMELINE_INSTANCES_PER_LANE) {
             lane->instance_count = APP_MAX_TIMELINE_INSTANCES_PER_LANE;
         }
+        for (int i = 0; i < lane->instance_count; ++i) {
+            TimelineInstance *instance = &lane->instances[i];
+            if (instance->kind != TIMELINE_INSTANCE_DRUM_PATTERN) {
+                instance->kind = TIMELINE_INSTANCE_AUDIO_CLIP;
+                instance->pattern_index = -1;
+            } else {
+                instance->roster_clip_index = -1;
+            }
+        }
     }
+}
+
+static bool timeline_lane_is_drum(const TimelineLane *lane) {
+    return lane && lane->type == TIMELINE_LANE_DRUMS;
+}
+
+static bool app_selected_timeline_lane_is_drum(const App *app) {
+    if (!app) return false;
+    int lane_index = clamp_int(app->selected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+    return timeline_lane_is_drum(&app->timeline.lanes[lane_index]);
+}
+
+static bool app_pattern_index_valid(const App *app, int index) {
+    return app && index >= 0 && index < app->drum_pattern_count;
+}
+
+static bool app_kit_index_valid(const App *app, int index) {
+    return app && index >= 0 && index < app->drum_kit_count;
+}
+
+static const char *timeline_lane_type_label(TimelineLaneType type) {
+    return type == TIMELINE_LANE_DRUMS ? "drums" : "audio";
 }
 
 static int64_t timeline_snap_ticks(const MasterTimeline *timeline) {
@@ -443,6 +498,11 @@ static const char *timeline_edit_verb_label(TimelineEditMode mode) {
 }
 
 static const char *timeline_edit_clip_name(const App *app) {
+    if (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_DRUM_PATTERN) {
+        int index = app->timeline_edit_pattern_index;
+        if (app_pattern_index_valid(app, index)) return app->drum_patterns[index].name;
+        return "pattern";
+    }
     int index = app->timeline_edit_roster_clip_index;
     if (index >= 0 && index < app->roster_clip_count) return app->roster[index].name;
     return "clip";
@@ -467,7 +527,7 @@ static void app_set_timeline_edit_status(App *app) {
                  timeline_edit_clip_name(app));
 }
 
-#define TIMELINE_CONTEXT_MAX_ITEMS 10
+#define TIMELINE_CONTEXT_MAX_ITEMS 12
 
 static void app_timeline_clear_context_menu(App *app) {
     app->timeline_context_menu_open = false;
@@ -475,6 +535,7 @@ static void app_timeline_clear_context_menu(App *app) {
     app->timeline_context_menu_selected = 0;
     app->timeline_context_menu_instance = timeline_instance_ref_invalid();
     app->timeline_context_menu_roster_index = -1;
+    app->timeline_context_menu_pattern_index = -1;
     app->timeline_context_menu_tick = 0;
 }
 
@@ -708,8 +769,23 @@ static int timeline_context_menu_items(const App *app,
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_DELETE_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
+        case TIMELINE_CONTEXT_SCOPE_PATTERN:
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_NEW_PATTERN;
+            if (app_pattern_index_valid(app, app->timeline_context_menu_pattern_index)) {
+                if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_EDIT_PATTERN;
+                if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_RENAME_PATTERN;
+                if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_FREE;
+                if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_DUPLICATE_PATTERN;
+                if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_DELETE_PATTERN;
+            }
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
+            break;
         case TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE:
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_ROSTER;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
+            break;
+        case TIMELINE_CONTEXT_SCOPE_CONFIRM_PATTERN_DELETE:
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_PATTERN;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
         case TIMELINE_CONTEXT_SCOPE_NONE:
@@ -724,7 +800,9 @@ static const char *timeline_context_menu_title(TimelineContextMenuScope scope) {
         case TIMELINE_CONTEXT_SCOPE_TIMELINE: return "TIMELINE MENU";
         case TIMELINE_CONTEXT_SCOPE_INSTANCE: return "INSTANCE MENU";
         case TIMELINE_CONTEXT_SCOPE_ROSTER: return "ROSTER MENU";
+        case TIMELINE_CONTEXT_SCOPE_PATTERN: return "PATTERN MENU";
         case TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE: return "DELETE ROSTER CLIP?";
+        case TIMELINE_CONTEXT_SCOPE_CONFIRM_PATTERN_DELETE: return "DELETE PATTERN?";
         case TIMELINE_CONTEXT_SCOPE_NONE:
         default: return "MENU";
     }
@@ -745,6 +823,12 @@ static const char *timeline_context_item_label(TimelineContextMenuItem item) {
         case TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER: return "Export WAV";
         case TIMELINE_CONTEXT_ITEM_DELETE_ROSTER: return "Delete roster clip";
         case TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_ROSTER: return "Delete clip and instances";
+        case TIMELINE_CONTEXT_ITEM_NEW_PATTERN: return "New pattern";
+        case TIMELINE_CONTEXT_ITEM_EDIT_PATTERN: return "Edit pattern";
+        case TIMELINE_CONTEXT_ITEM_RENAME_PATTERN: return "Rename pattern";
+        case TIMELINE_CONTEXT_ITEM_DUPLICATE_PATTERN: return "Duplicate pattern";
+        case TIMELINE_CONTEXT_ITEM_DELETE_PATTERN: return "Delete pattern";
+        case TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_PATTERN: return "Delete pattern and instances";
         case TIMELINE_CONTEXT_ITEM_CANCEL:
         default: return "Cancel";
     }
@@ -785,6 +869,7 @@ static void safe_project_render_stem(const App *app, char *out, size_t out_size)
 static bool app_export_timeline_wav_named(App *app, const char *filename_text);
 static bool app_export_roster_clip_wav_named(App *app, int roster_index, const char *filename_text);
 static bool app_rename_roster_clip_named(App *app, int roster_index, const char *display_name);
+static bool app_rename_drum_pattern_named(App *app, int pattern_index, const char *display_name);
 static void roster_export_filename(const RosterClip *clip, char *out, size_t out_size);
 static void app_text_entry_open(App *app,
                                 AppTextEntryMode mode,
@@ -923,6 +1008,109 @@ static int64_t timeline_clip_duration_ticks(const App *app, int roster_clip_inde
     return ticks > 0 ? ticks : 1;
 }
 
+static int64_t timeline_pattern_duration_ticks(const App *app, int pattern_index) {
+    if (!app_pattern_index_valid(app, pattern_index)) return 0;
+    int64_t length = app->drum_patterns[pattern_index].length_ticks;
+    if (length <= 0) length = timeline_bar_ticks(&app->timeline);
+    return length > 0 ? length : 1;
+}
+
+static int app_next_available_pattern_locator_note(const App *app) {
+    bool used[128] = {0};
+    if (app) {
+        for (int i = 0; i < app->drum_pattern_count; ++i) {
+            const DrumPattern *pattern = &app->drum_patterns[i];
+            if (pattern->locator_channel == DRUM_PATTERN_LOCATOR_CHANNEL &&
+                pattern->locator_note >= 0 &&
+                pattern->locator_note < 128) {
+                used[pattern->locator_note] = true;
+            }
+        }
+    }
+    for (int note = 24; note < 96; ++note) {
+        if (!used[note]) return note;
+    }
+    for (int note = 0; note < 128; ++note) {
+        if (!used[note]) return note;
+    }
+    return 24;
+}
+
+static int drum_pattern_event_index(const DrumPattern *pattern, int64_t tick, int note) {
+    if (!pattern) return -1;
+    for (int i = 0; i < pattern->event_count; ++i) {
+        const DrumPatternEvent *event = &pattern->events[i];
+        if (event->tick == tick && event->note == note) return i;
+    }
+    return -1;
+}
+
+static bool drum_pattern_add_event(DrumPattern *pattern,
+                                   int64_t tick,
+                                   int note,
+                                   int velocity,
+                                   int64_t duration_ticks) {
+    if (!pattern || pattern->event_count >= APP_MAX_DRUM_PATTERN_EVENTS) return false;
+    if (duration_ticks <= 0) duration_ticks = 1;
+    int existing = drum_pattern_event_index(pattern, tick, note);
+    if (existing >= 0) {
+        pattern->events[existing].velocity = clamp_int(velocity, 1, 127);
+        pattern->events[existing].duration_ticks = duration_ticks;
+        return true;
+    }
+    DrumPatternEvent event = {
+        .tick = tick < 0 ? 0 : tick,
+        .note = clamp_int(note, 0, 127),
+        .velocity = clamp_int(velocity, 1, 127),
+        .duration_ticks = duration_ticks
+    };
+    int insert_at = pattern->event_count;
+    while (insert_at > 0) {
+        DrumPatternEvent *prev = &pattern->events[insert_at - 1];
+        if (prev->tick < event.tick || (prev->tick == event.tick && prev->note <= event.note)) break;
+        pattern->events[insert_at] = *prev;
+        --insert_at;
+    }
+    pattern->events[insert_at] = event;
+    pattern->event_count++;
+    return true;
+}
+
+static void drum_pattern_remove_event_at(DrumPattern *pattern, int index) {
+    if (!pattern || index < 0 || index >= pattern->event_count) return;
+    for (int i = index; i + 1 < pattern->event_count; ++i) {
+        pattern->events[i] = pattern->events[i + 1];
+    }
+    pattern->event_count--;
+    if (pattern->event_count >= 0) {
+        SDL_memset(&pattern->events[pattern->event_count], 0, sizeof(pattern->events[pattern->event_count]));
+    }
+}
+
+static void drum_pattern_seed_basic_beat(DrumPattern *pattern) {
+    if (!pattern || pattern->length_ticks <= 0) return;
+    int64_t step = pattern->length_ticks / 16;
+    if (step <= 0) step = 1;
+    int64_t dur = step;
+    for (int i = 0; i < 16; i += 2) {
+        drum_pattern_add_event(pattern, (int64_t)i * step, 42, 82, dur);
+    }
+    drum_pattern_add_event(pattern, 0 * step, 36, 112, dur);
+    drum_pattern_add_event(pattern, 8 * step, 36, 108, dur);
+    drum_pattern_add_event(pattern, 4 * step, 38, 118, dur);
+    drum_pattern_add_event(pattern, 12 * step, 38, 118, dur);
+}
+
+static void drum_pattern_init_defaults(App *app, DrumPattern *pattern, int index, const char *name) {
+    SDL_memset(pattern, 0, sizeof(*pattern));
+    generate_stable_id("pat", pattern->pattern_id, sizeof(pattern->pattern_id));
+    SDL_snprintf(pattern->name, sizeof(pattern->name), "%s", name && name[0] ? name : "basic beat");
+    pattern->length_ticks = timeline_bar_ticks(&app->timeline);
+    pattern->locator_channel = DRUM_PATTERN_LOCATOR_CHANNEL;
+    pattern->locator_note = app_next_available_pattern_locator_note(app);
+    pattern->color = roster_color_for_index(index);
+}
+
 static bool timeline_range_overlaps_existing(const App *app,
                                              int lane_index,
                                              int64_t start,
@@ -952,6 +1140,14 @@ static bool timeline_ghost_is_valid(const App *app) {
     if (app->timeline_edit_mode == TIMELINE_EDIT_NONE) return false;
     if (!timeline_lane_index_valid(app->timeline_edit_ghost_lane)) return false;
     const TimelineLane *ghost_lane = &app->timeline.lanes[app->timeline_edit_ghost_lane];
+    if (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_DRUM_PATTERN &&
+        ghost_lane->type != TIMELINE_LANE_DRUMS) {
+        return false;
+    }
+    if (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_AUDIO_CLIP &&
+        ghost_lane->type != TIMELINE_LANE_AUDIO) {
+        return false;
+    }
     if (app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP &&
         ghost_lane->instance_count >= APP_MAX_TIMELINE_INSTANCES_PER_LANE) {
         return false;
@@ -1092,7 +1288,9 @@ static void timeline_enter_move_instance(App *app) {
     app->timeline_edit_mode = TIMELINE_EDIT_MOVE_INSTANCE;
     app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
     app->timeline_edit_instance = app->selected_timeline_instance;
+    app->timeline_edit_instance_kind = instance->kind;
     app->timeline_edit_roster_clip_index = instance->roster_clip_index;
+    app->timeline_edit_pattern_index = instance->pattern_index;
     app->timeline_edit_original_lane = app->selected_timeline_instance.lane_index;
     app->timeline_edit_ghost_lane = app->selected_timeline_instance.lane_index;
     app->timeline_edit_original_start_tick = instance->start_tick;
@@ -1115,6 +1313,10 @@ static void timeline_enter_place_clip(App *app, TimelinePlacementMode placement_
         return;
     }
     int lane_index = clamp_int(app->selected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+    if (app->timeline.lanes[lane_index].type != TIMELINE_LANE_AUDIO) {
+        app_set_status(app, "Select an audio lane for clips");
+        return;
+    }
     if (app->timeline.lanes[lane_index].instance_count >= APP_MAX_TIMELINE_INSTANCES_PER_LANE) {
         app_set_status(app, "lane full");
         return;
@@ -1132,7 +1334,49 @@ static void timeline_enter_place_clip(App *app, TimelinePlacementMode placement_
     app->timeline_edit_mode = TIMELINE_EDIT_PLACE_CLIP;
     app->timeline_edit_placement_mode = placement_mode;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
+    app->timeline_edit_instance_kind = TIMELINE_INSTANCE_AUDIO_CLIP;
     app->timeline_edit_roster_clip_index = app->selected_roster_clip;
+    app->timeline_edit_pattern_index = -1;
+    app->timeline_edit_original_lane = lane_index;
+    app->timeline_edit_ghost_lane = lane_index;
+    app->timeline_edit_original_start_tick = 0;
+    app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick);
+    app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
+    app->timeline_edit_ghost_seam_side = app->timeline.timeline_cursor_tick == app->timeline_edit_ghost_start_tick ?
+        app->timeline.timeline_cursor_seam_side :
+        timeline_default_seam_side_for_tick(&app->timeline, app->timeline_edit_ghost_start_tick);
+    app->timeline_edit_duration_ticks = duration;
+    timeline_clamp_ghost_start(app);
+    timeline_update_ghost_valid(app);
+    if (app->timeline_edit_ghost_valid) app_set_timeline_edit_status(app);
+    else app_set_status(app, "overlap blocked");
+}
+
+static void timeline_enter_place_pattern(App *app) {
+    if (!app_selected_timeline_lane_is_drum(app)) {
+        app_set_status(app, "Select a drum lane for patterns");
+        return;
+    }
+    if (!app_pattern_index_valid(app, app->selected_drum_pattern)) {
+        app_set_status(app, "pattern roster empty");
+        return;
+    }
+    int lane_index = clamp_int(app->selected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+    if (app->timeline.lanes[lane_index].instance_count >= APP_MAX_TIMELINE_INSTANCES_PER_LANE) {
+        app_set_status(app, "lane full");
+        return;
+    }
+    int64_t duration = timeline_pattern_duration_ticks(app, app->selected_drum_pattern);
+    if (duration <= 0) {
+        app_set_status(app, "Invalid drum pattern");
+        return;
+    }
+    app->timeline_edit_mode = TIMELINE_EDIT_PLACE_CLIP;
+    app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
+    app->timeline_edit_instance = timeline_instance_ref_invalid();
+    app->timeline_edit_instance_kind = TIMELINE_INSTANCE_DRUM_PATTERN;
+    app->timeline_edit_roster_clip_index = -1;
+    app->timeline_edit_pattern_index = app->selected_drum_pattern;
     app->timeline_edit_original_lane = lane_index;
     app->timeline_edit_ghost_lane = lane_index;
     app->timeline_edit_original_start_tick = 0;
@@ -1714,7 +1958,7 @@ void app_open_selected_roster_clip_waveform(App *app) {
         next.tempo_lock.target_bars = 0.0;
     }
     next.playback_rate = 1.0;
-    next.gain = 0.9f;
+    next.gain = 1.0f;
 
     audio_engine_stop_timeline(&app->audio, true);
     audio_engine_stop_preview(&app->audio);
@@ -2204,6 +2448,22 @@ void app_timeline_fit_play_range_view(App *app) {
 }
 
 void app_timeline_select_roster_delta(App *app, int delta) {
+    if (app_selected_timeline_lane_is_drum(app)) {
+        if (app->drum_pattern_count <= 0) {
+            app->selected_drum_pattern = -1;
+            app->selected_drum_pattern_armed = false;
+            app_set_status(app, "pattern roster empty");
+            return;
+        }
+        if (app->selected_drum_pattern < 0) app->selected_drum_pattern = 0;
+        app->selected_drum_pattern += delta;
+        if (app->selected_drum_pattern < 0) app->selected_drum_pattern = 0;
+        if (app->selected_drum_pattern >= app->drum_pattern_count) {
+            app->selected_drum_pattern = app->drum_pattern_count - 1;
+        }
+        app->selected_drum_pattern_armed = false;
+        return;
+    }
     if (app->roster_clip_count <= 0) {
         app->selected_roster_clip = -1;
         app->selected_roster_clip_armed = false;
@@ -2220,6 +2480,8 @@ void app_timeline_select_roster_delta(App *app, int delta) {
 void app_timeline_select_lane_delta(App *app, int delta) {
     if (delta == 0) return;
     app->selected_timeline_lane = clamp_int(app->selected_timeline_lane + delta, 0, TIMELINE_MAX_LANES - 1);
+    app->selected_roster_clip_armed = false;
+    app->selected_drum_pattern_armed = false;
     app_timeline_clear_context_menu(app);
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Track lane %d", app->selected_timeline_lane + 1);
 }
@@ -2367,23 +2629,34 @@ static void app_timeline_confirm_edit_mode(App *app) {
 
     if (app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP) {
         if (!timeline_lane_index_valid(app->timeline_edit_ghost_lane) ||
-            app->timeline_edit_roster_clip_index < 0 ||
-            app->timeline_edit_roster_clip_index >= app->roster_clip_count) {
+            (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_AUDIO_CLIP &&
+             (app->timeline_edit_roster_clip_index < 0 ||
+              app->timeline_edit_roster_clip_index >= app->roster_clip_count)) ||
+            (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_DRUM_PATTERN &&
+             !app_pattern_index_valid(app, app->timeline_edit_pattern_index))) {
             if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
             app_set_status(app, "Invalid placement");
             return;
         }
         TimelineLane *lane = &app->timeline.lanes[app->timeline_edit_ghost_lane];
+        if ((app->timeline_edit_instance_kind == TIMELINE_INSTANCE_AUDIO_CLIP && lane->type != TIMELINE_LANE_AUDIO) ||
+            (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_DRUM_PATTERN && lane->type != TIMELINE_LANE_DRUMS)) {
+            if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+            app_set_status(app, "Lane type mismatch");
+            return;
+        }
         if (lane->instance_count >= APP_MAX_TIMELINE_INSTANCES_PER_LANE) {
             if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
             app_set_status(app, "lane full");
             return;
         }
-        RosterClip *clip = &app->roster[app->timeline_edit_roster_clip_index];
+        RosterClip *clip = app->timeline_edit_instance_kind == TIMELINE_INSTANCE_AUDIO_CLIP ?
+            &app->roster[app->timeline_edit_roster_clip_index] : NULL;
         int64_t old_length = app->timeline.length_ticks > 0 ? app->timeline.length_ticks : 0;
         int64_t length_floor = old_length;
         const char *pulse_error = NULL;
-        if (app->timeline_edit_placement_mode == TIMELINE_PLACE_PULSE) {
+        if (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_AUDIO_CLIP &&
+            app->timeline_edit_placement_mode == TIMELINE_PLACE_PULSE) {
             double bpm = timeline_roster_clip_source_bpm(app, app->timeline_edit_roster_clip_index);
             if (bpm <= 0.0) {
                 if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
@@ -2401,7 +2674,8 @@ static void app_timeline_confirm_edit_mode(App *app) {
             }
             app->timeline_edit_ghost_seam_side = timeline_default_seam_side_for_tick(&app->timeline,
                                                                                      app->timeline_edit_ghost_start_tick);
-        } else if (app->timeline_edit_placement_mode == TIMELINE_INSERT_PULSE) {
+        } else if (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_AUDIO_CLIP &&
+                   app->timeline_edit_placement_mode == TIMELINE_INSERT_PULSE) {
             double bpm = timeline_roster_clip_source_bpm(app, app->timeline_edit_roster_clip_index);
             if (bpm <= 0.0) {
                 if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
@@ -2427,12 +2701,23 @@ static void app_timeline_confirm_edit_mode(App *app) {
 
         int index = lane->instance_count++;
         TimelineInstance *instance = &lane->instances[index];
-        instance->roster_clip_index = app->timeline_edit_roster_clip_index;
+        instance->kind = app->timeline_edit_instance_kind;
+        instance->roster_clip_index = app->timeline_edit_instance_kind == TIMELINE_INSTANCE_AUDIO_CLIP ?
+            app->timeline_edit_roster_clip_index : -1;
+        instance->pattern_index = app->timeline_edit_instance_kind == TIMELINE_INSTANCE_DRUM_PATTERN ?
+            app->timeline_edit_pattern_index : -1;
         instance->start_tick = app->timeline_edit_ghost_start_tick;
         instance->duration_ticks = app->timeline_edit_duration_ticks;
-        instance->midi_note = clip->midi_note;
-        instance->midi_channel = clip->midi_channel;
-        instance->midi_velocity = clip->midi_velocity;
+        if (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_DRUM_PATTERN) {
+            DrumPattern *pattern = &app->drum_patterns[app->timeline_edit_pattern_index];
+            instance->midi_note = clamp_int(pattern->locator_note, 0, 127);
+            instance->midi_channel = clamp_int(pattern->locator_channel, 0, 15);
+        } else {
+            instance->midi_note = clip->midi_note;
+            instance->midi_channel = clip->midi_channel;
+        }
+        instance->midi_velocity = app->timeline_edit_instance_kind == TIMELINE_INSTANCE_DRUM_PATTERN ?
+            127 : clip->midi_velocity;
         app->timeline.timeline_cursor_tick = app->timeline_edit_ghost_start_tick;
         app->timeline.timeline_cursor_seam_side = app->timeline_edit_ghost_seam_side;
         app->selected_timeline_lane = app->timeline_edit_ghost_lane;
@@ -2447,6 +2732,7 @@ static void app_timeline_confirm_edit_mode(App *app) {
         app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
         if (completed_mode == TIMELINE_INSERT_PULSE) app_set_status(app, "Pulse inserted");
         else if (completed_mode == TIMELINE_PLACE_PULSE) app_set_status(app, "Pulse placed");
+        else if (instance->kind == TIMELINE_INSTANCE_DRUM_PATTERN) app_set_status(app, "Pattern placed");
         else app_set_status(app, "Clip placed");
     }
 }
@@ -2464,7 +2750,9 @@ static void app_timeline_cancel_edit_mode(App *app) {
     app->timeline_edit_mode = TIMELINE_EDIT_NONE;
     app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
+    app->timeline_edit_instance_kind = TIMELINE_INSTANCE_AUDIO_CLIP;
     app->timeline_edit_roster_clip_index = -1;
+    app->timeline_edit_pattern_index = -1;
     app->timeline_edit_ghost_lane = 0;
     app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
     app->timeline_edit_ghost_seam_side = TIMELINE_SEAM_NONE;
@@ -2509,6 +2797,29 @@ void app_timeline_activate_focus(App *app) {
             break;
         }
         case TIMELINE_FOCUS_ROSTER:
+            if (app_selected_timeline_lane_is_drum(app)) {
+                if (app->drum_pattern_count <= 0) {
+                    app_create_drum_pattern(app);
+                }
+                if (app->selected_drum_pattern < 0 && app->drum_pattern_count > 0) {
+                    app->selected_drum_pattern = 0;
+                    app->selected_drum_pattern_armed = false;
+                }
+                if (app_pattern_index_valid(app, app->selected_drum_pattern)) {
+                    if (!app->selected_drum_pattern_armed) {
+                        app->selected_drum_pattern_armed = true;
+                        SDL_snprintf(app->status_text,
+                                     sizeof(app->status_text),
+                                     "Selected %s",
+                                     app->drum_patterns[app->selected_drum_pattern].name);
+                    } else {
+                        timeline_enter_place_pattern(app);
+                    }
+                } else {
+                    app_set_status(app, "pattern roster empty");
+                }
+                break;
+            }
             if (app->selected_roster_clip < 0 && app->roster_clip_count > 0) {
                 app->selected_roster_clip = 0;
                 app->selected_roster_clip_armed = false;
@@ -2738,6 +3049,19 @@ void app_timeline_open_context_menu(App *app) {
     app->project_menu_selected = 0;
     app_timeline_clear_context_menu(app);
     if (app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) {
+        if (app_selected_timeline_lane_is_drum(app)) {
+            if (app->drum_pattern_count <= 0) {
+                app->selected_drum_pattern = -1;
+            } else if (!app_pattern_index_valid(app, app->selected_drum_pattern)) {
+                app->selected_drum_pattern = 0;
+            }
+            app->timeline_context_menu_open = true;
+            app->timeline_context_menu_scope = TIMELINE_CONTEXT_SCOPE_PATTERN;
+            app->timeline_context_menu_pattern_index = app->selected_drum_pattern;
+            app->timeline_context_menu_tick = app->timeline.timeline_cursor_tick;
+            app_set_status(app, "Pattern menu");
+            return;
+        }
         if (app->selected_roster_clip < 0 || app->selected_roster_clip >= app->roster_clip_count) {
             app_set_status(app, "Select a roster clip first");
             return;
@@ -2789,6 +3113,12 @@ void app_timeline_close_context_menu(App *app) {
     TimelineContextMenuScope scope = app->timeline_context_menu_scope;
     if (scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE) {
         app->timeline_context_menu_scope = TIMELINE_CONTEXT_SCOPE_ROSTER;
+        app->timeline_context_menu_selected = 1;
+        app_set_status(app, "Delete cancelled");
+        return;
+    }
+    if (scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_PATTERN_DELETE) {
+        app->timeline_context_menu_scope = TIMELINE_CONTEXT_SCOPE_PATTERN;
         app->timeline_context_menu_selected = 1;
         app_set_status(app, "Delete cancelled");
         return;
@@ -2903,6 +3233,13 @@ void app_timeline_context_menu_apply(App *app) {
         case TIMELINE_CONTEXT_ITEM_PLACE_PULSE:
         case TIMELINE_CONTEXT_ITEM_INSERT_PULSE:
         {
+            if (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_PATTERN &&
+                app_pattern_index_valid(app, app->timeline_context_menu_pattern_index)) {
+                app->selected_drum_pattern = app->timeline_context_menu_pattern_index;
+                app_timeline_clear_context_menu(app);
+                timeline_enter_place_pattern(app);
+                break;
+            }
             if (app->timeline_context_menu_roster_index >= 0 &&
                 app->timeline_context_menu_roster_index < app->roster_clip_count) {
                 app->selected_roster_clip = app->timeline_context_menu_roster_index;
@@ -2945,6 +3282,48 @@ void app_timeline_context_menu_apply(App *app) {
                 app->selected_roster_clip = app->timeline_context_menu_roster_index;
             }
             app_delete_selected_roster_clip(app);
+            break;
+        case TIMELINE_CONTEXT_ITEM_NEW_PATTERN:
+            app_timeline_clear_context_menu(app);
+            app_create_drum_pattern(app);
+            break;
+        case TIMELINE_CONTEXT_ITEM_EDIT_PATTERN:
+            if (app_pattern_index_valid(app, app->timeline_context_menu_pattern_index)) {
+                app->selected_drum_pattern = app->timeline_context_menu_pattern_index;
+                app_timeline_clear_context_menu(app);
+                app_open_drum_machine_for_selected_pattern(app);
+            }
+            break;
+        case TIMELINE_CONTEXT_ITEM_RENAME_PATTERN:
+            if (app_pattern_index_valid(app, app->timeline_context_menu_pattern_index)) {
+                app->selected_drum_pattern = app->timeline_context_menu_pattern_index;
+                app_text_entry_open(app,
+                                    APP_TEXT_ENTRY_DISPLAY_NAME,
+                                    APP_TEXT_ENTRY_ACTION_RENAME_DRUM_PATTERN,
+                                    "RENAME PATTERN",
+                                    "Name",
+                                    app->drum_patterns[app->timeline_context_menu_pattern_index].name,
+                                    APP_ROSTER_CLIP_NAME_MAX - 1);
+                app->text_entry_target_pattern_index = app->timeline_context_menu_pattern_index;
+            }
+            break;
+        case TIMELINE_CONTEXT_ITEM_DUPLICATE_PATTERN:
+            if (app_pattern_index_valid(app, app->timeline_context_menu_pattern_index)) {
+                app->selected_drum_pattern = app->timeline_context_menu_pattern_index;
+                app_timeline_clear_context_menu(app);
+                app_duplicate_selected_drum_pattern(app);
+            }
+            break;
+        case TIMELINE_CONTEXT_ITEM_DELETE_PATTERN:
+            app->timeline_context_menu_scope = TIMELINE_CONTEXT_SCOPE_CONFIRM_PATTERN_DELETE;
+            app->timeline_context_menu_selected = 0;
+            app_set_status(app, "Confirm pattern delete");
+            break;
+        case TIMELINE_CONTEXT_ITEM_CONFIRM_DELETE_PATTERN:
+            if (app_pattern_index_valid(app, app->timeline_context_menu_pattern_index)) {
+                app->selected_drum_pattern = app->timeline_context_menu_pattern_index;
+            }
+            app_delete_selected_drum_pattern(app);
             break;
         case TIMELINE_CONTEXT_ITEM_CANCEL:
         default:
@@ -3279,6 +3658,48 @@ static bool project_sample_relative_path_for_clip(const RosterClip *clip, int fa
     return out && out[0];
 }
 
+static bool project_drum_sample_filename(const DrumKit *kit, const DrumPad *pad, char *out, size_t out_size) {
+    if (!kit || !pad || !out || out_size == 0) return false;
+    const char *kit_id = kit->kit_id[0] ? kit->kit_id : "kit";
+    return SDL_snprintf(out, out_size, "%s_note_%03d.wav", kit_id, clamp_int(pad->note, 0, 127)) > 0;
+}
+
+static bool project_drum_sample_relative_path(const DrumKit *kit, const DrumPad *pad, char *out, size_t out_size) {
+    char dir[CLIP_MAX_PATH];
+    char filename[APP_STABLE_ID_MAX + 32];
+    path_join(dir, sizeof(dir), VAPORPLANE_PROJECT_SAMPLES_DIRNAME, "drums");
+    if (!project_drum_sample_filename(kit, pad, filename, sizeof(filename))) return false;
+    path_join(out, out_size, dir, filename);
+    return out && out[0];
+}
+
+static bool drum_lane_uses_kit(const TimelineLane *lane, int kit_index, const DrumKit *kit) {
+    if (!lane || lane->type != TIMELINE_LANE_DRUMS || !kit) return false;
+    if (lane->drum_kit_index == kit_index) return true;
+    return lane->drum_kit_id[0] && SDL_strcmp(lane->drum_kit_id, kit->kit_id) == 0;
+}
+
+static bool app_project_uses_drum_pad(const App *app, int kit_index, int note) {
+    if (!app_kit_index_valid(app, kit_index)) return false;
+    const DrumKit *kit = &app->drum_kits[kit_index];
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        const TimelineLane *lane = &app->timeline.lanes[lane_index];
+        if (!drum_lane_uses_kit(lane, kit_index, kit)) continue;
+        for (int instance_index = 0; instance_index < lane->instance_count; ++instance_index) {
+            const TimelineInstance *instance = &lane->instances[instance_index];
+            if (instance->kind != TIMELINE_INSTANCE_DRUM_PATTERN ||
+                !app_pattern_index_valid(app, instance->pattern_index)) {
+                continue;
+            }
+            const DrumPattern *pattern = &app->drum_patterns[instance->pattern_index];
+            for (int event_index = 0; event_index < pattern->event_count; ++event_index) {
+                if (pattern->events[event_index].note == note) return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void app_ensure_project_identity(App *app, const char *bundle_path) {
     if (!app) return;
     if (!app->project_id[0]) {
@@ -3295,6 +3716,15 @@ static void app_ensure_project_identity(App *app, const char *bundle_path) {
             clip->loop_start_frame = 0;
             clip->loop_end_frame = clip->frame_count;
         }
+    }
+    for (int i = 0; i < app->drum_pattern_count; ++i) {
+        DrumPattern *pattern = &app->drum_patterns[i];
+        if (!pattern->pattern_id[0]) generate_stable_id("pat", pattern->pattern_id, sizeof(pattern->pattern_id));
+        if (!pattern->name[0]) SDL_snprintf(pattern->name, sizeof(pattern->name), "pattern %02d", i + 1);
+        if (pattern->length_ticks <= 0) pattern->length_ticks = timeline_bar_ticks(&app->timeline);
+        if (pattern->locator_channel < 0 || pattern->locator_channel > 15) pattern->locator_channel = DRUM_PATTERN_LOCATOR_CHANNEL;
+        if (pattern->locator_note < 0 || pattern->locator_note > 127) pattern->locator_note = app_next_available_pattern_locator_note(app);
+        if (pattern->color.a == 0) pattern->color = roster_color_for_index(i);
     }
 }
 
@@ -3399,6 +3829,45 @@ static void float_wav_stream_abort(FloatWavStreamWriter *writer) {
 }
 
 static bool write_project_float_wav(const RosterClip *clip, const char *path) {
+    if (!clip || !path || !clip->samples || clip->frame_count == 0 ||
+        clip->channels <= 0 || clip->sample_rate <= 0) {
+        return false;
+    }
+    Uint64 input_bytes64 = (Uint64)clip->frame_count * (Uint64)clip->channels * sizeof(float);
+    if (input_bytes64 > (Uint64)INT_MAX) return false;
+
+    SDL_AudioSpec src = {
+        .format = SDL_AUDIO_F32,
+        .channels = clip->channels,
+        .freq = clip->sample_rate
+    };
+    SDL_AudioSpec dst = {
+        .format = SDL_AUDIO_F32,
+        .channels = VAPORPLANE_PROJECT_CHANNELS,
+        .freq = VAPORPLANE_PROJECT_SAMPLE_RATE
+    };
+    Uint8 *converted = NULL;
+    int converted_len = 0;
+    if (!SDL_ConvertAudioSamples(&src,
+                                  (const Uint8 *)clip->samples,
+                                  (int)input_bytes64,
+                                  &dst,
+                                  &converted,
+                                  &converted_len)) {
+        return false;
+    }
+    if (converted_len <= 0 || (converted_len % (int)(sizeof(float) * VAPORPLANE_PROJECT_CHANNELS)) != 0) {
+        SDL_free(converted);
+        return false;
+    }
+
+    size_t frame_count = (size_t)converted_len / (sizeof(float) * VAPORPLANE_PROJECT_CHANNELS);
+    bool ok = write_project_float_wav_buffer((const float *)converted, frame_count, path);
+    SDL_free(converted);
+    return ok;
+}
+
+static bool write_project_audio_clip_float_wav(const AudioClip *clip, const char *path) {
     if (!clip || !path || !clip->samples || clip->frame_count == 0 ||
         clip->channels <= 0 || clip->sample_rate <= 0) {
         return false;
@@ -3600,10 +4069,73 @@ static bool midi_build_lane_track(const TimelineLane *lane, MidiBuffer *track) {
     return midi_buffer_meta_end(track);
 }
 
+static bool midi_build_pattern_track(const DrumPattern *pattern, MidiBuffer *track) {
+    if (!pattern || !track) return false;
+    track->ok = true;
+    ProjectMidiNoteEvent events[APP_MAX_DRUM_PATTERN_EVENTS * 2];
+    int event_count = 0;
+    for (int i = 0; i < pattern->event_count && event_count + 1 < (int)(sizeof(events) / sizeof(events[0])); ++i) {
+        const DrumPatternEvent *event = &pattern->events[i];
+        if (event->duration_ticks <= 0) continue;
+        int64_t start = event->tick >= 0 ? event->tick : 0;
+        if (pattern->length_ticks > 0 && start >= pattern->length_ticks) continue;
+        int64_t end = start + event->duration_ticks;
+        if (pattern->length_ticks > 0 && end > pattern->length_ticks) end = pattern->length_ticks;
+        if (end <= start) end = start + 1;
+        Uint8 note = (Uint8)clamp_int(event->note, 0, 127);
+        Uint8 velocity = (Uint8)clamp_int(event->velocity, 1, 127);
+        events[event_count++] = (ProjectMidiNoteEvent){ start, true, DRUM_MIDI_CHANNEL, note, velocity };
+        events[event_count++] = (ProjectMidiNoteEvent){ end, false, DRUM_MIDI_CHANNEL, note, 0 };
+    }
+    if (pattern->length_ticks > 0 && event_count + 1 < (int)(sizeof(events) / sizeof(events[0]))) {
+        events[event_count++] = (ProjectMidiNoteEvent){
+            pattern->length_ticks,
+            false,
+            DRUM_MIDI_CHANNEL,
+            0,
+            0
+        };
+    }
+    qsort(events, (size_t)event_count, sizeof(events[0]), compare_midi_note_events);
+    int64_t last_tick = 0;
+    for (int i = 0; i < event_count; ++i) {
+        ProjectMidiNoteEvent *event = &events[i];
+        Uint8 status = (Uint8)((event->note_on ? 0x90 : 0x80) | (event->channel & 0x0f));
+        if (!midi_buffer_varlen(track, midi_delta_from_ticks(last_tick, event->tick)) ||
+            !midi_buffer_u8(track, status) ||
+            !midi_buffer_u8(track, event->note) ||
+            !midi_buffer_u8(track, event->velocity)) {
+            return false;
+        }
+        last_tick = event->tick;
+    }
+    return midi_buffer_meta_end(track);
+}
+
 static void midi_buffer_destroy(MidiBuffer *buffer) {
     if (!buffer) return;
     SDL_free(buffer->data);
     SDL_memset(buffer, 0, sizeof(*buffer));
+}
+
+static bool write_project_pattern_mid(const App *app, const DrumPattern *pattern, const char *path) {
+    if (!app || !pattern || !path) return false;
+    SDL_IOStream *io = SDL_IOFromFile(path, "wb");
+    if (!io) return false;
+    Uint16 ppqn = (Uint16)clamp_int(app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat : app->transport.ppqn,
+                                    1,
+                                    32767);
+    bool ok = true;
+    ok = ok && write_fourcc(io, "MThd");
+    ok = ok && midi_write_be32(io, 6);
+    ok = ok && midi_write_be16(io, 0);
+    ok = ok && midi_write_be16(io, 1);
+    ok = ok && midi_write_be16(io, ppqn);
+    MidiBuffer track = {0};
+    ok = ok && midi_build_pattern_track(pattern, &track) && midi_write_track(io, &track);
+    midi_buffer_destroy(&track);
+    ok = SDL_CloseIO(io) && ok;
+    return ok;
 }
 
 static bool write_project_timeline_mid(const App *app, const char *path) {
@@ -3665,13 +4197,21 @@ static bool write_project_surfaces_json(const App *app, const char *path) {
     ok = ok && io_printf(io, "  \"lanes\": [\n");
     for (int lane_index = 0; ok && lane_index < TIMELINE_MAX_LANES; ++lane_index) {
         const TimelineLane *lane = &app->timeline.lanes[lane_index];
-        ok = ok && io_printf(io,
-                             "    { \"lane\": %d, \"muted\": %s, \"gain\": %.6f, \"palette\": %d, \"fx_chain\": [] }%s\n",
-                             lane_index + 1,
-                             lane->muted ? "true" : "false",
-                             lane->gain,
-                             lane->palette_index,
-                             lane_index + 1 < TIMELINE_MAX_LANES ? "," : "");
+        ok = ok && io_printf(io, "    {\n");
+        ok = ok && io_printf(io, "      \"lane\": %d,\n", lane_index + 1);
+        ok = ok && io_printf(io, "      \"type\": ");
+        ok = ok && json_write_string(io, timeline_lane_type_label(lane->type));
+        ok = ok && io_printf(io, ",\n");
+        ok = ok && io_printf(io, "      \"muted\": %s,\n", lane->muted ? "true" : "false");
+        ok = ok && io_printf(io, "      \"gain\": %.6f,\n", lane->gain);
+        ok = ok && io_printf(io, "      \"palette\": %d,\n", lane->palette_index);
+        ok = ok && io_printf(io, "      \"midi_channel\": %d,\n", clamp_int(lane->midi_channel, 0, 15) + 1);
+        ok = ok && io_printf(io, "      \"drum_kit_id\": ");
+        ok = ok && json_write_string(io, lane->drum_kit_id);
+        ok = ok && io_printf(io, ",\n");
+        ok = ok && io_printf(io, "      \"drum_step_resolution\": %d,\n", lane->drum_step_resolution > 0 ? lane->drum_step_resolution : 16);
+        ok = ok && io_printf(io, "      \"fx_chain\": []\n");
+        ok = ok && io_printf(io, "    }%s\n", lane_index + 1 < TIMELINE_MAX_LANES ? "," : "");
     }
     ok = ok && io_printf(io, "  ],\n");
     ok = ok && io_printf(io, "  \"fx_chain\": [\n");
@@ -3680,10 +4220,16 @@ static bool write_project_surfaces_json(const App *app, const char *path) {
         if (i > 0) ok = ok && io_printf(io, ",\n");
         ok = ok && io_printf(io, "    {\n");
         ok = ok && io_printf(io, "      \"unit_id\": ");
-        ok = ok && json_write_string(io, unit->type == MASTER_FX_UNIT_REVERB ? "reverb_1" : audio_engine_master_fx_unit_label(unit->type));
+        const char *unit_id = unit->type == MASTER_FX_UNIT_REVERB ? "reverb_1" :
+                              (unit->type == MASTER_FX_UNIT_SOFT_CLIP_LIMITER ? "limiter_1" :
+                               audio_engine_master_fx_unit_label(unit->type));
+        const char *unit_type = unit->type == MASTER_FX_UNIT_REVERB ? "reverb" :
+                                (unit->type == MASTER_FX_UNIT_SOFT_CLIP_LIMITER ? "limiter" :
+                                 audio_engine_master_fx_unit_label(unit->type));
+        ok = ok && json_write_string(io, unit_id);
         ok = ok && io_printf(io, ",\n");
         ok = ok && io_printf(io, "      \"type\": ");
-        ok = ok && json_write_string(io, unit->type == MASTER_FX_UNIT_REVERB ? "reverb" : audio_engine_master_fx_unit_label(unit->type));
+        ok = ok && json_write_string(io, unit_type);
         ok = ok && io_printf(io, ",\n");
         ok = ok && io_printf(io, "      \"enabled\": %s,\n", unit->enabled ? "true" : "false");
         ok = ok && io_printf(io, "      \"bypassed\": %s,\n", unit->bypassed ? "true" : "false");
@@ -3703,6 +4249,12 @@ static bool write_project_surfaces_json(const App *app, const char *path) {
             ok = ok && io_printf(io, "        \"master.fx.reverb_1.width\": %.6f,\n", reverb.width);
             ok = ok && io_printf(io, "        \"master.fx.reverb_1.mod_depth_ms\": %.6f,\n", reverb.mod_depth_ms);
             ok = ok && io_printf(io, "        \"master.fx.reverb_1.mod_rate_hz\": %.6f\n", reverb.mod_rate_hz);
+            ok = ok && io_printf(io, "      }\n");
+        } else if (unit->type == MASTER_FX_UNIT_SOFT_CLIP_LIMITER) {
+            ok = ok && io_printf(io, "\n");
+            ok = ok && io_printf(io, "        \"master.fx.limiter_1.enabled\": %s,\n", unit->enabled && !unit->bypassed ? "true" : "false");
+            ok = ok && io_printf(io, "        \"master.fx.limiter_1.ceiling\": %.6f,\n", MASTER_LIMITER_CEILING);
+            ok = ok && io_printf(io, "        \"master.fx.limiter_1.release_ms\": %.6f\n", MASTER_LIMITER_RELEASE_MS);
             ok = ok && io_printf(io, "      }\n");
         } else {
             ok = ok && io_printf(io, " }\n");
@@ -3800,7 +4352,60 @@ static bool write_project_manifest_json(const App *app, const char *bundle_path,
         ok = ok && io_printf(io, "      }\n");
         ok = ok && io_printf(io, "    }%s\n", i + 1 < app->roster_clip_count ? "," : "");
     }
-    ok = ok && io_printf(io, "  ]\n");
+    ok = ok && io_printf(io, "  ],\n");
+
+    ok = ok && io_printf(io, "  \"patterns\": [\n");
+    for (int i = 0; ok && i < app->drum_pattern_count; ++i) {
+        const DrumPattern *pattern = &app->drum_patterns[i];
+        char pattern_id[APP_STABLE_ID_MAX];
+        char midi_path[CLIP_MAX_PATH];
+        if (pattern->pattern_id[0]) SDL_strlcpy(pattern_id, pattern->pattern_id, sizeof(pattern_id));
+        else SDL_snprintf(pattern_id, sizeof(pattern_id), "pat_%03d", i + 1);
+        SDL_snprintf(midi_path, sizeof(midi_path), "%s/%s.mid", VAPORPLANE_PROJECT_PATTERNS_DIRNAME, pattern_id);
+        ok = ok && io_printf(io, "    {\n");
+        ok = ok && io_printf(io, "      \"pattern_id\": ");
+        ok = ok && json_write_string(io, pattern_id);
+        ok = ok && io_printf(io, ",\n      \"name\": ");
+        ok = ok && json_write_string(io, pattern->name);
+        ok = ok && io_printf(io, ",\n      \"midi_file\": ");
+        ok = ok && json_write_string(io, midi_path);
+        ok = ok && io_printf(io, ",\n      \"length_ticks\": %lld,\n", (long long)pattern->length_ticks);
+        ok = ok && io_printf(io, "      \"midi_binding\": {\n");
+        ok = ok && io_printf(io, "        \"channel\": %d,\n", clamp_int(pattern->locator_channel, 0, 15) + 1);
+        ok = ok && io_printf(io, "        \"note\": %d\n", clamp_int(pattern->locator_note, 0, 127));
+        ok = ok && io_printf(io, "      }\n");
+        ok = ok && io_printf(io, "    }%s\n", i + 1 < app->drum_pattern_count ? "," : "");
+    }
+    ok = ok && io_printf(io, "  ],\n");
+
+    ok = ok && io_printf(io, "  \"drum_samples\": [\n");
+    bool first_drum_sample = true;
+    for (int kit_index = 0; ok && kit_index < app->drum_kit_count; ++kit_index) {
+        const DrumKit *kit = &app->drum_kits[kit_index];
+        for (int pad_index = 0; ok && pad_index < kit->pad_count; ++pad_index) {
+            const DrumPad *pad = &kit->pads[pad_index];
+            if (!pad->loaded || !app_project_uses_drum_pad(app, kit_index, pad->note)) continue;
+            char rel_path[CLIP_MAX_PATH];
+            if (!project_drum_sample_relative_path(kit, pad, rel_path, sizeof(rel_path))) {
+                ok = false;
+                break;
+            }
+            if (!first_drum_sample) ok = ok && io_printf(io, ",\n");
+            first_drum_sample = false;
+            ok = ok && io_printf(io, "    {\n");
+            ok = ok && io_printf(io, "      \"kit_id\": ");
+            ok = ok && json_write_string(io, kit->kit_id);
+            ok = ok && io_printf(io, ",\n      \"kit_name\": ");
+            ok = ok && json_write_string(io, kit->name);
+            ok = ok && io_printf(io, ",\n      \"note\": %d,\n", clamp_int(pad->note, 0, 127));
+            ok = ok && io_printf(io, "      \"name\": ");
+            ok = ok && json_write_string(io, pad->name);
+            ok = ok && io_printf(io, ",\n      \"path\": ");
+            ok = ok && json_write_string(io, rel_path);
+            ok = ok && io_printf(io, "\n    }");
+        }
+    }
+    ok = ok && io_printf(io, "\n  ]\n");
     ok = ok && io_printf(io, "}\n");
 
     ok = SDL_CloseIO(io) && ok;
@@ -3812,7 +4417,7 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
         if (app) app_set_status(app, "No project path");
         return false;
     }
-    if (app->roster_clip_count <= 0 && !timeline_has_instances(&app->timeline)) {
+    if (app->roster_clip_count <= 0 && app->drum_pattern_count <= 0 && !timeline_has_instances(&app->timeline)) {
         app_set_status(app, "Nothing to save yet");
         return false;
     }
@@ -3834,6 +4439,13 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
         return false;
     }
 
+    char patterns_dir[CLIP_MAX_PATH];
+    path_join(patterns_dir, sizeof(patterns_dir), bundle_path, VAPORPLANE_PROJECT_PATTERNS_DIRNAME);
+    if (app->drum_pattern_count > 0 && !ensure_directory(patterns_dir)) {
+        app_set_status(app, "Could not create project patterns folder");
+        return false;
+    }
+
     for (int i = 0; i < app->roster_clip_count; ++i) {
         char filename[APP_STABLE_ID_MAX + 8];
         char sample_path[CLIP_MAX_PATH];
@@ -3845,6 +4457,47 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
         if (!write_project_float_wav(&app->roster[i], sample_path)) {
             app_set_status(app, "Could not write project sample WAV");
             return false;
+        }
+    }
+
+    for (int i = 0; i < app->drum_pattern_count; ++i) {
+        char filename[APP_STABLE_ID_MAX + 8];
+        char pattern_path[CLIP_MAX_PATH];
+        const char *pattern_id = app->drum_patterns[i].pattern_id[0] ? app->drum_patterns[i].pattern_id : "pattern";
+        SDL_snprintf(filename, sizeof(filename), "%s.mid", pattern_id);
+        path_join(pattern_path, sizeof(pattern_path), patterns_dir, filename);
+        if (!write_project_pattern_mid(app, &app->drum_patterns[i], pattern_path)) {
+            app_set_status(app, "Could not write drum pattern MIDI");
+            return false;
+        }
+    }
+
+    char drum_samples_dir[CLIP_MAX_PATH];
+    path_join(drum_samples_dir, sizeof(drum_samples_dir), samples_dir, "drums");
+    bool drum_samples_dir_ready = false;
+    for (int kit_index = 0; kit_index < app->drum_kit_count; ++kit_index) {
+        DrumKit *kit = &app->drum_kits[kit_index];
+        for (int pad_index = 0; pad_index < kit->pad_count; ++pad_index) {
+            DrumPad *pad = &kit->pads[pad_index];
+            if (!pad->loaded || !app_project_uses_drum_pad(app, kit_index, pad->note)) continue;
+            if (!drum_samples_dir_ready) {
+                if (!ensure_directory(drum_samples_dir)) {
+                    app_set_status(app, "Could not create drum samples folder");
+                    return false;
+                }
+                drum_samples_dir_ready = true;
+            }
+            char filename[APP_STABLE_ID_MAX + 32];
+            char sample_path[CLIP_MAX_PATH];
+            if (!project_drum_sample_filename(kit, pad, filename, sizeof(filename))) {
+                app_set_status(app, "Could not name drum sample");
+                return false;
+            }
+            path_join(sample_path, sizeof(sample_path), drum_samples_dir, filename);
+            if (!write_project_audio_clip_float_wav(&pad->clip, sample_path)) {
+                app_set_status(app, "Could not write drum sample WAV");
+                return false;
+            }
         }
     }
 
@@ -3941,6 +4594,7 @@ static void app_text_entry_open(App *app,
     app->text_entry_key_col = 0;
     app->text_entry_uppercase = false;
     app->text_entry_target_roster_index = -1;
+    app->text_entry_target_pattern_index = -1;
     app->text_entry_target_lane_index = -1;
     app->project_menu_open = false;
     app->project_menu_selected = 0;
@@ -4063,6 +4717,7 @@ void app_text_entry_cancel(App *app) {
     app->text_entry_open = false;
     app->text_entry_action = APP_TEXT_ENTRY_ACTION_NONE;
     app->text_entry_target_roster_index = -1;
+    app->text_entry_target_pattern_index = -1;
     app->text_entry_target_lane_index = -1;
     app->text_entry_error[0] = '\0';
     if (app->window) SDL_StopTextInput(app->window);
@@ -4308,6 +4963,11 @@ void app_text_entry_confirm(App *app) {
                                               app->text_entry_target_roster_index,
                                               app->text_entry_text);
             break;
+        case APP_TEXT_ENTRY_ACTION_RENAME_DRUM_PATTERN:
+            ok = app_rename_drum_pattern_named(app,
+                                               app->text_entry_target_pattern_index,
+                                               app->text_entry_text);
+            break;
         case APP_TEXT_ENTRY_ACTION_APPLY_LANE_VELOCITY:
             ok = app_apply_lane_velocity_named(app,
                                                app->text_entry_target_lane_index,
@@ -4322,6 +4982,7 @@ void app_text_entry_confirm(App *app) {
     app->text_entry_open = false;
     app->text_entry_action = APP_TEXT_ENTRY_ACTION_NONE;
     app->text_entry_target_roster_index = -1;
+    app->text_entry_target_pattern_index = -1;
     app->text_entry_target_lane_index = -1;
     app->text_entry_error[0] = '\0';
     if (app->window) SDL_StopTextInput(app->window);
@@ -4452,7 +5113,7 @@ static bool app_timeline_export_range(const App *app, int64_t *start, int64_t *e
 }
 
 static bool app_timeline_has_renderable_clip_in_range(const App *app, int64_t start_tick, int64_t end_tick) {
-    if (!app || end_tick <= start_tick || app->roster_clip_count <= 0) return false;
+    if (!app || end_tick <= start_tick) return false;
     for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
         const TimelineLane *lane = &app->timeline.lanes[lane_index];
         if (lane->muted) continue;
@@ -4461,6 +5122,22 @@ static bool app_timeline_has_renderable_clip_in_range(const App *app, int64_t st
             if (instance->duration_ticks <= 0) continue;
             int64_t instance_end = instance->start_tick + instance->duration_ticks;
             if (instance_end <= start_tick || instance->start_tick >= end_tick) continue;
+            if (instance->kind == TIMELINE_INSTANCE_DRUM_PATTERN) {
+                if (!app_pattern_index_valid(app, instance->pattern_index) ||
+                    !app_kit_index_valid(app, lane->drum_kit_index)) {
+                    continue;
+                }
+                const DrumPattern *pattern = &app->drum_patterns[instance->pattern_index];
+                const DrumKit *kit = &app->drum_kits[lane->drum_kit_index];
+                for (int event_index = 0; event_index < pattern->event_count; ++event_index) {
+                    int note = pattern->events[event_index].note;
+                    for (int pad_index = 0; pad_index < kit->pad_count; ++pad_index) {
+                        const DrumPad *pad = &kit->pads[pad_index];
+                        if (pad->note == note && pad->loaded && pad->clip.samples && pad->clip.frame_count > 1) return true;
+                    }
+                }
+                continue;
+            }
             if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
             const RosterClip *clip = &app->roster[instance->roster_clip_index];
             if (clip->samples && clip->frame_count > 1 && clip->sample_rate > 0 && clip->channels > 0) {
@@ -4472,7 +5149,7 @@ static bool app_timeline_has_renderable_clip_in_range(const App *app, int64_t st
 }
 
 static bool app_timeline_first_renderable_range(const App *app, int64_t *start_tick, int64_t *end_tick) {
-    if (!app || !start_tick || !end_tick || app->roster_clip_count <= 0) return false;
+    if (!app || !start_tick || !end_tick) return false;
     bool found = false;
     int64_t first = 0;
     int64_t last = 0;
@@ -4482,9 +5159,29 @@ static bool app_timeline_first_renderable_range(const App *app, int64_t *start_t
         for (int i = 0; i < lane->instance_count; ++i) {
             const TimelineInstance *instance = &lane->instances[i];
             if (instance->duration_ticks <= 0) continue;
-            if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
-            const RosterClip *clip = &app->roster[instance->roster_clip_index];
-            if (!clip->samples || clip->frame_count <= 1 || clip->sample_rate <= 0 || clip->channels <= 0) continue;
+            bool renderable = false;
+            if (instance->kind == TIMELINE_INSTANCE_DRUM_PATTERN) {
+                if (app_pattern_index_valid(app, instance->pattern_index) &&
+                    app_kit_index_valid(app, lane->drum_kit_index)) {
+                    const DrumPattern *pattern = &app->drum_patterns[instance->pattern_index];
+                    const DrumKit *kit = &app->drum_kits[lane->drum_kit_index];
+                    for (int event_index = 0; event_index < pattern->event_count && !renderable; ++event_index) {
+                        int note = pattern->events[event_index].note;
+                        for (int pad_index = 0; pad_index < kit->pad_count; ++pad_index) {
+                            const DrumPad *pad = &kit->pads[pad_index];
+                            if (pad->note == note && pad->loaded && pad->clip.samples && pad->clip.frame_count > 1) {
+                                renderable = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
+                const RosterClip *clip = &app->roster[instance->roster_clip_index];
+                renderable = clip->samples && clip->frame_count > 1 && clip->sample_rate > 0 && clip->channels > 0;
+            }
+            if (!renderable) continue;
             int64_t end = instance->start_tick + instance->duration_ticks;
             if (!found || instance->start_tick < first) first = instance->start_tick;
             if (!found || end > last) last = end;
@@ -4907,6 +5604,11 @@ typedef struct {
     RosterClip roster[APP_MAX_ROSTER_CLIPS];
     int roster_clip_count;
     int midi_binding_to_roster[16][128];
+    DrumPattern drum_patterns[APP_MAX_DRUM_PATTERNS];
+    int drum_pattern_count;
+    int midi_binding_to_pattern[16][128];
+    DrumKit drum_kits[APP_MAX_DRUM_KITS];
+    int drum_kit_count;
     MasterTimeline timeline;
     float master_gain;
     bool has_master_gain;
@@ -4919,9 +5621,10 @@ static void project_load_state_init(ProjectLoadState *state) {
     for (int ch = 0; ch < 16; ++ch) {
         for (int note = 0; note < 128; ++note) {
             state->midi_binding_to_roster[ch][note] = -1;
+            state->midi_binding_to_pattern[ch][note] = -1;
         }
     }
-    state->master_gain = 0.9f;
+    state->master_gain = 1.0f;
     state->timeline.ticks_per_beat = 960;
     state->timeline.timeline_bpm = TIMELINE_DEFAULT_BPM;
     state->timeline.timeline_beats_per_bar = 4;
@@ -4934,6 +5637,9 @@ static void project_load_state_destroy(ProjectLoadState *state) {
     if (!state) return;
     for (int i = 0; i < state->roster_clip_count; ++i) {
         roster_clip_destroy(&state->roster[i]);
+    }
+    for (int i = 0; i < state->drum_kit_count; ++i) {
+        drum_kit_destroy(&state->drum_kits[i]);
     }
     SDL_memset(state, 0, sizeof(*state));
 }
@@ -5165,6 +5871,42 @@ static bool load_roster_wav_for_project(const char *bundle_path, const char *rel
     return true;
 }
 
+static int project_find_or_add_loaded_drum_kit(ProjectLoadState *state,
+                                               const char *kit_id,
+                                               const char *kit_name) {
+    if (!state || !kit_id || !kit_id[0]) return -1;
+    for (int i = 0; i < state->drum_kit_count; ++i) {
+        if (SDL_strcmp(state->drum_kits[i].kit_id, kit_id) == 0) return i;
+    }
+    if (state->drum_kit_count >= APP_MAX_DRUM_KITS) return -1;
+    int index = state->drum_kit_count++;
+    DrumKit *kit = &state->drum_kits[index];
+    SDL_memset(kit, 0, sizeof(*kit));
+    SDL_strlcpy(kit->kit_id, kit_id, sizeof(kit->kit_id));
+    SDL_strlcpy(kit->name, kit_name && kit_name[0] ? kit_name : kit_id, sizeof(kit->name));
+    kit->project_local = true;
+    return index;
+}
+
+static bool load_project_drum_sample(const char *bundle_path,
+                                     const char *relative_path,
+                                     DrumPad *pad) {
+    if (!project_validation_is_safe_relative_path(relative_path) || !pad) return false;
+    char path[CLIP_MAX_PATH];
+    path_join(path, sizeof(path), bundle_path, relative_path);
+    AudioClip loaded;
+    if (!clip_init_from_wav(&loaded, path)) return false;
+    pad->clip = loaded;
+    pad->loaded = true;
+    pad->project_local = true;
+    SDL_strlcpy(pad->source_path, path, sizeof(pad->source_path));
+    return true;
+}
+
+static bool load_drum_pattern_mid_for_project(const char *bundle_path,
+                                              const char *relative_path,
+                                              DrumPattern *pattern);
+
 static bool parse_project_manifest(const char *bundle_path, const char *json, ProjectLoadState *state) {
     const char *json_end = json + SDL_strlen(json);
     int version = 0;
@@ -5307,6 +6049,98 @@ static bool parse_project_manifest(const char *bundle_path, const char *json, Pr
         roster_count++;
     }
 
+    if (json_find_array_range(json, json_end, "drum_samples", &array_start, &array_end)) {
+        cursor = array_start + 1;
+        while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
+            char kit_id[APP_STABLE_ID_MAX];
+            char kit_name[APP_ROSTER_CLIP_NAME_MAX];
+            char pad_name[APP_ROSTER_CLIP_NAME_MAX];
+            char rel_path[CLIP_MAX_PATH];
+            int note = -1;
+            kit_id[0] = '\0';
+            kit_name[0] = '\0';
+            pad_name[0] = '\0';
+            rel_path[0] = '\0';
+            if (!json_get_string_range(object_start, object_end, "kit_id", kit_id, sizeof(kit_id)) ||
+                !json_get_string_range(object_start, object_end, "path", rel_path, sizeof(rel_path)) ||
+                !json_get_int_range(object_start, object_end, "note", &note)) {
+                project_roster_entries_destroy(entries, roster_count);
+                return false;
+            }
+            json_get_string_range(object_start, object_end, "kit_name", kit_name, sizeof(kit_name));
+            json_get_string_range(object_start, object_end, "name", pad_name, sizeof(pad_name));
+            int kit_index = project_find_or_add_loaded_drum_kit(state, kit_id, kit_name);
+            if (kit_index < 0) {
+                project_roster_entries_destroy(entries, roster_count);
+                return false;
+            }
+            DrumKit *kit = &state->drum_kits[kit_index];
+            if (kit->pad_count >= APP_MAX_DRUM_PADS) {
+                project_roster_entries_destroy(entries, roster_count);
+                return false;
+            }
+            DrumPad *pad = &kit->pads[kit->pad_count];
+            SDL_memset(pad, 0, sizeof(*pad));
+            pad->note = clamp_int(note, 0, 127);
+            SDL_strlcpy(pad->name, pad_name[0] ? pad_name : "pad", sizeof(pad->name));
+            if (!load_project_drum_sample(bundle_path, rel_path, pad)) {
+                project_roster_entries_destroy(entries, roster_count);
+                return false;
+            }
+            kit->pad_count++;
+        }
+    }
+
+    if (json_find_array_range(json, json_end, "patterns", &array_start, &array_end)) {
+        cursor = array_start + 1;
+        while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
+            if (state->drum_pattern_count >= APP_MAX_DRUM_PATTERNS) {
+                project_roster_entries_destroy(entries, roster_count);
+                return false;
+            }
+            DrumPattern *pattern = &state->drum_patterns[state->drum_pattern_count];
+            SDL_memset(pattern, 0, sizeof(*pattern));
+            char midi_file[CLIP_MAX_PATH];
+            if (!json_get_string_range(object_start, object_end, "pattern_id", pattern->pattern_id, sizeof(pattern->pattern_id)) ||
+                !json_get_string_range(object_start, object_end, "midi_file", midi_file, sizeof(midi_file))) {
+                project_roster_entries_destroy(entries, roster_count);
+                return false;
+            }
+            if (!json_get_string_range(object_start, object_end, "name", pattern->name, sizeof(pattern->name))) {
+                SDL_strlcpy(pattern->name, pattern->pattern_id, sizeof(pattern->name));
+            }
+            int64_t length_ticks = 0;
+            if (json_get_int64_range(object_start, object_end, "length_ticks", &length_ticks) && length_ticks > 0) {
+                pattern->length_ticks = length_ticks;
+            } else {
+                pattern->length_ticks = (int64_t)state->timeline.ticks_per_beat * 4;
+            }
+            pattern->locator_channel = DRUM_PATTERN_LOCATOR_CHANNEL;
+            pattern->locator_note = 24 + state->drum_pattern_count;
+            const char *binding_start = NULL;
+            const char *binding_end = NULL;
+            if (json_find_object_range(object_start, object_end, "midi_binding", &binding_start, &binding_end)) {
+                int channel = DRUM_PATTERN_LOCATOR_CHANNEL + 1;
+                int note = 24 + state->drum_pattern_count;
+                json_get_int_range(binding_start, binding_end, "channel", &channel);
+                json_get_int_range(binding_start, binding_end, "note", &note);
+                pattern->locator_channel = clamp_int(channel - 1, 0, 15);
+                pattern->locator_note = clamp_int(note, 0, 127);
+            }
+            pattern->color = roster_color_for_index(state->drum_pattern_count);
+            if (!load_drum_pattern_mid_for_project(bundle_path, midi_file, pattern)) {
+                project_roster_entries_destroy(entries, roster_count);
+                return false;
+            }
+            int ch = clamp_int(pattern->locator_channel, 0, 15);
+            int note = clamp_int(pattern->locator_note, 0, 127);
+            if (state->midi_binding_to_pattern[ch][note] < 0) {
+                state->midi_binding_to_pattern[ch][note] = state->drum_pattern_count;
+            }
+            state->drum_pattern_count++;
+        }
+    }
+
     if (version == 1 && json_find_array_range(json, json_end, "clip_instances", &array_start, &array_end)) {
         cursor = array_start + 1;
         while (json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
@@ -5345,7 +6179,7 @@ static bool parse_project_manifest(const char *bundle_path, const char *json, Pr
         SDL_memset(&entry->clip, 0, sizeof(entry->clip));
     }
     state->roster_clip_count = roster_count;
-    return roster_count > 0;
+    return roster_count > 0 || state->drum_pattern_count > 0;
 }
 
 static bool midi_read_be16_mem(const Uint8 *data, size_t size, size_t *pos, Uint16 *out) {
@@ -5381,6 +6215,105 @@ typedef struct {
     int64_t start_tick;
     Uint8 velocity;
 } MidiOpenNote;
+
+static bool parse_drum_pattern_midi_track(DrumPattern *pattern, const Uint8 *data, size_t size) {
+    size_t pos = 0;
+    int64_t tick = 0;
+    Uint8 running_status = 0;
+    MidiOpenNote open_notes[16][128];
+    SDL_memset(open_notes, 0, sizeof(open_notes));
+    while (pos < size) {
+        Uint32 delta = 0;
+        if (!midi_read_varlen_mem(data, size, &pos, &delta)) return false;
+        tick += (int64_t)delta;
+        if (pos >= size) return false;
+        Uint8 status = data[pos];
+        if (status < 0x80) {
+            if (running_status == 0) return false;
+            status = running_status;
+        } else {
+            pos++;
+            if (status < 0xf0) running_status = status;
+        }
+        if (status == 0xff) {
+            if (pos >= size) return false;
+            Uint8 meta = data[pos++];
+            Uint32 length = 0;
+            if (!midi_read_varlen_mem(data, size, &pos, &length) || pos + length > size) return false;
+            if (meta == 0x2f) return true;
+            pos += length;
+            continue;
+        }
+        if (status == 0xf0 || status == 0xf7) {
+            Uint32 length = 0;
+            if (!midi_read_varlen_mem(data, size, &pos, &length) || pos + length > size) return false;
+            pos += length;
+            continue;
+        }
+        Uint8 type = status & 0xf0;
+        Uint8 channel = status & 0x0f;
+        int data_bytes = (type == 0xc0 || type == 0xd0) ? 1 : 2;
+        if (pos + (size_t)data_bytes > size) return false;
+        Uint8 d1 = data[pos++];
+        Uint8 d2 = data_bytes == 2 ? data[pos++] : 0;
+        if (type == 0x90 && d2 > 0) {
+            open_notes[channel][d1].active = true;
+            open_notes[channel][d1].start_tick = tick;
+            open_notes[channel][d1].velocity = d2;
+        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
+            MidiOpenNote *open = &open_notes[channel][d1];
+            if (!open->active) continue;
+            int64_t duration = tick - open->start_tick;
+            open->active = false;
+            if (duration <= 0) continue;
+            if (pattern->event_count >= APP_MAX_DRUM_PATTERN_EVENTS) return false;
+            drum_pattern_add_event(pattern, open->start_tick, d1, open->velocity, duration);
+        }
+    }
+    return true;
+}
+
+static bool load_drum_pattern_mid_for_project(const char *bundle_path,
+                                              const char *relative_path,
+                                              DrumPattern *pattern) {
+    if (!bundle_path || !relative_path || !pattern ||
+        !project_validation_is_safe_relative_path(relative_path)) {
+        return false;
+    }
+    char path[CLIP_MAX_PATH];
+    path_join(path, sizeof(path), bundle_path, relative_path);
+    size_t size = 0;
+    Uint8 *data = (Uint8 *)SDL_LoadFile(path, &size);
+    if (!data) return false;
+    bool ok = false;
+    size_t pos = 0;
+    Uint32 header_length = 0;
+    Uint16 format = 0, track_count = 0, division = 0;
+    if (size < 14 || SDL_memcmp(data, "MThd", 4) != 0) goto done;
+    pos = 4;
+    if (!midi_read_be32_mem(data, size, &pos, &header_length) || header_length < 6 || pos + header_length > size) goto done;
+    if (!midi_read_be16_mem(data, size, &pos, &format) ||
+        !midi_read_be16_mem(data, size, &pos, &track_count) ||
+        !midi_read_be16_mem(data, size, &pos, &division)) {
+        goto done;
+    }
+    if (format > 1 || (division & 0x8000) != 0) goto done;
+    pos = 8 + header_length;
+    pattern->event_count = 0;
+    for (int track = 0; track < track_count; ++track) {
+        Uint32 track_length = 0;
+        if (pos + 8 > size || SDL_memcmp(data + pos, "MTrk", 4) != 0) goto done;
+        pos += 4;
+        if (!midi_read_be32_mem(data, size, &pos, &track_length) || pos + track_length > size) goto done;
+        if (!parse_drum_pattern_midi_track(pattern, data + pos, track_length)) goto done;
+        pos += track_length;
+    }
+    if (pattern->length_ticks <= 0) pattern->length_ticks = 3840;
+    ok = true;
+done:
+    SDL_free(data);
+    return ok;
+}
 
 static bool project_add_tempo_event(ProjectLoadState *state, int64_t tick, double bpm) {
     if (state->timeline.tempo_event_count >= TIMELINE_MAX_TEMPO_EVENTS) return false;
@@ -5450,12 +6383,31 @@ static bool parse_project_midi_track(ProjectLoadState *state, const Uint8 *data,
             int64_t duration = tick - open->start_tick;
             open->active = false;
             if (duration <= 0) continue;
+            int pattern_index = state->midi_binding_to_pattern[channel][d1];
+            if (pattern_index >= 0 && pattern_index < state->drum_pattern_count) {
+                TimelineLane *lane = &state->timeline.lanes[lane_index];
+                if (lane->instance_count >= APP_MAX_TIMELINE_INSTANCES_PER_LANE) return false;
+                TimelineInstance *instance = &lane->instances[lane->instance_count++];
+                instance->kind = TIMELINE_INSTANCE_DRUM_PATTERN;
+                instance->roster_clip_index = -1;
+                instance->pattern_index = pattern_index;
+                instance->start_tick = open->start_tick;
+                instance->duration_ticks = duration;
+                instance->midi_channel = channel;
+                instance->midi_note = d1;
+                instance->midi_velocity = clamp_int(open->velocity, 1, 127);
+                int64_t end_tick = open->start_tick + duration;
+                if (end_tick > state->timeline.length_ticks) state->timeline.length_ticks = end_tick;
+                continue;
+            }
             int roster_index = state->midi_binding_to_roster[channel][d1];
             if (roster_index < 0 || roster_index >= state->roster_clip_count) continue;
             TimelineLane *lane = &state->timeline.lanes[lane_index];
             if (lane->instance_count >= APP_MAX_TIMELINE_INSTANCES_PER_LANE) return false;
             TimelineInstance *instance = &lane->instances[lane->instance_count++];
+            instance->kind = TIMELINE_INSTANCE_AUDIO_CLIP;
             instance->roster_clip_index = roster_index;
+            instance->pattern_index = -1;
             instance->start_tick = open->start_tick;
             instance->duration_ticks = duration;
             instance->midi_channel = channel;
@@ -5561,9 +6513,34 @@ static void parse_project_surfaces(const char *json, ProjectLoadState *state) {
             if (lane_index < 0 || lane_index >= TIMELINE_MAX_LANES) continue;
             TimelineLane *lane = &state->timeline.lanes[lane_index];
             int int_value = 0;
+            char type_text[32];
+            if (json_get_string_range(object_start, object_end, "type", type_text, sizeof(type_text))) {
+                lane->type = SDL_strcasecmp(type_text, "drums") == 0 ? TIMELINE_LANE_DRUMS : TIMELINE_LANE_AUDIO;
+                lane->midi_channel = lane->type == TIMELINE_LANE_DRUMS ? DRUM_MIDI_CHANNEL : 0;
+            }
             if (json_get_bool_range(object_start, object_end, "muted", &bool_value)) lane->muted = bool_value;
             if (json_get_double_range(object_start, object_end, "gain", &value)) lane->gain = (float)clamp_double(value, 0.0, 2.0);
             if (json_get_int_range(object_start, object_end, "palette", &int_value)) lane->palette_index = clamp_int(int_value, 0, lane_palette_count() - 1);
+            if (json_get_int_range(object_start, object_end, "midi_channel", &int_value)) {
+                lane->midi_channel = clamp_int(int_value - 1, 0, 15);
+            }
+            json_get_string_range(object_start, object_end, "drum_kit_id", lane->drum_kit_id, sizeof(lane->drum_kit_id));
+            if (json_get_int_range(object_start, object_end, "drum_step_resolution", &int_value)) {
+                lane->drum_step_resolution = clamp_int(int_value, 1, 64);
+            }
+            lane->drum_kit_index = -1;
+            if (lane->type == TIMELINE_LANE_DRUMS && lane->drum_kit_id[0]) {
+                for (int kit_index = 0; kit_index < state->drum_kit_count; ++kit_index) {
+                    if (SDL_strcmp(state->drum_kits[kit_index].kit_id, lane->drum_kit_id) == 0) {
+                        lane->drum_kit_index = kit_index;
+                        break;
+                    }
+                }
+            }
+            if (lane->type == TIMELINE_LANE_DRUMS && lane->drum_kit_index < 0 && state->drum_kit_count > 0) {
+                lane->drum_kit_index = 0;
+                SDL_strlcpy(lane->drum_kit_id, state->drum_kits[0].kit_id, sizeof(lane->drum_kit_id));
+            }
         }
     }
     if (json_get_bool_range(json, end, "master.fx.reverb_1.enabled", &bool_value)) {
@@ -5685,13 +6662,57 @@ bool app_load_project_bundle(App *app, const char *bundle_path) {
         SDL_memset(&staged.roster[i], 0, sizeof(staged.roster[i]));
     }
     app->roster_clip_count = staged.roster_clip_count;
+    SDL_memset(app->drum_patterns, 0, sizeof(app->drum_patterns));
+    for (int i = 0; i < staged.drum_pattern_count; ++i) {
+        app->drum_patterns[i] = staged.drum_patterns[i];
+        SDL_memset(&staged.drum_patterns[i], 0, sizeof(staged.drum_patterns[i]));
+    }
+    app->drum_pattern_count = staged.drum_pattern_count;
+    if (staged.drum_kit_count > 0) {
+        app_clear_drum_kits(app);
+        for (int i = 0; i < staged.drum_kit_count; ++i) {
+            app->drum_kits[i] = staged.drum_kits[i];
+            SDL_memset(&staged.drum_kits[i], 0, sizeof(staged.drum_kits[i]));
+        }
+        app->drum_kit_count = staged.drum_kit_count;
+    }
     app->timeline = staged.timeline;
+    if (!app->timeline.initialized && app->drum_pattern_count > 0) {
+        app->timeline.initialized = true;
+        int64_t length = app->drum_patterns[0].length_ticks > 0 ? app->drum_patterns[0].length_ticks :
+            (int64_t)(app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat * 4 : 3840);
+        app->timeline.length_ticks = length;
+        app->timeline.play_range_start_tick = 0;
+        app->timeline.play_range_end_tick = length;
+        app->timeline.view_center_tick = (double)length * 0.5;
+        app->timeline.view_span_ticks = (double)length;
+    }
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        TimelineLane *lane = &app->timeline.lanes[lane_index];
+        if (lane->type != TIMELINE_LANE_DRUMS) continue;
+        lane->midi_channel = DRUM_MIDI_CHANNEL;
+        lane->drum_kit_index = -1;
+        if (lane->drum_kit_id[0]) {
+            for (int kit_index = 0; kit_index < app->drum_kit_count; ++kit_index) {
+                if (SDL_strcmp(app->drum_kits[kit_index].kit_id, lane->drum_kit_id) == 0) {
+                    lane->drum_kit_index = kit_index;
+                    break;
+                }
+            }
+        }
+        if (lane->drum_kit_index < 0 && app->drum_kit_count > 0) {
+            lane->drum_kit_index = 0;
+            SDL_strlcpy(lane->drum_kit_id, app->drum_kits[0].kit_id, sizeof(lane->drum_kit_id));
+        }
+    }
     SDL_strlcpy(app->project_id, staged.project_id, sizeof(app->project_id));
     SDL_strlcpy(app->project_name, staged.project_name, sizeof(app->project_name));
     app->timeline.playing = false;
     app->transport.playing = false;
     app->selected_roster_clip = staged.roster_clip_count > 0 ? 0 : -1;
     app->selected_roster_clip_armed = false;
+    app->selected_drum_pattern = staged.drum_pattern_count > 0 ? 0 : -1;
+    app->selected_drum_pattern_armed = false;
     app->selected_timeline_lane = 0;
     app->selected_timeline_instance = timeline_instance_ref_invalid();
     for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
@@ -5710,6 +6731,12 @@ bool app_load_project_bundle(App *app, const char *bundle_path) {
     app->view_mode = APP_VIEW_TIMELINE;
     sync_transport_from_app(app);
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    audio_engine_set_drum_materials(&app->audio,
+                                    app->drum_patterns,
+                                    &app->drum_pattern_count,
+                                    app->drum_kits,
+                                    &app->drum_kit_count);
 
     app_apply_loaded_surfaces(app, &staged);
     project_load_state_destroy(&staged);
@@ -6012,6 +7039,158 @@ void app_preview_selected_roster_clip(App *app) {
     }
 }
 
+static void make_safe_stable_id(const char *prefix, const char *name, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    size_t write = 0;
+    if (prefix && prefix[0]) {
+        write += (size_t)SDL_snprintf(out, out_size, "%s_", prefix);
+        if (write >= out_size) {
+            out[out_size - 1] = '\0';
+            return;
+        }
+    }
+    const char *text = name && name[0] ? name : "kit";
+    bool last_sep = false;
+    for (size_t read = 0; text[read] && write + 1 < out_size; ++read) {
+        char c = (char)tolower((unsigned char)text[read]);
+        bool keep = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+        if (keep) {
+            out[write++] = c;
+            last_sep = false;
+        } else if (!last_sep && write > 0 && write + 1 < out_size) {
+            out[write++] = '_';
+            last_sep = true;
+        }
+    }
+    while (write > 0 && out[write - 1] == '_') write--;
+    out[write] = '\0';
+    if (!out[0]) generate_stable_id(prefix ? prefix : "id", out, out_size);
+}
+
+static bool drum_kit_id_exists(const App *app, const char *kit_id) {
+    if (!app || !kit_id || !kit_id[0]) return false;
+    for (int i = 0; i < app->drum_kit_count; ++i) {
+        if (SDL_strcmp(app->drum_kits[i].kit_id, kit_id) == 0) return true;
+    }
+    return false;
+}
+
+static void path_dirname_copy(const char *path, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    SDL_strlcpy(out, path ? path : "", out_size);
+    char *slash = SDL_strrchr(out, '/');
+    char *backslash = SDL_strrchr(out, '\\');
+    char *cut = slash > backslash ? slash : backslash;
+    if (cut) *cut = '\0';
+    if (!out[0]) SDL_strlcpy(out, ".", out_size);
+}
+
+static bool app_load_drum_kit_json(App *app, const char *json_path, bool project_local) {
+    if (!app || !json_path || !json_path[0] || app->drum_kit_count >= APP_MAX_DRUM_KITS) return false;
+    char *json = NULL;
+    if (!load_text_file(json_path, &json, NULL)) return false;
+    const char *end = json + SDL_strlen(json);
+
+    DrumKit kit;
+    SDL_memset(&kit, 0, sizeof(kit));
+    path_dirname_copy(json_path, kit.root_path, sizeof(kit.root_path));
+    kit.project_local = project_local;
+    if (!json_get_string_range(json, end, "name", kit.name, sizeof(kit.name))) {
+        SDL_strlcpy(kit.name, path_basename(kit.root_path), sizeof(kit.name));
+    }
+    if (!json_get_string_range(json, end, "id", kit.kit_id, sizeof(kit.kit_id))) {
+        make_safe_stable_id("kit", kit.name, kit.kit_id, sizeof(kit.kit_id));
+    }
+    if (drum_kit_id_exists(app, kit.kit_id)) {
+        int suffix = 2;
+        char base[APP_STABLE_ID_MAX];
+        SDL_strlcpy(base, kit.kit_id, sizeof(base));
+        do {
+            SDL_snprintf(kit.kit_id, sizeof(kit.kit_id), "%s_%d", base, suffix++);
+        } while (drum_kit_id_exists(app, kit.kit_id) && suffix < 1000);
+    }
+
+    const char *array_start = NULL;
+    const char *array_end = NULL;
+    if (!json_find_array_range(json, end, "pads", &array_start, &array_end)) {
+        SDL_free(json);
+        return false;
+    }
+    const char *cursor = array_start + 1;
+    const char *object_start = NULL;
+    const char *object_end = NULL;
+    while (kit.pad_count < APP_MAX_DRUM_PADS &&
+           json_next_object(&cursor, array_end - 1, &object_start, &object_end)) {
+        DrumPad *pad = &kit.pads[kit.pad_count];
+        int note = -1;
+        char file[CLIP_MAX_PATH];
+        file[0] = '\0';
+        if (!json_get_int_range(object_start, object_end, "note", &note) ||
+            !json_get_string_range(object_start, object_end, "file", file, sizeof(file))) {
+            continue;
+        }
+        pad->note = clamp_int(note, 0, 127);
+        if (!json_get_string_range(object_start, object_end, "name", pad->name, sizeof(pad->name))) {
+            SDL_snprintf(pad->name, sizeof(pad->name), "note %d", pad->note);
+        }
+        path_join(pad->source_path, sizeof(pad->source_path), kit.root_path, file);
+        pad->project_local = project_local;
+        if (clip_init_from_wav(&pad->clip, pad->source_path)) {
+            pad->loaded = true;
+        }
+        kit.pad_count++;
+    }
+    SDL_free(json);
+    if (kit.pad_count <= 0) {
+        drum_kit_destroy(&kit);
+        return false;
+    }
+    app->drum_kits[app->drum_kit_count++] = kit;
+    return true;
+}
+
+static void app_refresh_drum_kits(App *app) {
+    if (!app) return;
+    app_clear_drum_kits(app);
+    char pack_dir[CLIP_MAX_PATH];
+    const char *base = SDL_GetBasePath();
+    if (base && base[0]) {
+        path_join(pack_dir, sizeof(pack_dir), base, "assets/drum_packs");
+        if (!path_is_directory(pack_dir)) SDL_strlcpy(pack_dir, "assets/drum_packs", sizeof(pack_dir));
+    } else {
+        SDL_strlcpy(pack_dir, "assets/drum_packs", sizeof(pack_dir));
+    }
+    if (!path_is_directory(pack_dir)) return;
+
+    int count = 0;
+    char **names = SDL_GlobDirectory(pack_dir, "*.json", SDL_GLOB_CASEINSENSITIVE, &count);
+    if (names) {
+        qsort(names, (size_t)count, sizeof(char *), compare_strings);
+        for (int i = 0; i < count && app->drum_kit_count < APP_MAX_DRUM_KITS; ++i) {
+            char path[CLIP_MAX_PATH];
+            path_join(path, sizeof(path), pack_dir, names[i]);
+            app_load_drum_kit_json(app, path, false);
+        }
+        SDL_free(names);
+    }
+
+    int child_count = 0;
+    char **children = SDL_GlobDirectory(pack_dir, "*", 0, &child_count);
+    if (children) {
+        qsort(children, (size_t)child_count, sizeof(char *), compare_strings);
+        for (int i = 0; i < child_count && app->drum_kit_count < APP_MAX_DRUM_KITS; ++i) {
+            char child_path[CLIP_MAX_PATH];
+            path_join(child_path, sizeof(child_path), pack_dir, children[i]);
+            if (!path_is_directory(child_path)) continue;
+            char kit_json[CLIP_MAX_PATH];
+            path_join(kit_json, sizeof(kit_json), child_path, "kit.json");
+            if (path_exists_any(kit_json)) app_load_drum_kit_json(app, kit_json, false);
+        }
+        SDL_free(children);
+    }
+}
+
 void app_pan_timeline_view(App *app, double fraction) {
     app->timeline.view_center_tick += app->timeline.view_span_ticks * fraction;
     clamp_timeline_view(app);
@@ -6066,6 +7245,279 @@ void app_cycle_inspected_lane_palette(App *app, int direction) {
     while (palette_index < 0) palette_index += count;
     palette_index %= count;
     lane->palette_index = palette_index;
+}
+
+void app_toggle_inspected_lane_type(App *app) {
+    int lane_index = clamp_int(app->inspected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+    TimelineLane *lane = &app->timeline.lanes[lane_index];
+    if (lane->instance_count > 0) {
+        app_set_status(app, "Clear lane before changing type");
+        return;
+    }
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    if (lane->type == TIMELINE_LANE_DRUMS) {
+        lane->type = TIMELINE_LANE_AUDIO;
+        lane->midi_channel = 0;
+        lane->drum_kit_index = -1;
+        lane->drum_kit_id[0] = '\0';
+    } else {
+        lane->type = TIMELINE_LANE_DRUMS;
+        lane->midi_channel = DRUM_MIDI_CHANNEL;
+        lane->drum_kit_index = app->drum_kit_count > 0 ? 0 : -1;
+        if (app_kit_index_valid(app, lane->drum_kit_index)) {
+            SDL_strlcpy(lane->drum_kit_id, app->drum_kits[lane->drum_kit_index].kit_id, sizeof(lane->drum_kit_id));
+        } else {
+            lane->drum_kit_id[0] = '\0';
+        }
+        if (lane->drum_step_resolution <= 0) lane->drum_step_resolution = 16;
+    }
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    app->selected_timeline_lane = lane_index;
+    app->selected_roster_clip_armed = false;
+    app->selected_drum_pattern_armed = false;
+    SDL_snprintf(app->status_text,
+                 sizeof(app->status_text),
+                 "Lane %d type %s",
+                 lane_index + 1,
+                 timeline_lane_type_label(lane->type));
+}
+
+void app_cycle_inspected_lane_kit(App *app, int direction) {
+    if (direction == 0) return;
+    int lane_index = clamp_int(app->inspected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+    TimelineLane *lane = &app->timeline.lanes[lane_index];
+    if (lane->type != TIMELINE_LANE_DRUMS) {
+        app_set_status(app, "Lane is not drums");
+        return;
+    }
+    if (app->drum_kit_count <= 0) {
+        lane->drum_kit_index = -1;
+        lane->drum_kit_id[0] = '\0';
+        app_set_status(app, "No drum kits found");
+        return;
+    }
+    int index = lane->drum_kit_index;
+    if (index < 0 || index >= app->drum_kit_count) index = 0;
+    index += direction;
+    while (index < 0) index += app->drum_kit_count;
+    index %= app->drum_kit_count;
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    lane->drum_kit_index = index;
+    SDL_strlcpy(lane->drum_kit_id, app->drum_kits[index].kit_id, sizeof(lane->drum_kit_id));
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Kit %s", app->drum_kits[index].name);
+}
+
+void app_create_drum_pattern(App *app) {
+    if (!app) return;
+    if (app->drum_pattern_count >= APP_MAX_DRUM_PATTERNS) {
+        app_set_status(app, "pattern roster full");
+        return;
+    }
+    int index = app->drum_pattern_count++;
+    char name[APP_ROSTER_CLIP_NAME_MAX];
+    SDL_snprintf(name, sizeof(name), "beat %02d", index + 1);
+    drum_pattern_init_defaults(app, &app->drum_patterns[index], index, name);
+    drum_pattern_seed_basic_beat(&app->drum_patterns[index]);
+    if (!app->timeline.initialized) {
+        app->timeline.initialized = true;
+        app->timeline.length_ticks = app->drum_patterns[index].length_ticks;
+        app->timeline.play_range_start_tick = 0;
+        app->timeline.play_range_end_tick = app->timeline.length_ticks;
+        app->timeline.view_center_tick = (double)app->timeline.length_ticks * 0.5;
+        app->timeline.view_span_ticks = (double)app->timeline.length_ticks;
+    }
+    app->selected_drum_pattern = index;
+    app->selected_drum_pattern_armed = false;
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Created %s", app->drum_patterns[index].name);
+}
+
+void app_duplicate_selected_drum_pattern(App *app) {
+    if (!app_pattern_index_valid(app, app->selected_drum_pattern)) {
+        app_set_status(app, "No pattern selected");
+        return;
+    }
+    if (app->drum_pattern_count >= APP_MAX_DRUM_PATTERNS) {
+        app_set_status(app, "pattern roster full");
+        return;
+    }
+    int src_index = app->selected_drum_pattern;
+    int dst_index = app->drum_pattern_count++;
+    app->drum_patterns[dst_index] = app->drum_patterns[src_index];
+    generate_stable_id("pat", app->drum_patterns[dst_index].pattern_id, sizeof(app->drum_patterns[dst_index].pattern_id));
+    app->drum_patterns[dst_index].locator_channel = DRUM_PATTERN_LOCATOR_CHANNEL;
+    app->drum_patterns[dst_index].locator_note = app_next_available_pattern_locator_note(app);
+    app->drum_patterns[dst_index].color = roster_color_for_index(dst_index);
+    SDL_snprintf(app->drum_patterns[dst_index].name,
+                 sizeof(app->drum_patterns[dst_index].name),
+                 "%s copy",
+                 app->drum_patterns[src_index].name);
+    app->selected_drum_pattern = dst_index;
+    app->selected_drum_pattern_armed = false;
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Duplicated %s", app->drum_patterns[src_index].name);
+}
+
+void app_delete_selected_drum_pattern(App *app) {
+    int delete_index = app ? app->selected_drum_pattern : -1;
+    if (!app_pattern_index_valid(app, delete_index)) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "No pattern selected");
+        return;
+    }
+    char deleted_name[APP_ROSTER_CLIP_NAME_MAX];
+    SDL_strlcpy(deleted_name, app->drum_patterns[delete_index].name, sizeof(deleted_name));
+    audio_engine_stop_timeline(&app->audio, false);
+    audio_engine_stop_preview(&app->audio);
+
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        TimelineLane *lane = &app->timeline.lanes[lane_index];
+        int write_index = 0;
+        for (int read_index = 0; read_index < lane->instance_count; ++read_index) {
+            TimelineInstance instance = lane->instances[read_index];
+            if (instance.kind == TIMELINE_INSTANCE_DRUM_PATTERN) {
+                if (instance.pattern_index == delete_index) continue;
+                if (instance.pattern_index > delete_index) instance.pattern_index--;
+            }
+            lane->instances[write_index++] = instance;
+        }
+        lane->instance_count = write_index;
+    }
+    for (int i = delete_index; i + 1 < app->drum_pattern_count; ++i) {
+        app->drum_patterns[i] = app->drum_patterns[i + 1];
+    }
+    app->drum_pattern_count--;
+    if (app->drum_pattern_count >= 0) {
+        SDL_memset(&app->drum_patterns[app->drum_pattern_count],
+                   0,
+                   sizeof(app->drum_patterns[app->drum_pattern_count]));
+    }
+    if (app->drum_pattern_count <= 0) {
+        app->selected_drum_pattern = -1;
+        app->selected_drum_pattern_armed = false;
+    } else {
+        app->selected_drum_pattern = clamp_int(delete_index, 0, app->drum_pattern_count - 1);
+        app->selected_drum_pattern_armed = false;
+    }
+    app->selected_timeline_instance = timeline_instance_ref_invalid();
+    recompute_timeline_length_no_lock(app);
+    int64_t playhead = app->timeline.playhead_tick;
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    audio_engine_set_timeline_playhead(&app->audio, playhead);
+    sync_transport_from_app(app);
+    app_timeline_clear_context_menu(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Deleted %s", deleted_name);
+}
+
+static bool app_rename_drum_pattern_named(App *app, int pattern_index, const char *display_name) {
+    if (!app_pattern_index_valid(app, pattern_index)) {
+        app_text_entry_set_error(app, "No pattern selected");
+        return false;
+    }
+    char trimmed[APP_ROSTER_CLIP_NAME_MAX];
+    trim_display_name(display_name, trimmed, sizeof(trimmed));
+    if (!trimmed[0]) {
+        app_text_entry_set_error(app, "Enter a pattern name");
+        return false;
+    }
+    SDL_strlcpy(app->drum_patterns[pattern_index].name, trimmed, sizeof(app->drum_patterns[pattern_index].name));
+    app->selected_drum_pattern = pattern_index;
+    app->selected_drum_pattern_armed = false;
+    app_timeline_clear_context_menu(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Renamed pattern %s", trimmed);
+    return true;
+}
+
+static DrumKit *app_selected_lane_drum_kit(App *app) {
+    if (!app) return NULL;
+    int lane_index = clamp_int(app->selected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+    TimelineLane *lane = &app->timeline.lanes[lane_index];
+    if (lane->type != TIMELINE_LANE_DRUMS || !app_kit_index_valid(app, lane->drum_kit_index)) return NULL;
+    return &app->drum_kits[lane->drum_kit_index];
+}
+
+void app_open_drum_machine_for_selected_pattern(App *app) {
+    if (!app) return;
+    if (!app_selected_timeline_lane_is_drum(app)) {
+        app_set_status(app, "Select a drum lane first");
+        return;
+    }
+    if (app->drum_pattern_count <= 0) app_create_drum_pattern(app);
+    if (!app_pattern_index_valid(app, app->selected_drum_pattern)) {
+        app_set_status(app, "No pattern selected");
+        return;
+    }
+    DrumKit *kit = app_selected_lane_drum_kit(app);
+    if (!kit || kit->pad_count <= 0) {
+        app_set_status(app, "No drum kit loaded");
+        return;
+    }
+    app->drum_machine_step = clamp_int(app->drum_machine_step, 0, 15);
+    app->drum_machine_pad = clamp_int(app->drum_machine_pad, 0, (kit->pad_count > 12 ? 12 : kit->pad_count) - 1);
+    app->view_mode = APP_VIEW_DRUM_MACHINE;
+    sync_transport_from_app(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Editing %s", app->drum_patterns[app->selected_drum_pattern].name);
+}
+
+void app_close_drum_machine(App *app) {
+    if (!app || app->view_mode != APP_VIEW_DRUM_MACHINE) return;
+    app->view_mode = APP_VIEW_TIMELINE;
+    sync_transport_from_app(app);
+    app_set_status(app, "Timeline");
+}
+
+void app_drum_machine_move_cursor(App *app, int dx, int dy) {
+    if (!app || app->view_mode != APP_VIEW_DRUM_MACHINE) return;
+    DrumKit *kit = app_selected_lane_drum_kit(app);
+    int pad_count = kit ? (kit->pad_count > 12 ? 12 : kit->pad_count) : 1;
+    app->drum_machine_step = clamp_int(app->drum_machine_step + dx, 0, 15);
+    app->drum_machine_pad = clamp_int(app->drum_machine_pad + dy, 0, pad_count - 1);
+}
+
+void app_drum_machine_toggle_step(App *app) {
+    if (!app || app->view_mode != APP_VIEW_DRUM_MACHINE ||
+        !app_pattern_index_valid(app, app->selected_drum_pattern)) {
+        return;
+    }
+    DrumKit *kit = app_selected_lane_drum_kit(app);
+    if (!kit || app->drum_machine_pad < 0 || app->drum_machine_pad >= kit->pad_count) return;
+    DrumPattern *pattern = &app->drum_patterns[app->selected_drum_pattern];
+    int64_t step_ticks = pattern->length_ticks / 16;
+    if (step_ticks <= 0) step_ticks = 1;
+    int64_t tick = (int64_t)app->drum_machine_step * step_ticks;
+    int note = kit->pads[app->drum_machine_pad].note;
+    int existing = drum_pattern_event_index(pattern, tick, note);
+    if (existing >= 0) {
+        drum_pattern_remove_event_at(pattern, existing);
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Removed %s step %d", kit->pads[app->drum_machine_pad].name, app->drum_machine_step + 1);
+    } else if (drum_pattern_add_event(pattern, tick, note, 108, step_ticks)) {
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "Added %s step %d", kit->pads[app->drum_machine_pad].name, app->drum_machine_step + 1);
+    } else {
+        app_set_status(app, "Pattern full");
+    }
+}
+
+void app_drum_machine_adjust_velocity(App *app, int delta) {
+    if (!app || app->view_mode != APP_VIEW_DRUM_MACHINE ||
+        !app_pattern_index_valid(app, app->selected_drum_pattern) ||
+        delta == 0) {
+        return;
+    }
+    DrumKit *kit = app_selected_lane_drum_kit(app);
+    if (!kit || app->drum_machine_pad < 0 || app->drum_machine_pad >= kit->pad_count) return;
+    DrumPattern *pattern = &app->drum_patterns[app->selected_drum_pattern];
+    int64_t step_ticks = pattern->length_ticks / 16;
+    if (step_ticks <= 0) step_ticks = 1;
+    int64_t tick = (int64_t)app->drum_machine_step * step_ticks;
+    int note = kit->pads[app->drum_machine_pad].note;
+    int index = drum_pattern_event_index(pattern, tick, note);
+    if (index < 0) {
+        app_set_status(app, "No hit at cursor");
+        return;
+    }
+    pattern->events[index].velocity = clamp_int(pattern->events[index].velocity + delta, 1, 127);
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Velocity %d", pattern->events[index].velocity);
 }
 
 void app_enter_tempo_lock_mode(App *app) {
@@ -6749,7 +8201,12 @@ static void app_render_timeline(App *app) {
         SDL_Color number_color = lane->muted ? color_muted(pastel) : pastel;
         number_color.a = lane->muted ? 160 : 255;
         set_draw_color(app->renderer, number_color);
-        SDL_RenderDebugTextFormat(app->renderer, lane_index_rect.x + 10.0f, y + 5.0f, "%d", lane_index + 1);
+        SDL_RenderDebugTextFormat(app->renderer,
+                                  lane_index_rect.x + 7.0f,
+                                  y + 5.0f,
+                                  "%d%c",
+                                  lane_index + 1,
+                                  lane->type == TIMELINE_LANE_DRUMS ? 'D' : 'A');
     }
     SDL_SetRenderDrawColor(app->renderer, 85, 90, 112, 255);
     SDL_RenderRect(app->renderer, &track_rect);
@@ -6919,8 +8376,19 @@ static void app_render_timeline(App *app) {
         for (int i = 0; i < lane->instance_count; ++i) {
             TimelineInstanceRef ref = { lane_index, i };
             TimelineInstance *instance = &lane->instances[i];
-            if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
-            RosterClip *clip = &app->roster[instance->roster_clip_index];
+            SDL_Color clip_color = (SDL_Color){ 210, 220, 230, 255 };
+            const char *instance_name = "instance";
+            if (instance->kind == TIMELINE_INSTANCE_DRUM_PATTERN) {
+                if (!app_pattern_index_valid(app, instance->pattern_index)) continue;
+                DrumPattern *pattern = &app->drum_patterns[instance->pattern_index];
+                clip_color = pattern->color;
+                instance_name = pattern->name;
+            } else {
+                if (instance->roster_clip_index < 0 || instance->roster_clip_index >= app->roster_clip_count) continue;
+                RosterClip *clip = &app->roster[instance->roster_clip_index];
+                clip_color = clip->color;
+                instance_name = clip->name;
+            }
             double instance_start = (double)instance->start_tick;
             double instance_end = (double)(instance->start_tick + instance->duration_ticks);
             if (instance_end < view_start || instance_start > view_end) continue;
@@ -6939,19 +8407,34 @@ static void app_render_timeline(App *app) {
                 style = TIMELINE_BLOCK_ORIGIN;
             }
             char label[APP_ROSTER_CLIP_NAME_MAX + 16];
-            SDL_snprintf(label, sizeof(label), "%s v%d", clip->name, instance->midi_velocity);
-            render_timeline_block(app, block, clip->color, lane_color, label, style, lane->muted);
+            SDL_snprintf(label, sizeof(label), "%s v%d", instance_name, instance->midi_velocity);
+            render_timeline_block(app, block, clip_color, lane_color, label, style, lane->muted);
         }
     }
 
     if (app->timeline_edit_mode != TIMELINE_EDIT_NONE &&
-        app->timeline_edit_roster_clip_index >= 0 &&
-        app->timeline_edit_roster_clip_index < app->roster_clip_count &&
         app->timeline_edit_duration_ticks > 0) {
-        RosterClip *clip = &app->roster[app->timeline_edit_roster_clip_index];
-        double ghost_start = (double)app->timeline_edit_ghost_start_tick;
-        double ghost_end = (double)(app->timeline_edit_ghost_start_tick + app->timeline_edit_duration_ticks);
-        if (ghost_end >= view_start && ghost_start <= view_end) {
+        SDL_Color ghost_color = (SDL_Color){ 210, 220, 230, 255 };
+        const char *ghost_name = "clip";
+        bool ghost_material_valid = false;
+        if (app->timeline_edit_instance_kind == TIMELINE_INSTANCE_DRUM_PATTERN) {
+            if (app_pattern_index_valid(app, app->timeline_edit_pattern_index)) {
+                DrumPattern *pattern = &app->drum_patterns[app->timeline_edit_pattern_index];
+                ghost_color = pattern->color;
+                ghost_name = pattern->name;
+                ghost_material_valid = true;
+            }
+        } else if (app->timeline_edit_roster_clip_index >= 0 &&
+                   app->timeline_edit_roster_clip_index < app->roster_clip_count) {
+            RosterClip *clip = &app->roster[app->timeline_edit_roster_clip_index];
+            ghost_color = clip->color;
+            ghost_name = clip->name;
+            ghost_material_valid = true;
+        }
+        if (ghost_material_valid) {
+            double ghost_start = (double)app->timeline_edit_ghost_start_tick;
+            double ghost_end = (double)(app->timeline_edit_ghost_start_tick + app->timeline_edit_duration_ticks);
+            if (ghost_end >= view_start && ghost_start <= view_end) {
             float x = timeline_x_for_tick(ghost_start, view_start, view_span, timeline_x, timeline_w);
             float end_x = timeline_x_for_tick(ghost_end, view_start, view_span, timeline_x, timeline_w);
             if (x < timeline_x) x = timeline_x;
@@ -6969,7 +8452,7 @@ static void app_render_timeline(App *app) {
                     "moving";
                 SDL_snprintf(ghost_label, sizeof(ghost_label), "%s %s",
                              ghost_verb,
-                             clip->name);
+                             ghost_name);
             } else {
                 SDL_strlcpy(ghost_label, "overlap", sizeof(ghost_label));
             }
@@ -6978,11 +8461,12 @@ static void app_render_timeline(App *app) {
             SDL_Color ghost_lane_color = ghost_palette ? ghost_palette->pastel : (SDL_Color){ 180, 188, 205, 255 };
             render_timeline_block(app,
                                   ghost,
-                                  clip->color,
+                                  ghost_color,
                                   ghost_lane_color,
                                   ghost_label,
                                   app->timeline_edit_ghost_valid ? TIMELINE_BLOCK_GHOST_VALID : TIMELINE_BLOCK_GHOST_INVALID,
                                   ghost_timeline_lane->muted);
+        }
         }
     }
 
@@ -7004,39 +8488,84 @@ static void app_render_timeline(App *app) {
         SDL_SetRenderDrawColor(app->renderer, 80, 90, 110, 255);
         SDL_RenderRect(app->renderer, &roster_panel);
         SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
-        SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 14.0f, "ROSTER");
-        SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 28.0f, "BPM");
-        SDL_RenderDebugText(app->renderer, roster_panel.x + 92.0f, roster_panel.y + 28.0f, "CLIP");
-        SDL_RenderDebugText(app->renderer, roster_panel.x + roster_panel.w - 54.0f, roster_panel.y + 28.0f, "BEATS");
-        int visible = ((int)roster_panel.h - 52) / 18;
-        if (visible > app->roster_clip_count) visible = app->roster_clip_count;
-        for (int i = 0; i < visible; ++i) {
-            RosterClip *clip = &app->roster[i];
-            float y = roster_panel.y + 48.0f + (float)i * 18.0f;
-            if (i == app->selected_roster_clip) {
-                SDL_FRect row = { roster_panel.x + 10.0f, y - 3.0f, roster_panel.w - 20.0f, 16.0f };
-                if (app->selected_roster_clip_armed) SDL_SetRenderDrawColor(app->renderer, 86, 78, 38, 230);
-                else SDL_SetRenderDrawColor(app->renderer, 64, 72, 96, 210);
-                SDL_RenderFillRect(app->renderer, &row);
-                if (app->selected_roster_clip_armed) {
-                    SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
-                    SDL_RenderRect(app->renderer, &row);
+        if (app_selected_timeline_lane_is_drum(app)) {
+            int lane_index = clamp_int(app->selected_timeline_lane, 0, TIMELINE_MAX_LANES - 1);
+            const TimelineLane *selected_lane = &app->timeline.lanes[lane_index];
+            const char *kit_name = "no kit";
+            if (app_kit_index_valid(app, selected_lane->drum_kit_index)) {
+                kit_name = app->drum_kits[selected_lane->drum_kit_index].name;
+            }
+            SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 14.0f, "PATTERNS");
+            SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 28.0f, "lane %d kit: %s", lane_index + 1, kit_name);
+            SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 44.0f, "EVT");
+            SDL_RenderDebugText(app->renderer, roster_panel.x + 60.0f, roster_panel.y + 44.0f, "PATTERN");
+            SDL_RenderDebugText(app->renderer, roster_panel.x + roster_panel.w - 54.0f, roster_panel.y + 44.0f, "TICKS");
+            int visible = ((int)roster_panel.h - 70) / 18;
+            if (visible > app->drum_pattern_count) visible = app->drum_pattern_count;
+            for (int i = 0; i < visible; ++i) {
+                DrumPattern *pattern = &app->drum_patterns[i];
+                float y = roster_panel.y + 64.0f + (float)i * 18.0f;
+                if (i == app->selected_drum_pattern) {
+                    SDL_FRect row = { roster_panel.x + 10.0f, y - 3.0f, roster_panel.w - 20.0f, 16.0f };
+                    if (app->selected_drum_pattern_armed) SDL_SetRenderDrawColor(app->renderer, 86, 78, 38, 230);
+                    else SDL_SetRenderDrawColor(app->renderer, 64, 72, 96, 210);
+                    SDL_RenderFillRect(app->renderer, &row);
+                    if (app->selected_drum_pattern_armed) {
+                        SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+                        SDL_RenderRect(app->renderer, &row);
+                    }
                 }
+                SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 14.0f, y, "%3d", pattern->event_count);
+                SDL_FRect swatch = { roster_panel.x + 42.0f, y - 1.0f, 12.0f, 12.0f };
+                SDL_SetRenderDrawColor(app->renderer, pattern->color.r, pattern->color.g, pattern->color.b, 255);
+                SDL_RenderFillRect(app->renderer, &swatch);
+                SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
+                SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 60.0f, y, "%s", pattern->name);
+                SDL_RenderDebugTextFormat(app->renderer,
+                                          roster_panel.x + roster_panel.w - 54.0f,
+                                          y,
+                                          "%lld",
+                                          (long long)pattern->length_ticks);
             }
-            if (clip->tempo_calibrated && clip->source_bpm > 0.0) {
-                SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 14.0f, y, "%6.1f", clip->source_bpm);
-            } else {
-                SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, y, "   raw");
+            if (app->drum_pattern_count <= 0) {
+                SDL_SetRenderDrawColor(app->renderer, 178, 190, 204, 255);
+                SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 72.0f, "No patterns yet.");
             }
-            SDL_FRect swatch = { roster_panel.x + 72.0f, y - 1.0f, 12.0f, 12.0f };
-            SDL_SetRenderDrawColor(app->renderer, clip->color.r, clip->color.g, clip->color.b, 255);
-            SDL_RenderFillRect(app->renderer, &swatch);
-            SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
-            SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 92.0f, y, "%s", clip->name);
-            if (clip->tempo_calibrated && clip->target_beats > 0.0) {
-                SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + roster_panel.w - 54.0f, y, "%.1fb", clip->target_beats);
-            } else {
-                SDL_RenderDebugText(app->renderer, roster_panel.x + roster_panel.w - 54.0f, y, "--");
+        } else {
+            SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 14.0f, "ROSTER");
+            SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 28.0f, "BPM");
+            SDL_RenderDebugText(app->renderer, roster_panel.x + 92.0f, roster_panel.y + 28.0f, "CLIP");
+            SDL_RenderDebugText(app->renderer, roster_panel.x + roster_panel.w - 54.0f, roster_panel.y + 28.0f, "BEATS");
+            int visible = ((int)roster_panel.h - 52) / 18;
+            if (visible > app->roster_clip_count) visible = app->roster_clip_count;
+            for (int i = 0; i < visible; ++i) {
+                RosterClip *clip = &app->roster[i];
+                float y = roster_panel.y + 48.0f + (float)i * 18.0f;
+                if (i == app->selected_roster_clip) {
+                    SDL_FRect row = { roster_panel.x + 10.0f, y - 3.0f, roster_panel.w - 20.0f, 16.0f };
+                    if (app->selected_roster_clip_armed) SDL_SetRenderDrawColor(app->renderer, 86, 78, 38, 230);
+                    else SDL_SetRenderDrawColor(app->renderer, 64, 72, 96, 210);
+                    SDL_RenderFillRect(app->renderer, &row);
+                    if (app->selected_roster_clip_armed) {
+                        SDL_SetRenderDrawColor(app->renderer, 255, 220, 120, 255);
+                        SDL_RenderRect(app->renderer, &row);
+                    }
+                }
+                if (clip->tempo_calibrated && clip->source_bpm > 0.0) {
+                    SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 14.0f, y, "%6.1f", clip->source_bpm);
+                } else {
+                    SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, y, "   raw");
+                }
+                SDL_FRect swatch = { roster_panel.x + 72.0f, y - 1.0f, 12.0f, 12.0f };
+                SDL_SetRenderDrawColor(app->renderer, clip->color.r, clip->color.g, clip->color.b, 255);
+                SDL_RenderFillRect(app->renderer, &swatch);
+                SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
+                SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + 92.0f, y, "%s", clip->name);
+                if (clip->tempo_calibrated && clip->target_beats > 0.0) {
+                    SDL_RenderDebugTextFormat(app->renderer, roster_panel.x + roster_panel.w - 54.0f, y, "%.1fb", clip->target_beats);
+                } else {
+                    SDL_RenderDebugText(app->renderer, roster_panel.x + roster_panel.w - 54.0f, y, "--");
+                }
             }
         }
         render_focus_outline(app, roster_panel, TIMELINE_FOCUS_ROSTER);
@@ -7062,21 +8591,34 @@ static void app_render_timeline(App *app) {
             app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE) {
             int roster_index = app->timeline_context_menu_roster_index;
             if (roster_index >= 0 && roster_index < app->roster_clip_count) name = app->roster[roster_index].name;
+        } else if (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_PATTERN ||
+                   app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_PATTERN_DELETE) {
+            int pattern_index = app->timeline_context_menu_pattern_index;
+            if (app_pattern_index_valid(app, pattern_index)) name = app->drum_patterns[pattern_index].name;
+            else name = "pattern roster";
         } else if (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_INSTANCE &&
                    timeline_instance_ref_valid(&app->timeline, app->timeline_context_menu_instance)) {
             const TimelineInstance *selected = timeline_const_instance_from_ref(&app->timeline,
                                                                                 app->timeline_context_menu_instance);
-            if (selected && selected->roster_clip_index >= 0 && selected->roster_clip_index < app->roster_clip_count) {
+            if (selected && selected->kind == TIMELINE_INSTANCE_DRUM_PATTERN &&
+                app_pattern_index_valid(app, selected->pattern_index)) {
+                name = app->drum_patterns[selected->pattern_index].name;
+            } else if (selected && selected->roster_clip_index >= 0 && selected->roster_clip_index < app->roster_clip_count) {
                 name = app->roster[selected->roster_clip_index].name;
             } else {
                 name = "instance";
             }
         }
-        float menu_w = app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE ? 384.0f : 320.0f;
-        float warning_h = app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE ? 34.0f : 0.0f;
+        bool confirm_delete_menu =
+            app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE ||
+            app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_PATTERN_DELETE;
+        float menu_w = confirm_delete_menu ? 384.0f : 320.0f;
+        float warning_h = confirm_delete_menu ? 34.0f : 0.0f;
         SDL_FRect menu = {
             (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_ROSTER ||
-             app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE) ? roster_x + 6.0f :
+             app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_PATTERN ||
+             app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE ||
+             app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_PATTERN_DELETE) ? roster_x + 6.0f :
                 (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_TIMELINE &&
                  app->timeline_focus_zone == TIMELINE_FOCUS_LANE_INDEX) ? lane_index_rect.x + 6.0f : timeline_x + 18.0f,
             timeline_y + track_h + 42.0f,
@@ -7119,7 +8661,7 @@ static void app_render_timeline(App *app) {
         SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 10.0f, title);
         SDL_RenderDebugText(app->renderer, menu.x + 12.0f, menu.y + 28.0f, name);
         float item_y = menu.y + 50.0f;
-        if (app->timeline_context_menu_scope == TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE) {
+        if (confirm_delete_menu) {
             SDL_SetRenderDrawColor(app->renderer, 255, 160, 150, 255);
             SDL_RenderDebugText(app->renderer, menu.x + 12.0f, item_y, "Also deletes its timeline instances.");
             item_y += 30.0f;
@@ -7377,6 +8919,91 @@ static void render_lane_inspector_peak(App *app,
     SDL_RenderLine(app->renderer, rect.x + 3.0f, clip_y, rect.x + rect.w - 3.0f, clip_y);
 }
 
+static void app_render_drum_machine(App *app) {
+    int w = 0, h = 0;
+    SDL_GetRenderOutputSize(app->renderer, &w, &h);
+    SDL_SetRenderDrawColor(app->renderer, 8, 7, 13, 255);
+    SDL_RenderClear(app->renderer);
+
+    if (!app_pattern_index_valid(app, app->selected_drum_pattern)) return;
+    DrumKit *kit = app_selected_lane_drum_kit(app);
+    DrumPattern *pattern = &app->drum_patterns[app->selected_drum_pattern];
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
+    SDL_RenderDebugText(app->renderer, 32.0f, 32.0f, "DRUM MACHINE");
+    SDL_RenderDebugTextFormat(app->renderer,
+                              32.0f,
+                              52.0f,
+                              "%s  events:%d  length:%lld",
+                              pattern->name,
+                              pattern->event_count,
+                              (long long)pattern->length_ticks);
+    SDL_RenderDebugTextFormat(app->renderer,
+                              32.0f,
+                              72.0f,
+                              "lane %d kit: %s",
+                              app->selected_timeline_lane + 1,
+                              kit ? kit->name : "none");
+
+    if (!kit || kit->pad_count <= 0) {
+        SDL_RenderDebugText(app->renderer, 32.0f, 112.0f, "No kit pads loaded.");
+        return;
+    }
+
+    int rows = kit->pad_count;
+    if (rows > 12) rows = 12;
+    float label_w = 116.0f;
+    float grid_x = 32.0f + label_w;
+    float grid_y = 120.0f;
+    float grid_w = (float)w - grid_x - 42.0f;
+    if (grid_w < 320.0f) grid_w = 320.0f;
+    float cell_gap = 4.0f;
+    float cell_w = (grid_w - cell_gap * 15.0f) / 16.0f;
+    if (cell_w < 14.0f) cell_w = 14.0f;
+    if (cell_w > 44.0f) cell_w = 44.0f;
+    float cell_h = 28.0f;
+    float row_gap = 7.0f;
+    int64_t step_ticks = pattern->length_ticks / 16;
+    if (step_ticks <= 0) step_ticks = 1;
+
+    for (int step = 0; step < 16; ++step) {
+        float x = grid_x + (float)step * (cell_w + cell_gap);
+        SDL_SetRenderDrawColor(app->renderer, step % 4 == 0 ? 240 : 158, step % 4 == 0 ? 220 : 168, step % 4 == 0 ? 145 : 188, 230);
+        SDL_RenderDebugTextFormat(app->renderer, x + 2.0f, grid_y - 18.0f, "%02d", step + 1);
+    }
+
+    for (int row = 0; row < rows; ++row) {
+        DrumPad *pad = &kit->pads[row];
+        float y = grid_y + (float)row * (cell_h + row_gap);
+        SDL_SetRenderDrawColor(app->renderer, 210, 220, 230, 245);
+        SDL_RenderDebugTextFormat(app->renderer, 32.0f, y + 8.0f, "%03d %s", pad->note, pad->name);
+        for (int step = 0; step < 16; ++step) {
+            int64_t tick = (int64_t)step * step_ticks;
+            int event_index = drum_pattern_event_index(pattern, tick, pad->note);
+            bool active = event_index >= 0;
+            bool selected = row == app->drum_machine_pad && step == app->drum_machine_step;
+            float x = grid_x + (float)step * (cell_w + cell_gap);
+            SDL_FRect cell = { x, y, cell_w, cell_h };
+            if (active) {
+                int velocity = pattern->events[event_index].velocity;
+                Uint8 bright = (Uint8)clamp_int(90 + velocity, 100, 217);
+                SDL_SetRenderDrawColor(app->renderer, 255, bright, 82, 235);
+            } else {
+                SDL_SetRenderDrawColor(app->renderer, step % 4 == 0 ? 46 : 32, 36, step % 4 == 0 ? 54 : 44, 235);
+            }
+            SDL_RenderFillRect(app->renderer, &cell);
+            SDL_SetRenderDrawColor(app->renderer, selected ? 255 : 82, selected ? 248 : 92, selected ? 214 : 112, selected ? 255 : 190);
+            SDL_RenderRect(app->renderer, &cell);
+        }
+    }
+
+    SDL_SetRenderDrawColor(app->renderer, 176, 188, 204, 230);
+    float help_y = grid_y + (float)rows * (cell_h + row_gap) + 24.0f;
+    if (help_y < (float)h - 48.0f) {
+        SDL_RenderDebugText(app->renderer, 32.0f, help_y, "Arrows move   Enter/Space toggle   [ ] velocity   Esc timeline");
+    }
+}
+
 static void app_render_lane_inspector(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
@@ -7481,9 +9108,31 @@ static void app_render_lane_inspector(App *app) {
     SDL_RenderDebugText(app->renderer, settings.x + 20.0f, mute_button.y + 84.0f,
                         monitor.clip_hold_seconds > 0.0f ? "CLIP HOLD" : "CLIP CLEAR");
 
+    SDL_SetRenderDrawColor(app->renderer, 222, 230, 234, 220);
+    SDL_RenderDebugTextFormat(app->renderer,
+                              settings.x + 20.0f,
+                              mute_button.y + 112.0f,
+                              "TYPE %s",
+                              timeline_lane_type_label(lane->type));
+    if (lane->type == TIMELINE_LANE_DRUMS) {
+        const char *kit_name = "none";
+        if (app_kit_index_valid(app, lane->drum_kit_index)) kit_name = app->drum_kits[lane->drum_kit_index].name;
+        SDL_RenderDebugTextFormat(app->renderer,
+                                  settings.x + 20.0f,
+                                  mute_button.y + 132.0f,
+                                  "KIT %s",
+                                  kit_name);
+        SDL_RenderDebugTextFormat(app->renderer,
+                                  settings.x + 20.0f,
+                                  mute_button.y + 152.0f,
+                                  "MIDI CH %d",
+                                  lane->midi_channel + 1);
+    }
+
     SDL_SetRenderDrawColor(app->renderer, 190, 198, 210, 205);
-    SDL_RenderDebugText(app->renderer, settings.x + 20.0f, settings.y + settings.h - 44.0f, "Left/Right palette");
-    SDL_RenderDebugText(app->renderer, settings.x + 20.0f, settings.y + settings.h - 24.0f, "South mute");
+    SDL_RenderDebugText(app->renderer, settings.x + 20.0f, settings.y + settings.h - 64.0f, "Left/Right palette");
+    SDL_RenderDebugText(app->renderer, settings.x + 20.0f, settings.y + settings.h - 44.0f, "T type   K kit");
+    SDL_RenderDebugText(app->renderer, settings.x + 20.0f, settings.y + settings.h - 24.0f, "N new pattern   D editor");
 
     float analyzer_x = settings.x + settings.w + 22.0f;
     float analyzer_y = panel.y + 44.0f;
@@ -7679,6 +9328,10 @@ static void app_render_master_mix(App *app) {
     SDL_RenderDebugTextFormat(app->renderer, master.x + 22.0f, master.y + 86.0f,
                               clip_active ? "CLIP HOLD  count %u" : "CLIP CLEAR  count %u",
                               meter.clip_count);
+    SDL_RenderDebugTextFormat(app->renderer, master.x + 22.0f, master.y + 106.0f,
+                              "LIMIT %.2f  ceiling %.2f",
+                              meter.limiter_gain > 0.0f ? meter.limiter_gain : 1.0f,
+                              MASTER_LIMITER_CEILING);
 
     float meter_x = master.x + 184.0f;
     float meter_w = master.w - 224.0f;
@@ -7752,7 +9405,7 @@ static void app_render_master_mix(App *app) {
         SDL_RenderDebugTextFormat(app->renderer, fx.x + 18.0f, slot_y, "Slot %d: %s  %s", i + 1, label, state);
         slot_y += 18.0f;
     }
-    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, slot_y + 4.0f, "Only Reverb 1 has a processor in this stage.");
+    SDL_RenderDebugText(app->renderer, fx.x + 18.0f, slot_y + 4.0f, "Final limiter is transparent until peaks cross its ceiling.");
 
     render_master_mix_section(app, midi, MASTER_MIX_FOCUS_MIDI_CONTROL, midi_accent, "MIDI / CONTROL");
     SDL_SetRenderDrawColor(app->renderer, 226, 232, 238, 235);
@@ -8227,9 +9880,10 @@ static void app_render_overlay(App *app) {
     } else if (app->tempo_lock_mode) {
         SDL_RenderDebugText(app->renderer, 12, 66, "TEMPO LOCK MODE");
     }
-    const char *view_label = app->view_mode == APP_VIEW_LANE_INSPECTOR ? "lane inspector" :
+    const char *view_label = app->view_mode == APP_VIEW_DRUM_MACHINE ? "drum machine" :
+                             (app->view_mode == APP_VIEW_LANE_INSPECTOR ? "lane inspector" :
                              (app->view_mode == APP_VIEW_MASTER_MIX ? "master mix" :
-                              (app->view_mode == APP_VIEW_TIMELINE ? "timeline" : "waveform"));
+                              (app->view_mode == APP_VIEW_TIMELINE ? "timeline" : "waveform")));
     SDL_RenderDebugTextFormat(app->renderer, 12, 108, "view: %s  roster: %d",
                               view_label,
                               app->roster_clip_count);
@@ -8365,9 +10019,17 @@ bool app_init(App *app){
     app->text_entry_key_col = 0;
     app->text_entry_uppercase = false;
     app->text_entry_target_roster_index = -1;
+    app->text_entry_target_pattern_index = -1;
     app->text_entry_target_lane_index = -1;
     app_resolve_roster_export_dir(app);
     app_refresh_sample_list(app);
+    app->drum_kit_count = 0;
+    app->drum_pattern_count = 0;
+    app->selected_drum_pattern = -1;
+    app->selected_drum_pattern_armed = false;
+    app->drum_machine_step = 0;
+    app->drum_machine_pad = 0;
+    app_refresh_drum_kits(app);
     clip_init_generated(&app->clip, 48000, 2.0f);
     transport_init(&app->transport, 120.0, 960, 4, 4);
     app->transport_bpm = 120.0;
@@ -8400,12 +10062,17 @@ bool app_init(App *app){
     app_timeline_clear_context_menu(app);
     app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
+    app->timeline_edit_instance_kind = TIMELINE_INSTANCE_AUDIO_CLIP;
+    app->timeline_edit_roster_clip_index = -1;
+    app->timeline_edit_pattern_index = -1;
     app->timeline_edit_original_lane = 0;
     app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
     app->timeline_edit_ghost_lane = 0;
     app->timeline_edit_ghost_seam_side = TIMELINE_SEAM_NONE;
     app->selected_roster_clip = -1;
     app->selected_roster_clip_armed = false;
+    app->selected_drum_pattern = -1;
+    app->selected_drum_pattern_armed = false;
     app->selected_timeline_lane = 0;
     app->inspected_timeline_lane = 0;
     app->lane_analyzer_visual_lane = -1;
@@ -8426,12 +10093,17 @@ bool app_init(App *app){
         audio_engine_shutdown(&app->audio);
         app->audio.clip = &app->clip;
         app->audio.transport = &app->transport;
-        app->audio.master_gain = 0.9f;
+        app->audio.master_gain = 1.0f;
         app->audio.playback_mode = AUDIO_PLAYBACK_WAVEFORM;
         app->audio.active_analyzer_lane = -1;
         audio_engine_init_master_fx(&app->audio);
     }
     audio_engine_set_timeline(&app->audio, app->roster, &app->roster_clip_count, &app->timeline);
+    audio_engine_set_drum_materials(&app->audio,
+                                    app->drum_patterns,
+                                    &app->drum_pattern_count,
+                                    app->drum_kits,
+                                    &app->drum_kit_count);
     if(app->sample_count > 0) app_load_selected_sample(app);
     if(!audio_ok) app_set_status(app, audio_unavailable_status);
     return true;
@@ -8465,6 +10137,8 @@ void app_run(App *app){
         waveform_view_update(&app->view, dt);
         if (app->view_mode == APP_VIEW_LANE_INSPECTOR) {
             app_render_lane_inspector(app);
+        } else if (app->view_mode == APP_VIEW_DRUM_MACHINE) {
+            app_render_drum_machine(app);
         } else if (app->view_mode == APP_VIEW_MASTER_MIX) {
             app_render_master_mix(app);
         } else if (app->view_mode == APP_VIEW_TIMELINE) {
@@ -8488,6 +10162,7 @@ void app_shutdown(App *app){
     audio_engine_shutdown(&app->audio);
     clip_destroy(&app->clip);
     for (int i = 0; i < app->roster_clip_count; ++i) roster_clip_destroy(&app->roster[i]);
+    app_clear_drum_kits(app);
     app_close_gamepad(app);
     if(app->renderer) SDL_DestroyRenderer(app->renderer);
     if(app->window) SDL_DestroyWindow(app->window);
