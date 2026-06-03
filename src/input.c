@@ -1014,9 +1014,10 @@ void input_update_gamepad(App *app, double dt){
     }
 
     if(app->view_mode == APP_VIEW_MASTER_MIX) {
-        if(r2_shift && south_pressed) {
-            app_toggle_timeline_playback(app);
-            return;
+        if(r2_shift) {
+            if(south_pressed) app_toggle_timeline_playback(app);
+            if(west_pressed) app_timeline_jump_playhead_to_cursor(app);
+            if(south_pressed || west_pressed) return;
         }
         if(east_pressed) {
             app_master_mix_return_to_timeline(app);
@@ -1043,7 +1044,8 @@ void input_update_gamepad(App *app, double dt){
         if(r2_shift) {
             if(south_pressed) app_toggle_timeline_playback(app);
             if(east_pressed) app_rewind_timeline(app);
-            if(south_pressed || east_pressed) return;
+            if(west_pressed) app_timeline_jump_playhead_to_cursor(app);
+            if(south_pressed || east_pressed || west_pressed) return;
         }
         if(back_pressed) toggle_metronome(app);
         if(east_pressed) {
@@ -1067,7 +1069,7 @@ void input_update_gamepad(App *app, double dt){
         if(r2_shift) {
             if(south_pressed) app_toggle_timeline_playback(app);
             if(east_pressed) app_rewind_timeline(app);
-            if(west_pressed) app_timeline_jump_to_play_range_start(app);
+            if(west_pressed) app_timeline_jump_playhead_to_cursor(app);
             if(north_pressed) app_timeline_toggle_play_range_loop(app);
             if(south_pressed || east_pressed || west_pressed || north_pressed) return;
         }
@@ -1095,7 +1097,7 @@ void input_update_gamepad(App *app, double dt){
         if(r2_shift) {
             if(south_pressed) app_toggle_timeline_playback(app);
             if(east_pressed) app_rewind_timeline(app);
-            if(west_pressed) app_timeline_jump_to_play_range_start(app);
+            if(west_pressed) app_timeline_jump_playhead_to_cursor(app);
             if(north_pressed) app_timeline_toggle_play_range_loop(app);
             if(south_pressed || east_pressed || west_pressed || north_pressed) return;
         }

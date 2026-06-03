@@ -1273,14 +1273,18 @@ void audio_engine_start_timeline(AudioEngine *a) {
     int64_t range_start = 0, range_end = 0;
     if(a->timeline) timeline_effective_play_range(a->timeline, &range_start, &range_end);
     if(a->timeline && timeline_total_instance_count(a->timeline) > 0 && range_end > range_start) {
+        double start_tick = a->timeline_playhead_tick;
+        if(start_tick < (double)range_start || start_tick >= (double)range_end) {
+            start_tick = (double)range_start;
+        }
         a->playback_mode = AUDIO_PLAYBACK_TIMELINE;
-        a->timeline_playhead_tick = (double)range_start;
-        a->timeline->playhead_tick = range_start;
+        a->timeline_playhead_tick = start_tick;
+        a->timeline->playhead_tick = (int64_t)floor(start_tick);
         a->timeline->playing = true;
         sync_transport_to_timeline(a);
         if(a->transport) {
-            a->transport->current_tick = range_start > 0 ? (uint64_t)range_start : 0;
-            a->transport->current_seconds = timeline_seconds_at_tick(a->timeline, (double)range_start);
+            a->transport->current_tick = a->timeline->playhead_tick > 0 ? (uint64_t)a->timeline->playhead_tick : 0;
+            a->transport->current_seconds = timeline_seconds_at_tick(a->timeline, start_tick);
             a->transport->playing = true;
         }
         a->metronome_beat_valid = false;

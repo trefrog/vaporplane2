@@ -2592,9 +2592,9 @@ void app_toggle_timeline_playback(App *app) {
         return;
     }
     if (audio_engine_timeline_is_playing(&app->audio)) {
-        audio_engine_stop_timeline(&app->audio, true);
+        audio_engine_stop_timeline(&app->audio, false);
         sync_transport_from_app(app);
-        app_set_status(app, "Timeline stopped");
+        app_set_status(app, "Timeline paused");
     } else {
         sync_transport_from_app(app);
         audio_engine_start_timeline(&app->audio);

@@ -138,6 +138,8 @@ Common mappings:
 - D-pad: trim, zoom, move cursor, edit ghosts, or adjust focused controls
 - Right trigger + Start: cycle main views
 - Right trigger + South: timeline play/pause or waveform frame-grip commit
+- Right trigger + West: set timeline playhead to cursor
+- Right trigger + East: rewind timeline to play range start
 - Left trigger + Right trigger + South: capture the calibrated/current loop
 - Right stick click: open sample selector in Waveform or preview roster clip in
   Timeline roster focus
