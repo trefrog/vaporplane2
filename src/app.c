@@ -50,6 +50,11 @@ static void app_resolve_sample_dir(App *app) {
             SDL_strlcpy(app->sample_dir, candidate, sizeof(app->sample_dir));
             return;
         }
+        path_join(candidate, sizeof(candidate), base, "../Resources/wav");
+        if (path_is_directory(candidate)) {
+            SDL_strlcpy(app->sample_dir, candidate, sizeof(app->sample_dir));
+            return;
+        }
     }
     SDL_strlcpy(app->sample_dir, "assets/samples", sizeof(app->sample_dir));
 }
@@ -7586,6 +7591,9 @@ static void app_refresh_drum_kits(App *app) {
     const char *base = SDL_GetBasePath();
     if (base && base[0]) {
         path_join(pack_dir, sizeof(pack_dir), base, "assets/drum_packs");
+        if (!path_is_directory(pack_dir)) {
+            path_join(pack_dir, sizeof(pack_dir), base, "../Resources/drum_packs");
+        }
         if (!path_is_directory(pack_dir)) SDL_strlcpy(pack_dir, "assets/drum_packs", sizeof(pack_dir));
     } else {
         SDL_strlcpy(pack_dir, "assets/drum_packs", sizeof(pack_dir));
@@ -8209,7 +8217,7 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad track: L2+stick X glide   L2+D-pad L/R bars   L2+D-pad U/D velocity"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Move/Place: D-pad L/R ticks   D-pad U/D lane   same-lane overlap blocked"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Roster: South arms/places   C/Start menu   Right stick previews"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline R2: South play   East stop all   West jump start   North loop"); y += 22.0f;
+    SDL_RenderDebugText(app->renderer, x, y, "Timeline R2: South play/pause   East rewind   West playhead=cursor   North loop"); y += 22.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Gamepad waveform: South/Start play   Back metronome"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
     SDL_RenderDebugText(app->renderer, x, y, "Waveform frame grip: hold L2 pins left edge   add R2 + D-pad L/R snaps beats"); y += 16.0f;
