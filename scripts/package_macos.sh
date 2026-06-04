@@ -207,7 +207,13 @@ Vaporplane Quickstart
 First move:
 - Press F1 in the app to show/hide the controls legend.
 - Press F2 or R2+Start to cycle Waveform, Timeline, and Master Mix.
-- The packaged starter sample is kmart1989_classy_pianist.
+- The packaged starter sample is copied into your user samples folder on first launch.
+
+User folders:
+- WAVs: ~/Library/Application Support/Vaporplane/Vaporplane/samples/
+- Drum packs: ~/Library/Application Support/Vaporplane/Vaporplane/drum_packs/
+- Exports: ~/Library/Application Support/Vaporplane/Vaporplane/exports/
+- The sample selector shows the active WAV folder path at the top.
 
 Waveform:
 - Space or South/Start plays.
@@ -226,7 +232,8 @@ Drums:
 - South on a drum lane arms/places the selected pattern.
 - Open the drum machine from the drum lane context menu.
 - In the drum machine, D-pad moves, South toggles a step, bumpers change velocity, and East returns to the timeline.
-- Drum kits load from assets/drum_packs in dev builds. Packaged tester builds may omit drum kits unless a package explicitly includes them.
+- Put custom drum kit JSON and WAV folders in the user drum_packs folder.
+- Kits can be top-level JSON files or folders containing kit.json.
 
 Projects:
 - Escape from idle Timeline opens the Project menu.

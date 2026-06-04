@@ -41,39 +41,147 @@ static void path_join(char *out, size_t out_size, const char *base, const char *
     SDL_snprintf(out, out_size, "%s%s%s", base, separator, leaf ? leaf : "");
 }
 
-static void app_resolve_sample_dir(App *app) {
-    char candidate[CLIP_MAX_PATH];
+static bool path_exists_any(const char *path);
+
+static bool app_bundle_resources_dir(char *out, size_t out_size) {
     const char *base = SDL_GetBasePath();
-    if (base && base[0]) {
-        path_join(candidate, sizeof(candidate), base, "wav");
-        if (path_is_directory(candidate)) {
-            SDL_strlcpy(app->sample_dir, candidate, sizeof(app->sample_dir));
-            return;
-        }
-        path_join(candidate, sizeof(candidate), base, "../Resources/wav");
-        if (path_is_directory(candidate)) {
-            SDL_strlcpy(app->sample_dir, candidate, sizeof(app->sample_dir));
-            return;
-        }
+    if (!base || !base[0]) return false;
+    path_join(out, out_size, base, "../Resources");
+    return path_is_directory(out);
+}
+
+static bool app_copy_file_if_missing(const char *src, const char *dst) {
+    if (path_exists_any(dst)) return true;
+    size_t size = 0;
+    void *bytes = SDL_LoadFile(src, &size);
+    if (!bytes) return false;
+    bool ok = SDL_SaveFile(dst, bytes, size);
+    SDL_free(bytes);
+    return ok;
+}
+
+static bool app_resolve_user_child_dir(const App *app, const char *leaf, char *out, size_t out_size) {
+    path_join(out, out_size, app->user_data_dir, leaf);
+    return SDL_CreateDirectory(out) || path_is_directory(out);
+}
+
+static bool app_seed_packaged_starter_sample(App *app, const char *resources_dir) {
+    static const char *starter_wav = "kmart1989_classy_pianist.wav";
+    static const char *starter_json = "kmart1989_classy_pianist.wav.json";
+
+    char sentinel[CLIP_MAX_PATH];
+    path_join(sentinel, sizeof(sentinel), app->sample_dir, ".starter_seeded");
+    if (path_exists_any(sentinel)) return true;
+
+    char bundled_wav_dir[CLIP_MAX_PATH];
+    char source_wav[CLIP_MAX_PATH];
+    char source_json[CLIP_MAX_PATH];
+    char dest_wav[CLIP_MAX_PATH];
+    char dest_json[CLIP_MAX_PATH];
+    path_join(bundled_wav_dir, sizeof(bundled_wav_dir), resources_dir, "wav");
+    path_join(source_wav, sizeof(source_wav), bundled_wav_dir, starter_wav);
+    path_join(source_json, sizeof(source_json), bundled_wav_dir, starter_json);
+    path_join(dest_wav, sizeof(dest_wav), app->sample_dir, starter_wav);
+    path_join(dest_json, sizeof(dest_json), app->sample_dir, starter_json);
+
+    if (!path_exists_any(source_wav) || !path_exists_any(source_json)) return false;
+    if (!app_copy_file_if_missing(source_wav, dest_wav)) return false;
+    if (!app_copy_file_if_missing(source_json, dest_json)) return false;
+
+    static const char seeded[] = "starter sample seeded\n";
+    return SDL_SaveFile(sentinel, seeded, sizeof(seeded) - 1);
+}
+
+static bool app_resolve_user_data_dirs(App *app, const char *resources_dir) {
+    char *pref = SDL_GetPrefPath("Vaporplane", "Vaporplane");
+    if (!pref || !pref[0]) {
+        if (pref) SDL_free(pref);
+        return false;
     }
-    SDL_strlcpy(app->sample_dir, "assets/samples", sizeof(app->sample_dir));
+
+    SDL_strlcpy(app->user_data_dir, pref, sizeof(app->user_data_dir));
+    SDL_free(pref);
+
+    bool ok = true;
+    ok = ok && app_resolve_user_child_dir(app, "samples", app->sample_dir, sizeof(app->sample_dir));
+    ok = ok && app_resolve_user_child_dir(app, "drum_packs", app->drum_pack_dir, sizeof(app->drum_pack_dir));
+
+    char exports_dir[CLIP_MAX_PATH];
+    path_join(exports_dir, sizeof(exports_dir), app->user_data_dir, "exports");
+    ok = ok && (SDL_CreateDirectory(exports_dir) || path_is_directory(exports_dir));
+    path_join(app->roster_export_dir, sizeof(app->roster_export_dir), exports_dir, "roster");
+    path_join(app->project_export_dir, sizeof(app->project_export_dir), exports_dir, "projects");
+    path_join(app->render_export_dir, sizeof(app->render_export_dir), exports_dir, "renders");
+    ok = ok && (SDL_CreateDirectory(app->roster_export_dir) || path_is_directory(app->roster_export_dir));
+    ok = ok && (SDL_CreateDirectory(app->project_export_dir) || path_is_directory(app->project_export_dir));
+    ok = ok && (SDL_CreateDirectory(app->render_export_dir) || path_is_directory(app->render_export_dir));
+    if (!ok) return false;
+
+    app->use_user_data_dirs = true;
+    app->roster_export_dir_is_base_path = false;
+    if (!app_seed_packaged_starter_sample(app, resources_dir)) {
+        app_set_status(app, "Could not seed starter sample");
+    }
+    return true;
+}
+
+static void app_resolve_data_dirs(App *app) {
+    app->use_user_data_dirs = false;
+    app->user_data_dir[0] = '\0';
+    app->sample_dir[0] = '\0';
+    app->drum_pack_dir[0] = '\0';
+    app->roster_export_dir[0] = '\0';
+    app->project_export_dir[0] = '\0';
+    app->render_export_dir[0] = '\0';
+    app->roster_export_dir_is_base_path = false;
+
+    char resources_dir[CLIP_MAX_PATH];
+    resources_dir[0] = '\0';
+    bool packaged_build = app_bundle_resources_dir(resources_dir, sizeof(resources_dir));
+    if (packaged_build &&
+        app_resolve_user_data_dirs(app, resources_dir)) {
+        return;
+    }
+
+    const char *base = SDL_GetBasePath();
+    char exports_dir[CLIP_MAX_PATH];
+
+    if (base && base[0]) {
+        path_join(app->sample_dir, sizeof(app->sample_dir), base, "wav");
+        if (!path_is_directory(app->sample_dir)) {
+            SDL_strlcpy(app->sample_dir, "assets/samples", sizeof(app->sample_dir));
+        }
+        path_join(app->drum_pack_dir, sizeof(app->drum_pack_dir), base, "assets/drum_packs");
+        if (!path_is_directory(app->drum_pack_dir)) {
+            SDL_strlcpy(app->drum_pack_dir, "assets/drum_packs", sizeof(app->drum_pack_dir));
+        }
+        path_join(exports_dir, sizeof(exports_dir), base, "exports");
+        path_join(app->roster_export_dir, sizeof(app->roster_export_dir), exports_dir, "roster");
+        path_join(app->project_export_dir, sizeof(app->project_export_dir), exports_dir, "projects");
+        path_join(app->render_export_dir, sizeof(app->render_export_dir), exports_dir, "renders");
+        app->roster_export_dir_is_base_path = true;
+    } else {
+        SDL_strlcpy(app->sample_dir, "assets/samples", sizeof(app->sample_dir));
+        SDL_strlcpy(app->drum_pack_dir, "assets/drum_packs", sizeof(app->drum_pack_dir));
+        path_join(exports_dir, sizeof(exports_dir), "exports", "");
+        path_join(app->roster_export_dir, sizeof(app->roster_export_dir), exports_dir, "roster");
+        path_join(app->project_export_dir, sizeof(app->project_export_dir), exports_dir, "projects");
+        path_join(app->render_export_dir, sizeof(app->render_export_dir), exports_dir, "renders");
+    }
+
+    SDL_CreateDirectory(exports_dir);
+    SDL_CreateDirectory(app->roster_export_dir);
+    SDL_CreateDirectory(app->project_export_dir);
+    SDL_CreateDirectory(app->render_export_dir);
+    if (packaged_build) app_set_status(app, "Using local data folders");
+}
+
+static void app_resolve_sample_dir(App *app) {
+    if (!app || !app->sample_dir[0]) return;
 }
 
 static void app_resolve_roster_export_dir(App *app) {
-    char exports_dir[CLIP_MAX_PATH];
-    const char *base = SDL_GetBasePath();
-    if (base && base[0]) {
-        path_join(exports_dir, sizeof(exports_dir), base, "exports");
-        path_join(app->roster_export_dir, sizeof(app->roster_export_dir), exports_dir, "roster");
-        if (SDL_CreateDirectory(app->roster_export_dir)) {
-            app->roster_export_dir_is_base_path = true;
-            return;
-        }
-    }
-
-    path_join(exports_dir, sizeof(exports_dir), "exports", "roster");
-    SDL_strlcpy(app->roster_export_dir, exports_dir, sizeof(app->roster_export_dir));
-    app->roster_export_dir_is_base_path = false;
+    if (!app || !app->roster_export_dir[0]) return;
     SDL_CreateDirectory(app->roster_export_dir);
 }
 
@@ -4974,8 +5082,12 @@ bool app_save_project_bundle(App *app, const char *bundle_path) {
     return true;
 }
 
-static bool resolve_project_export_dir(char *out, size_t out_size) {
+static bool resolve_project_export_dir(const App *app, char *out, size_t out_size) {
     if (!out || out_size == 0) return false;
+    if (app && app->project_export_dir[0]) {
+        SDL_strlcpy(out, app->project_export_dir, out_size);
+        return ensure_directory(out);
+    }
     char exports_dir[CLIP_MAX_PATH];
     const char *base = SDL_GetBasePath();
     if (base && base[0]) {
@@ -4991,10 +5103,10 @@ static bool resolve_project_export_dir(char *out, size_t out_size) {
     return ensure_directory(out);
 }
 
-static bool unique_project_bundle_path(char *out, size_t out_size) {
+static bool unique_project_bundle_path(const App *app, char *out, size_t out_size) {
     if (!out || out_size == 0) return false;
     char dir[CLIP_MAX_PATH];
-    if (!resolve_project_export_dir(dir, sizeof(dir))) return false;
+    if (!resolve_project_export_dir(app, dir, sizeof(dir))) return false;
     char leaf[64];
     for (int i = 1; i <= 999; ++i) {
         SDL_snprintf(leaf, sizeof(leaf), "vaporplane_project_%03d%s", i, VAPORPLANE_PROJECT_BUNDLE_SUFFIX);
@@ -5285,7 +5397,7 @@ static bool app_save_project_bundle_named(App *app, const char *display_name) {
     }
 
     char dir[CLIP_MAX_PATH];
-    if (!resolve_project_export_dir(dir, sizeof(dir))) {
+    if (!resolve_project_export_dir(app, dir, sizeof(dir))) {
         app_text_entry_set_error(app, "Could not open project folder");
         return false;
     }
@@ -5424,15 +5536,19 @@ void app_text_entry_confirm(App *app) {
 
 static bool app_save_project_bundle_default(App *app) {
     char path[CLIP_MAX_PATH];
-    if (!unique_project_bundle_path(path, sizeof(path))) {
+    if (!unique_project_bundle_path(app, path, sizeof(path))) {
         app_set_status(app, "Could not create project save path");
         return false;
     }
     return app_save_project_bundle(app, path);
 }
 
-static bool resolve_render_export_dir(char *out, size_t out_size) {
+static bool resolve_render_export_dir(const App *app, char *out, size_t out_size) {
     if (!out || out_size == 0) return false;
+    if (app && app->render_export_dir[0]) {
+        SDL_strlcpy(out, app->render_export_dir, out_size);
+        return ensure_directory(out);
+    }
     char exports_dir[CLIP_MAX_PATH];
     const char *base = SDL_GetBasePath();
     if (base && base[0]) {
@@ -5475,7 +5591,7 @@ static bool default_timeline_render_path(const App *app, char *out, size_t out_s
     if (!out || out_size == 0) return false;
     char dir[CLIP_MAX_PATH];
     char filename[APP_SAMPLE_NAME_MAX + 8];
-    if (!resolve_render_export_dir(dir, sizeof(dir))) return false;
+    if (!resolve_render_export_dir(app, dir, sizeof(dir))) return false;
     safe_project_render_filename(app, filename, sizeof(filename));
     path_join(out, out_size, dir, filename);
     return out[0] != '\0';
@@ -5490,7 +5606,7 @@ static bool app_export_timeline_wav_named(App *app, const char *filename_text) {
     }
 
     char dir[CLIP_MAX_PATH];
-    if (!resolve_render_export_dir(dir, sizeof(dir))) {
+    if (!resolve_render_export_dir(app, dir, sizeof(dir))) {
         app_text_entry_set_error(app, "Could not open render folder");
         return false;
     }
@@ -5889,7 +6005,7 @@ void app_project_browser_refresh(App *app) {
     app->project_browser_selected = 0;
     SDL_memset(app->project_browser_entries, 0, sizeof(app->project_browser_entries));
 
-    if (!resolve_project_export_dir(app->project_browser_dir, sizeof(app->project_browser_dir))) {
+    if (!resolve_project_export_dir(app, app->project_browser_dir, sizeof(app->project_browser_dir))) {
         app_set_status(app, "Could not open project folder");
         return;
     }
@@ -7588,16 +7704,7 @@ static void app_refresh_drum_kits(App *app) {
     if (!app) return;
     app_clear_drum_kits(app);
     char pack_dir[CLIP_MAX_PATH];
-    const char *base = SDL_GetBasePath();
-    if (base && base[0]) {
-        path_join(pack_dir, sizeof(pack_dir), base, "assets/drum_packs");
-        if (!path_is_directory(pack_dir)) {
-            path_join(pack_dir, sizeof(pack_dir), base, "../Resources/drum_packs");
-        }
-        if (!path_is_directory(pack_dir)) SDL_strlcpy(pack_dir, "assets/drum_packs", sizeof(pack_dir));
-    } else {
-        SDL_strlcpy(pack_dir, "assets/drum_packs", sizeof(pack_dir));
-    }
+    SDL_strlcpy(pack_dir, app->drum_pack_dir[0] ? app->drum_pack_dir : "assets/drum_packs", sizeof(pack_dir));
     if (!path_is_directory(pack_dir)) return;
 
     int count = 0;
@@ -10545,6 +10652,7 @@ bool app_init(App *app){
     app->text_entry_target_roster_index = -1;
     app->text_entry_target_pattern_index = -1;
     app->text_entry_target_lane_index = -1;
+    app_resolve_data_dirs(app);
     app_resolve_roster_export_dir(app);
     app_refresh_sample_list(app);
     app->drum_kit_count = 0;

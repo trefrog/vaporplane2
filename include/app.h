@@ -222,8 +222,13 @@ typedef struct App {
     char project_browser_dir[CLIP_MAX_PATH];
     AudioClip project_browser_preview_clip;
     bool project_browser_preview_clip_loaded;
+    bool use_user_data_dirs;
+    char user_data_dir[CLIP_MAX_PATH];
     char sample_dir[CLIP_MAX_PATH];
+    char drum_pack_dir[CLIP_MAX_PATH];
     char roster_export_dir[CLIP_MAX_PATH];
+    char project_export_dir[CLIP_MAX_PATH];
+    char render_export_dir[CLIP_MAX_PATH];
     bool roster_export_dir_is_base_path;
     char status_text[160];
     char project_id[APP_STABLE_ID_MAX];
