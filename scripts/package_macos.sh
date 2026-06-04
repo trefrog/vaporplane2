@@ -234,6 +234,13 @@ Projects:
 README
 run cp "$PACKAGE_DIR/README_FIRST.txt" "$RESOURCES_DIR/README_FIRST.txt"
 
+step "copy legal notices"
+run mkdir -p "$PACKAGE_DIR/licenses" "$RESOURCES_DIR/licenses"
+run cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$PACKAGE_DIR/THIRD_PARTY_NOTICES.md"
+run cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
+run cp "$ROOT_DIR/third_party/soundtouch/COPYING.TXT" "$PACKAGE_DIR/licenses/LGPL-2.1.txt"
+run cp "$ROOT_DIR/third_party/soundtouch/COPYING.TXT" "$RESOURCES_DIR/licenses/LGPL-2.1.txt"
+
 step "write Info.plist"
 run /usr/bin/env bash -c 'cat > "$1"' _ "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
