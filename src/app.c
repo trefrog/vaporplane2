@@ -60,6 +60,41 @@ static bool app_copy_file_if_missing(const char *src, const char *dst) {
     return ok;
 }
 
+static bool app_should_skip_packaged_data_entry(const char *name) {
+    if (!name || !name[0]) return true;
+    if (SDL_strcmp(name, ".") == 0 || SDL_strcmp(name, "..") == 0) return true;
+    if (SDL_strcmp(name, ".DS_Store") == 0 || SDL_strcmp(name, ".gitkeep") == 0) return true;
+    return name[0] == '.' && name[1] == '_';
+}
+
+static bool app_copy_directory_entries_if_missing(const char *src_dir, const char *dst_dir) {
+    if (!path_is_directory(src_dir)) return false;
+    if (!SDL_CreateDirectory(dst_dir) && !path_is_directory(dst_dir)) return false;
+
+    int count = 0;
+    char **names = SDL_GlobDirectory(src_dir, "*", 0, &count);
+    if (!names) return true;
+
+    bool ok = true;
+    qsort(names, (size_t)count, sizeof(char *), compare_strings);
+    for (int i = 0; i < count; ++i) {
+        if (app_should_skip_packaged_data_entry(names[i])) continue;
+
+        char src_path[CLIP_MAX_PATH];
+        char dst_path[CLIP_MAX_PATH];
+        path_join(src_path, sizeof(src_path), src_dir, names[i]);
+        path_join(dst_path, sizeof(dst_path), dst_dir, names[i]);
+
+        if (path_is_directory(src_path)) {
+            ok = app_copy_directory_entries_if_missing(src_path, dst_path) && ok;
+        } else {
+            ok = app_copy_file_if_missing(src_path, dst_path) && ok;
+        }
+    }
+    SDL_free(names);
+    return ok;
+}
+
 static bool app_resolve_user_child_dir(const App *app, const char *leaf, char *out, size_t out_size) {
     path_join(out, out_size, app->user_data_dir, leaf);
     return SDL_CreateDirectory(out) || path_is_directory(out);
@@ -92,6 +127,20 @@ static bool app_seed_packaged_starter_sample(App *app, const char *resources_dir
     return SDL_SaveFile(sentinel, seeded, sizeof(seeded) - 1);
 }
 
+static bool app_seed_packaged_drum_packs(App *app, const char *resources_dir) {
+    char sentinel[CLIP_MAX_PATH];
+    path_join(sentinel, sizeof(sentinel), app->drum_pack_dir, ".starter_drum_packs_seeded");
+    if (path_exists_any(sentinel)) return true;
+
+    char bundled_drum_packs[CLIP_MAX_PATH];
+    path_join(bundled_drum_packs, sizeof(bundled_drum_packs), resources_dir, "drum_packs");
+    if (!path_is_directory(bundled_drum_packs)) return false;
+    if (!app_copy_directory_entries_if_missing(bundled_drum_packs, app->drum_pack_dir)) return false;
+
+    static const char seeded[] = "starter drum packs seeded\n";
+    return SDL_SaveFile(sentinel, seeded, sizeof(seeded) - 1);
+}
+
 static bool app_resolve_user_data_dirs(App *app, const char *resources_dir) {
     char *pref = SDL_GetPrefPath("Vaporplane", "Vaporplane");
     if (!pref || !pref[0]) {
@@ -121,6 +170,9 @@ static bool app_resolve_user_data_dirs(App *app, const char *resources_dir) {
     app->roster_export_dir_is_base_path = false;
     if (!app_seed_packaged_starter_sample(app, resources_dir)) {
         app_set_status(app, "Could not seed starter sample");
+    }
+    if (!app_seed_packaged_drum_packs(app, resources_dir)) {
+        app_set_status(app, "Could not seed starter drum packs");
     }
     return true;
 }
@@ -8291,9 +8343,13 @@ void app_select_sample_delta(App *app, int delta) {
 static void app_render_controls_legend(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
-    SDL_FRect panel = { 36.0f, 88.0f, 700.0f, 492.0f };
+    SDL_FRect panel = { 36.0f, 72.0f, 1040.0f, 600.0f };
     if (panel.w > (float)w - 72.0f) panel.w = (float)w - 72.0f;
-    if (panel.h > (float)h - 112.0f) panel.h = (float)h - 112.0f;
+    if (panel.h > (float)h - 104.0f) panel.h = (float)h - 104.0f;
+    if (panel.w < 420.0f) panel.w = (float)w - 24.0f;
+    if (panel.h < 360.0f) panel.h = (float)h - 48.0f;
+    panel.x = ((float)w - panel.w) * 0.5f;
+    if (panel.x < 12.0f) panel.x = 12.0f;
 
     SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(app->renderer, 9, 10, 16, 232);
@@ -8302,38 +8358,96 @@ static void app_render_controls_legend(App *app) {
     SDL_RenderRect(app->renderer, &panel);
     SDL_SetRenderDrawColor(app->renderer, 230, 238, 242, 255);
 
-    float x = panel.x + 16.0f;
-    float y = panel.y + 14.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "CONTROLS"); y += 22.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "F1 legend   F2 waveform/timeline/master mix   Tab sample picker in waveform"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Waveform: Space play   M metronome   [/] BPM   T tempo lock"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "A/D loop start   J/L loop end   Shift = larger step"); y += 22.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline: Tab/Shift+Tab or bumpers cycle focus zones"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline: Space play/pause   Enter/South activate focus   East cancel"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Esc: Timeline / Project menu   C/Start context menu   Up/Down choose   South apply"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline stick: Left/Right pan   Up/Down zoom   L2 turbo"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Transport focus: [/] or D-pad L/R tape   R2 fine BPM   T or D-pad U/D mode"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Transport focus: 0 or left stick resets tape speed"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Ruler: L/R beat cursor   C menu marks/removes tempo   [/] adjusts marked BPM"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Lane Index: Up/Down lane   South opens Lane Inspector"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Lane Inspector: L/R palette   South mute   East timeline   R2 transport"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Master Mix: Tab focus   Reverb 1 U/D select L/R adjust Enter toggle R clear"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Master Mix gamepad: bumpers focus   Reverb 1 d-pad edit   South toggle   LS clear"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Play Range: Enter/South adjust   1/2 or West/North choose handle"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Track: L/R cursor   U/D lane cursor   South select/move   [/] velocity"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Gamepad track: L2+stick X glide   L2+D-pad L/R bars   L2+D-pad U/D velocity"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Move/Place: D-pad L/R ticks   D-pad U/D lane   same-lane overlap blocked"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Roster: South arms/places   C/Start menu   Right stick previews"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Timeline R2: South play/pause   East rewind   West playhead=cursor   North loop"); y += 22.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Gamepad waveform: South/Start play   Back metronome"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Waveform: D-pad L/R trim selected edge   D-pad U/D zoom"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Waveform frame grip: hold L2 pins left edge   add R2 + D-pad L/R snaps beats"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "R2+South set loop to visible   L2+R2+South capture loop"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Waveform right stick picker   R2+Start cycles waveform/timeline/master"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Waveform R2+North tempo lock   L2+R2+Back writes tempo JSON"); y += 22.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: South apply   L2+R2+South apply+roster   East/T cancel"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: R2+North snap downbeat   R2+East clear"); y += 16.0f;
-    SDL_RenderDebugText(app->renderer, x, y, "Tempo Lock: d-pad BPM/bars   L2+d-pad coarse BPM   sticks/bumpers downbeat");
+    SDL_Rect clip = {
+        (int)panel.x,
+        (int)panel.y,
+        (int)panel.w,
+        (int)panel.h
+    };
+    SDL_SetRenderClipRect(app->renderer, &clip);
+
+    float padding = 16.0f;
+    float gap = 28.0f;
+    bool two_columns = panel.w >= 780.0f;
+    float col_w = two_columns ? (panel.w - padding * 2.0f - gap) * 0.5f : panel.w - padding * 2.0f;
+    float x1 = panel.x + padding;
+    float x2 = x1 + col_w + gap;
+    float y1 = panel.y + 14.0f;
+    float y2 = y1 + 22.0f;
+    float bottom = panel.y + panel.h - 18.0f;
+
+    SDL_RenderDebugText(app->renderer, x1, y1, "CONTROLS");
+    y1 += 22.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "F1 legend   F2/R2+Start change view");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "Tab shifts focus; C/Start opens menus");
+    y1 += 22.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "WAVEFORM");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "Space or South/Start play");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "A/D loop start   J/L loop end");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "D-pad L/R trims   D-pad U/D zooms");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "R2+South sets visible loop");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "L2+R2+South captures to roster");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "R2+North opens Tempo Lock");
+    y1 += 22.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "TIMELINE");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "Space plays/pauses");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "Enter/South activates focus");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "East cancels   Esc opens Project menu");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "Left/Right pans   Up/Down zooms");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "R2+South play/pause   R2+East rewind");
+    y1 += 16.0f;
+    SDL_RenderDebugText(app->renderer, x1, y1, "R2+West sets playhead to cursor");
+    y1 += 16.0f;
+    if (y1 <= bottom) SDL_RenderDebugText(app->renderer, x1, y1, "R2+North loops play range");
+
+    float rx = two_columns ? x2 : x1;
+    float *ry = two_columns ? &y2 : &y1;
+    if (!two_columns) *ry += 22.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "TRACKS + ROSTER");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "Track: L/R cursor   U/D lane");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "South selects/moves   [/] velocity");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "Roster: South arms/places");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "Right stick previews roster clips");
+    *ry += 22.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "DRUMS");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "Select drum lane, C/Start for actions");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "South arms/places selected pattern");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "Drum machine: D-pad moves");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "South toggles step   bumpers velocity");
+    *ry += 22.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "TEMPO + MIX");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "[/] BPM   M metronome   T tempo lock");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "Tempo Lock: South applies");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "R2+North snaps downbeat");
+    *ry += 16.0f;
+    SDL_RenderDebugText(app->renderer, rx, *ry, "Master Mix: Tab focus");
+    *ry += 16.0f;
+    if (*ry <= bottom) SDL_RenderDebugText(app->renderer, rx, *ry, "Reverb 1: U/D select, L/R adjust");
+
+    SDL_SetRenderClipRect(app->renderer, NULL);
 }
 
 static float timeline_x_for_tick(double tick, double view_start, double view_span, float x, float w) {

@@ -199,6 +199,10 @@ run mkdir -p "$RESOURCES_DIR/wav"
 run cp "$ROOT_DIR/assets/samples/$STARTER_SAMPLE" "$RESOURCES_DIR/wav/$STARTER_SAMPLE"
 run cp "$ROOT_DIR/assets/samples/$STARTER_SAMPLE_JSON" "$RESOURCES_DIR/wav/$STARTER_SAMPLE_JSON"
 
+step "copy starter drum packs"
+run mkdir -p "$RESOURCES_DIR/drum_packs"
+run rsync -a --delete --exclude ".DS_Store" --exclude "._*" --exclude ".gitkeep" "$ROOT_DIR/assets/drum_packs/" "$RESOURCES_DIR/drum_packs/"
+
 step "write tester quickstart"
 run /usr/bin/env bash -c 'cat > "$1"' _ "$PACKAGE_DIR/README_FIRST.txt" <<'README'
 Vaporplane Quickstart
@@ -208,6 +212,7 @@ First move:
 - Press F1 in the app to show/hide the controls legend.
 - Press F2 or R2+Start to cycle Waveform, Timeline, and Master Mix.
 - The packaged starter sample is copied into your user samples folder on first launch.
+- The packaged starter drum packs are copied into your user drum_packs folder on first launch.
 
 User folders:
 - WAVs: ~/Library/Application Support/Vaporplane/Vaporplane/samples/
