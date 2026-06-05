@@ -212,3 +212,11 @@ See [docs/project_format.md](docs/project_format.md) for the format contract.
 - [docs/tape_speed.md](docs/tape_speed.md): tape-speed design notes.
 - [docs/new_timeline_tempo_paradigm.md](docs/new_timeline_tempo_paradigm.md):
   timeline and tempo-map thinking.
+
+## License
+
+Vaporplane's original source code is licensed under the MIT License.
+
+Third-party code, libraries, and bundled assets may have their own licenses.
+See `THIRD_PARTY_NOTICES.md` for details. Sample libraries and user-provided
+WAV files are not automatically covered by Vaporplane's code license.
