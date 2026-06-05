@@ -8370,10 +8370,19 @@ void app_select_sample_delta(App *app, int delta) {
     if (app->selected_sample < 0) app->selected_sample += app->sample_count;
 }
 
+static float debug_text_width(const char *text) {
+    return text ? (float)SDL_strlen(text) * 8.0f : 0.0f;
+}
+
+static void render_debug_text_centered(SDL_Renderer *renderer, float center_x, float y, const char *text) {
+    if (!text || !text[0]) return;
+    SDL_RenderDebugText(renderer, center_x - debug_text_width(text) * 0.5f, y, text);
+}
+
 static void app_render_controls_legend(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
-    SDL_FRect panel = { 36.0f, 72.0f, 1040.0f, 600.0f };
+    SDL_FRect panel = { 36.0f, 72.0f, 1040.0f, 610.0f };
     if (panel.w > (float)w - 72.0f) panel.w = (float)w - 72.0f;
     if (panel.h > (float)h - 104.0f) panel.h = (float)h - 104.0f;
     if (panel.w < 420.0f) panel.w = (float)w - 24.0f;
@@ -8397,85 +8406,85 @@ static void app_render_controls_legend(App *app) {
     SDL_SetRenderClipRect(app->renderer, &clip);
 
     float padding = 16.0f;
-    float gap = 28.0f;
-    bool two_columns = panel.w >= 780.0f;
-    float col_w = two_columns ? (panel.w - padding * 2.0f - gap) * 0.5f : panel.w - padding * 2.0f;
-    float x1 = panel.x + padding;
-    float x2 = x1 + col_w + gap;
-    float y1 = panel.y + 14.0f;
-    float y2 = y1 + 22.0f;
+    float key_w = panel.w * 0.26f;
+    if (key_w < 132.0f) key_w = 132.0f;
+    if (key_w > 220.0f) key_w = 220.0f;
+    float keyboard_x = panel.x + padding;
+    float gamepad_x = panel.x + panel.w - padding - key_w;
+    float action_center = panel.x + panel.w * 0.5f;
+    float y = panel.y + 14.0f;
     float bottom = panel.y + panel.h - 18.0f;
 
-    SDL_RenderDebugText(app->renderer, x1, y1, "CONTROLS");
-    y1 += 22.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "F1 legend   F2/R2+Start change view");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "Tab shifts focus; C/Start opens menus");
-    y1 += 22.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "WAVEFORM");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "Space or South/Start play");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "A/D loop start   J/L loop end");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "D-pad L/R trims   D-pad U/D zooms");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "R2+South sets visible loop");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "L2+R2+South captures to roster");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "R2+North opens Tempo Lock");
-    y1 += 22.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "TIMELINE");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "Space plays/pauses");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "Enter/South activates focus");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "East cancels   Esc opens Project menu");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "Left/Right pans   Up/Down zooms");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "R2+South play/pause   R2+East rewind");
-    y1 += 16.0f;
-    SDL_RenderDebugText(app->renderer, x1, y1, "R2+West sets playhead to cursor");
-    y1 += 16.0f;
-    if (y1 <= bottom) SDL_RenderDebugText(app->renderer, x1, y1, "R2+North loops play range");
+    typedef struct {
+        const char *keyboard;
+        const char *action;
+        const char *gamepad;
+        bool section;
+    } LegendRow;
+    static const LegendRow rows[] = {
+        { "", "GLOBAL", "", true },
+        { "F1", "Show / hide legend", "", false },
+        { "F2", "Change view", "R2+Start", false },
+        { "Tab", "Shift focus", "Bumpers", false },
+        { "Enter / C", "Activate / menu", "South / Start", false },
+        { "Esc", "Cancel / Project menu", "East", false },
+        { "", "WAVEFORM", "", true },
+        { "Space", "Play / pause", "South / Start", false },
+        { "A / D", "Move loop start", "", false },
+        { "J / L", "Move loop end", "", false },
+        { "Arrows", "Trim / zoom", "D-pad", false },
+        { "T", "Tempo Lock", "R2+North", false },
+        { "", "Set visible loop", "R2+South", false },
+        { "", "Capture to roster", "L2+R2+South", false },
+        { "", "TIMELINE", "", true },
+        { "Space", "Play / pause", "R2+South", false },
+        { "Home", "Rewind", "R2+East", false },
+        { "", "Set playhead to cursor", "R2+West", false },
+        { "", "Loop play range", "R2+North", false },
+        { "Left / Right", "Pan / cursor", "D-pad L/R", false },
+        { "Up / Down", "Zoom / lane", "D-pad U/D", false },
+        { "[ / ]", "Velocity / marked BPM", "", false },
+        { "", "TRACKS + ROSTER", "", true },
+        { "Enter", "Select / move / place", "South", false },
+        { "C", "Context menu", "Start", false },
+        { "", "Preview roster clip", "Right stick", false },
+        { "", "DRUMS", "", true },
+        { "D", "Open drum machine", "", false },
+        { "Arrows", "Move drum cursor", "D-pad", false },
+        { "Space / Enter", "Toggle step", "South", false },
+        { "[ / ]", "Step velocity", "Bumpers", false },
+        { "", "TEMPO + MIX", "", true },
+        { "[ / ]", "Adjust BPM", "", false },
+        { "M", "Metronome", "Back", false },
+        { "Tab", "Master Mix focus", "Bumpers", false },
+        { "Arrows", "Reverb select / adjust", "D-pad", false }
+    };
 
-    float rx = two_columns ? x2 : x1;
-    float *ry = two_columns ? &y2 : &y1;
-    if (!two_columns) *ry += 22.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "TRACKS + ROSTER");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "Track: L/R cursor   U/D lane");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "South selects/moves   [/] velocity");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "Roster: South arms/places");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "Right stick previews roster clips");
-    *ry += 22.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "DRUMS");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "Select drum lane, C/Start for actions");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "South arms/places selected pattern");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "Drum machine: D-pad moves");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "South toggles step   bumpers velocity");
-    *ry += 22.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "TEMPO + MIX");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "[/] BPM   M metronome   T tempo lock");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "Tempo Lock: South applies");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "R2+North snaps downbeat");
-    *ry += 16.0f;
-    SDL_RenderDebugText(app->renderer, rx, *ry, "Master Mix: Tab focus");
-    *ry += 16.0f;
-    if (*ry <= bottom) SDL_RenderDebugText(app->renderer, rx, *ry, "Reverb 1: U/D select, L/R adjust");
+    SDL_RenderDebugText(app->renderer, keyboard_x, y, "KEYBOARD");
+    render_debug_text_centered(app->renderer, action_center, y, "ACTION");
+    SDL_RenderDebugText(app->renderer, gamepad_x, y, "GAMEPAD");
+    y += 16.0f;
+    SDL_SetRenderDrawColor(app->renderer, 68, 88, 104, 255);
+    SDL_RenderLine(app->renderer, panel.x + padding, y + 3.0f, panel.x + panel.w - padding, y + 3.0f);
+    y += 14.0f;
+
+    for (size_t i = 0; i < SDL_arraysize(rows) && y <= bottom; ++i) {
+        const LegendRow *row = &rows[i];
+        if (row->section) {
+            y += 5.0f;
+            if (y > bottom) break;
+            SDL_SetRenderDrawColor(app->renderer, 120, 220, 235, 255);
+            render_debug_text_centered(app->renderer, action_center, y, row->action);
+            y += 15.0f;
+            continue;
+        }
+        SDL_SetRenderDrawColor(app->renderer, 190, 204, 214, 255);
+        if (row->keyboard && row->keyboard[0]) SDL_RenderDebugText(app->renderer, keyboard_x, y, row->keyboard);
+        if (row->gamepad && row->gamepad[0]) SDL_RenderDebugText(app->renderer, gamepad_x, y, row->gamepad);
+        SDL_SetRenderDrawColor(app->renderer, 238, 244, 246, 255);
+        render_debug_text_centered(app->renderer, action_center, y, row->action);
+        y += 14.0f;
+    }
 
     SDL_SetRenderClipRect(app->renderer, NULL);
 }
@@ -8656,6 +8665,22 @@ static void render_project_menu(App *app, float anchor_x, float anchor_y, int w,
         SDL_RenderDebugText(app->renderer, menu.x + 18.0f, item_y, project_menu_item_label(item));
         item_y += 22.0f;
     }
+}
+
+static void render_project_menu_legend_hint(App *app) {
+    if (!app || !app->project_menu_open || app->controls_legend_open) return;
+    int w = 0, h = 0;
+    SDL_GetRenderOutputSize(app->renderer, &w, &h);
+    const char *hint = "F1 for legend";
+    float x = (float)w - debug_text_width(hint) - 18.0f;
+    float y = (float)h - 28.0f;
+    if (x < 12.0f) x = 12.0f;
+    if (y < 12.0f) y = 12.0f;
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 180);
+    SDL_RenderDebugText(app->renderer, x + 1.0f, y + 1.0f, hint);
+    SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, 255);
+    SDL_RenderDebugText(app->renderer, x, y, hint);
 }
 
 static void render_waveform_menu(App *app, int w, int h) {
@@ -10181,6 +10206,7 @@ static void app_render_master_mix(App *app) {
                               "focus: %s   F2/R2+Start next view   Tab/Up/Down focus",
                               master_mix_focus_label(app->master_mix_focus));
 
+    render_project_menu_legend_hint(app);
     if (app->controls_legend_open) app_render_controls_legend(app);
 }
 
@@ -10747,6 +10773,7 @@ static void app_render_overlay(App *app) {
         return;
     }
 
+    render_project_menu_legend_hint(app);
     if (app->controls_legend_open) app_render_controls_legend(app);
 }
 
