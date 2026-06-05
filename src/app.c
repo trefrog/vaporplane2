@@ -101,11 +101,11 @@ static bool app_resolve_user_child_dir(const App *app, const char *leaf, char *o
 }
 
 static bool app_seed_packaged_starter_sample(App *app, const char *resources_dir) {
-    static const char *starter_wav = "kmart1989_classy_pianist.wav";
-    static const char *starter_json = "kmart1989_classy_pianist.wav.json";
+    static const char *starter_wav = "[demo] Makaih Beats - Vibration.wav";
+    static const char *starter_json = "[demo] Makaih Beats - Vibration.wav.json";
 
     char sentinel[CLIP_MAX_PATH];
-    path_join(sentinel, sizeof(sentinel), app->sample_dir, ".starter_seeded");
+    path_join(sentinel, sizeof(sentinel), app->sample_dir, ".makaih_vibration_demo_seeded");
     if (path_exists_any(sentinel)) return true;
 
     char bundled_wav_dir[CLIP_MAX_PATH];
@@ -123,13 +123,13 @@ static bool app_seed_packaged_starter_sample(App *app, const char *resources_dir
     if (!app_copy_file_if_missing(source_wav, dest_wav)) return false;
     if (!app_copy_file_if_missing(source_json, dest_json)) return false;
 
-    static const char seeded[] = "starter sample seeded\n";
+    static const char seeded[] = "makaih vibration demo seeded\n";
     return SDL_SaveFile(sentinel, seeded, sizeof(seeded) - 1);
 }
 
 static bool app_seed_packaged_drum_packs(App *app, const char *resources_dir) {
     char sentinel[CLIP_MAX_PATH];
-    path_join(sentinel, sizeof(sentinel), app->drum_pack_dir, ".starter_drum_packs_seeded");
+    path_join(sentinel, sizeof(sentinel), app->drum_pack_dir, ".cc0_starter_drum_packs_seeded");
     if (path_exists_any(sentinel)) return true;
 
     char bundled_drum_packs[CLIP_MAX_PATH];
@@ -137,7 +137,7 @@ static bool app_seed_packaged_drum_packs(App *app, const char *resources_dir) {
     if (!path_is_directory(bundled_drum_packs)) return false;
     if (!app_copy_directory_entries_if_missing(bundled_drum_packs, app->drum_pack_dir)) return false;
 
-    static const char seeded[] = "starter drum packs seeded\n";
+    static const char seeded[] = "cc0 starter drum packs seeded\n";
     return SDL_SaveFile(sentinel, seeded, sizeof(seeded) - 1);
 }
 
@@ -7752,6 +7752,33 @@ static bool app_load_drum_kit_json(App *app, const char *json_path, bool project
     return true;
 }
 
+static int app_find_drum_kit_by_id(const App *app, const char *kit_id) {
+    if (!app || !kit_id || !kit_id[0]) return -1;
+    for (int i = 0; i < app->drum_kit_count; ++i) {
+        if (SDL_strcmp(app->drum_kits[i].kit_id, kit_id) == 0) return i;
+    }
+    return -1;
+}
+
+static void app_swap_drum_kits(App *app, int a, int b) {
+    if (!app || a < 0 || b < 0 || a >= app->drum_kit_count || b >= app->drum_kit_count || a == b) return;
+    DrumKit tmp = app->drum_kits[a];
+    app->drum_kits[a] = app->drum_kits[b];
+    app->drum_kits[b] = tmp;
+
+    for (int lane_index = 0; lane_index < TIMELINE_MAX_LANES; ++lane_index) {
+        TimelineLane *lane = &app->timeline.lanes[lane_index];
+        if (lane->type != TIMELINE_LANE_DRUMS) continue;
+        if (lane->drum_kit_index == a) lane->drum_kit_index = b;
+        else if (lane->drum_kit_index == b) lane->drum_kit_index = a;
+    }
+}
+
+static void app_promote_default_drum_kit(App *app) {
+    int vhs_index = app_find_drum_kit_by_id(app, "vhs_cc0");
+    if (vhs_index > 0) app_swap_drum_kits(app, 0, vhs_index);
+}
+
 static void app_refresh_drum_kits(App *app) {
     if (!app) return;
     app_clear_drum_kits(app);
@@ -7785,6 +7812,7 @@ static void app_refresh_drum_kits(App *app) {
         }
         SDL_free(children);
     }
+    app_promote_default_drum_kit(app);
 }
 
 void app_pan_timeline_view(App *app, double fraction) {

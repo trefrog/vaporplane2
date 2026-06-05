@@ -1,0 +1,18 @@
+{
+  "id": "cowbells_cc0",
+  "name": "Cowbells CC0",
+  "pads": [
+    { "name": "Cowbell A1", "note": 36, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-a1.wav" },
+    { "name": "Cowbell A2", "note": 37, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-a2.wav" },
+    { "name": "Cowbell A3", "note": 38, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-a3.wav" },
+    { "name": "Cowbell A4", "note": 39, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-a4.wav" },
+    { "name": "Cowbell A5", "note": 40, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-a5.wav" },
+    { "name": "Cowbell B1", "note": 41, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-b1.wav" },
+    { "name": "Cowbell B2", "note": 42, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-b2.wav" },
+    { "name": "Cowbell B3", "note": 43, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-b3.wav" },
+    { "name": "Cowbell B4", "note": 44, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-b4.wav" },
+    { "name": "Cowbell B5", "note": 45, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-b5.wav" },
+    { "name": "Cowbell C1", "note": 46, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-c1.wav" },
+    { "name": "Cowbell C2", "note": 47, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-c2.wav" }
+  ]
+}

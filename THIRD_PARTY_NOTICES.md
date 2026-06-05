@@ -96,18 +96,52 @@ is redistributable unless it has explicit license terms allowing redistribution.
 Bundled audio assets should have their own source and license notes, either in a
 separate asset notice file or beside the asset pack itself.
 
-### Drum Pack Material
+### Bundled CC0 Drum Kit Material
 
-Vaporplane development builds may reference drum kit material from
-RealDrumSamples:
+Vaporplane may bundle starter drum kit material distributed under Creative
+Commons CC0. The source-provided CC0 user license is included as:
 
 ```text
-https://realdrumsamples.com/
+CC0_License_For_Users.pdf
 ```
 
-The included drum kit JSON files map pads to files from RealDrumSamples preview
-or promo material. The JSON mappings are Vaporplane project data; the underlying
-audio files are third-party sample material from RealDrumSamples.
+The bundled starter drum material currently includes curated kit mappings and
+samples from these folders:
 
-Do not redistribute the raw drum sample audio in public Vaporplane packages
-unless the package has explicit redistribution permission for those files.
+```text
+Burial Kicks
+Cowbells - Dynamite Cowbel VSTi
+Cymbal Crashes - SignatureSounds.org
+Forest Kit - Stick And Twig Snaps
+Fred Again Styled Drum Kit
+Kick Drums - Multiple Genres
+Trap 808 SignatureSounds.Org
+vhs-drumkit CC0
+```
+
+The bundled JSON kit mappings are Vaporplane project data. The underlying audio
+samples remain third-party audio assets distributed with their source-provided
+CC0 notice.
+
+Do not assume that future or user-provided drum packs are redistributable unless
+they include explicit license terms allowing redistribution.
+
+### Bundled Demo Sample Material
+
+Packaged Vaporplane builds may include this starter demo sample:
+
+```text
+[demo] Makaih Beats - Vibration.wav
+```
+
+**Creator:** Makaih Beats  
+**License:** Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International  
+**License URL:** https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+This sample is not CC0. The Creative Commons BY-NC-SA 4.0 license requires
+attribution, allows sharing and adaptation under the license terms, does not
+permit commercial use, and requires adaptations to be shared under the same
+license.
+
+The adjacent JSON file contains Vaporplane tempo metadata plus a copy of the
+license identifier and license URL for this demo sample.

@@ -1,0 +1,14 @@
+{
+  "id": "cymbal_crashes_cc0",
+  "name": "Cymbal Crashes CC0",
+  "pads": [
+    { "name": "Crash 01", "note": 36, "file": "Cymbal Crashes - SignatureSounds.org/Cymbal Crash 1.wav" },
+    { "name": "Crash 02", "note": 37, "file": "Cymbal Crashes - SignatureSounds.org/Cymbal Crash 2.wav" },
+    { "name": "Crash 03", "note": 38, "file": "Cymbal Crashes - SignatureSounds.org/Cymbal Crash 3.wav" },
+    { "name": "Crash 07", "note": 39, "file": "Cymbal Crashes - SignatureSounds.org/Cymbal Crash 7.wav" },
+    { "name": "Crash 15", "note": 40, "file": "Cymbal Crashes - SignatureSounds.org/Cymbal Crash 15.wav" },
+    { "name": "Crash 16", "note": 41, "file": "Cymbal Crashes - SignatureSounds.org/Cymbal Crash 16.wav" },
+    { "name": "Crash 17", "note": 42, "file": "Cymbal Crashes - SignatureSounds.org/Cymbal Crash 17.wav" },
+    { "name": "Crash 18", "note": 43, "file": "Cymbal Crashes - SignatureSounds.org/Cymbal Crash 18.wav" }
+  ]
+}

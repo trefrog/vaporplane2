@@ -8,8 +8,8 @@ APP_NAME="${VAPORPLANE_APP_NAME:-Vaporplane}"
 SIGN_IDENTITY="${VAPORPLANE_SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${VAPORPLANE_NOTARY_PROFILE:-}"
 SDL3_DYLIB="${VAPORPLANE_SDL3_DYLIB:-}"
-STARTER_SAMPLE="kmart1989_classy_pianist.wav"
-STARTER_SAMPLE_JSON="kmart1989_classy_pianist.wav.json"
+STARTER_SAMPLE="[demo] Makaih Beats - Vibration.wav"
+STARTER_SAMPLE_JSON="[demo] Makaih Beats - Vibration.wav.json"
 
 usage() {
     cat <<'USAGE'
@@ -212,7 +212,8 @@ First move:
 - Press F1 in the app to show/hide the controls legend.
 - Press F2 or R2+Start to cycle Waveform, Timeline, and Master Mix.
 - The packaged starter sample is copied into your user samples folder on first launch.
-- The packaged starter drum packs are copied into your user drum_packs folder on first launch.
+- The packaged starter sample is CC BY-NC-SA 4.0 material and is not for commercial use.
+- The packaged CC0 starter drum kits are copied into your user drum_packs folder on first launch.
 
 User folders:
 - WAVs: ~/Library/Application Support/Vaporplane/Vaporplane/samples/
@@ -236,6 +237,7 @@ Drums:
 - Select a drum lane, then use C/Start for drum pattern actions.
 - South on a drum lane arms/places the selected pattern.
 - Open the drum machine from the drum lane context menu.
+- New drum lanes default to the VHS Drumkit CC0 kit.
 - In the drum machine, D-pad moves, South toggles a step, bumpers change velocity, and East returns to the timeline.
 - Put custom drum kit JSON and WAV folders in the user drum_packs folder.
 - Kits can be top-level JSON files or folders containing kit.json.
@@ -252,6 +254,8 @@ run cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$PACKAGE_DIR/THIRD_PARTY_NOTICES.md"
 run cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
 run cp "$ROOT_DIR/third_party/soundtouch/COPYING.TXT" "$PACKAGE_DIR/licenses/LGPL-2.1.txt"
 run cp "$ROOT_DIR/third_party/soundtouch/COPYING.TXT" "$RESOURCES_DIR/licenses/LGPL-2.1.txt"
+run cp "$ROOT_DIR/CC0_License_For_Users.pdf" "$PACKAGE_DIR/licenses/CC0_License_For_Users.pdf"
+run cp "$ROOT_DIR/CC0_License_For_Users.pdf" "$RESOURCES_DIR/licenses/CC0_License_For_Users.pdf"
 
 step "write Info.plist"
 run /usr/bin/env bash -c 'cat > "$1"' _ "$CONTENTS_DIR/Info.plist" <<PLIST

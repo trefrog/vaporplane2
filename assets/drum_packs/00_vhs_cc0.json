@@ -1,0 +1,18 @@
+{
+  "id": "vhs_cc0",
+  "name": "VHS Drumkit CC0",
+  "pads": [
+    { "name": "Kick A", "note": 36, "file": "vhs-drumkit CC0/bdr-01.wav" },
+    { "name": "Kick B", "note": 35, "file": "vhs-drumkit CC0/bdr-101.wav" },
+    { "name": "Heavy Snare", "note": 38, "file": "vhs-drumkit CC0/dr-04.wav" },
+    { "name": "Snare", "note": 40, "file": "vhs-drumkit CC0/sdr-01.wav" },
+    { "name": "Stick Snap", "note": 37, "file": "Forest Kit - Stick And Twig Snaps/Stick Snap 01.wav" },
+    { "name": "Closed Hat", "note": 42, "file": "vhs-drumkit CC0/hcr-01.wav" },
+    { "name": "Open Hat", "note": 46, "file": "vhs-drumkit CC0/hor-01.wav" },
+    { "name": "Crash", "note": 49, "file": "Cymbal Crashes - SignatureSounds.org/Cymbal Crash 1.wav" },
+    { "name": "Cowbell", "note": 56, "file": "Cowbells - Dynamite Cowbel VSTi/Cowbell-a1.wav" },
+    { "name": "Metal Perc", "note": 55, "file": "vhs-drumkit CC0/pcr-210.wav" },
+    { "name": "Big Tom", "note": 43, "file": "vhs-drumkit CC0/tom-02.wav" },
+    { "name": "Small Tom", "note": 45, "file": "vhs-drumkit CC0/tom-03.wav" }
+  ]
+}

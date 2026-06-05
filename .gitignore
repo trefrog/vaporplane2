@@ -11,3 +11,4 @@ run.log
 assets/samples/*
 !assets/samples/.gitkeep
 !assets/samples/*.wav.json
+!assets/samples/\[demo\] Makaih Beats - Vibration.wav

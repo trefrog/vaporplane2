@@ -1,0 +1,15 @@
+{
+  "bpm": 144,
+  "beats_per_bar": 4,
+  "beat_unit": 4,
+  "target_bars": 2,
+  "license": {
+    "title": "Makaih Beats - Vibration",
+    "creator": "Makaih Beats",
+    "license_name": "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International",
+    "license_id": "CC BY-NC-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+    "commercial_use": "not permitted",
+    "share_alike": true
+  }
+}

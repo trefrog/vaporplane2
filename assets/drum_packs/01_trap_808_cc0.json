@@ -1,0 +1,18 @@
+{
+  "id": "trap_808_cc0",
+  "name": "Trap 808 CC0",
+  "pads": [
+    { "name": "808 01", "note": 36, "file": "Trap 808 SignatureSounds.Org/808-01.wav" },
+    { "name": "808 02", "note": 37, "file": "Trap 808 SignatureSounds.Org/808-02.wav" },
+    { "name": "808 03", "note": 38, "file": "Trap 808 SignatureSounds.Org/808-03.wav" },
+    { "name": "808 04", "note": 39, "file": "Trap 808 SignatureSounds.Org/808-04.wav" },
+    { "name": "808 05", "note": 40, "file": "Trap 808 SignatureSounds.Org/808-05.wav" },
+    { "name": "808 06", "note": 41, "file": "Trap 808 SignatureSounds.Org/808-06.wav" },
+    { "name": "808 07", "note": 42, "file": "Trap 808 SignatureSounds.Org/808-07.wav" },
+    { "name": "808 08", "note": 43, "file": "Trap 808 SignatureSounds.Org/808-08.wav" },
+    { "name": "808 09", "note": 44, "file": "Trap 808 SignatureSounds.Org/808-09.wav" },
+    { "name": "808 10", "note": 45, "file": "Trap 808 SignatureSounds.Org/808-10.wav" },
+    { "name": "808 11", "note": 46, "file": "Trap 808 SignatureSounds.Org/808-11.wav" },
+    { "name": "808 12", "note": 47, "file": "Trap 808 SignatureSounds.Org/808-12.wav" }
+  ]
+}

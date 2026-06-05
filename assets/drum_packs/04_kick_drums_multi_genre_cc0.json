@@ -1,0 +1,18 @@
+{
+  "id": "kick_drums_multi_genre_cc0",
+  "name": "Kick Drums Multi Genre CC0",
+  "pads": [
+    { "name": "Kick Drum 01", "note": 36, "file": "Kick Drums - Multiple Genres/Kick Drum 1.wav" },
+    { "name": "Kick Drum 02", "note": 37, "file": "Kick Drums - Multiple Genres/Kick Drum 2.wav" },
+    { "name": "Kick Drum 03", "note": 38, "file": "Kick Drums - Multiple Genres/Kick Drum 3.wav" },
+    { "name": "Kick Drum 04", "note": 39, "file": "Kick Drums - Multiple Genres/Kick Drum 4.wav" },
+    { "name": "Kick Drum 05", "note": 40, "file": "Kick Drums - Multiple Genres/Kick Drum 5.wav" },
+    { "name": "Kick Drum 06", "note": 41, "file": "Kick Drums - Multiple Genres/Kick Drum 6.wav" },
+    { "name": "Kick Drum 07", "note": 42, "file": "Kick Drums - Multiple Genres/Kick Drum 7.wav" },
+    { "name": "Kick Drum 08", "note": 43, "file": "Kick Drums - Multiple Genres/Kick Drum 8.wav" },
+    { "name": "Kick Drum 09", "note": 44, "file": "Kick Drums - Multiple Genres/Kick Drum 9.wav" },
+    { "name": "Kick Drum 10", "note": 45, "file": "Kick Drums - Multiple Genres/Kick Drum 10.wav" },
+    { "name": "Kick Drum 11", "note": 46, "file": "Kick Drums - Multiple Genres/Kick Drum 11.wav" },
+    { "name": "Kick Drum 12", "note": 47, "file": "Kick Drums - Multiple Genres/Kick Drum 12.wav" }
+  ]
+}
