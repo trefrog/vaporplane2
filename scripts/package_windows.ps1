@@ -26,6 +26,11 @@ $CuratedDrumPackJsons = @(
     "06_cymbal_crashes_cc0.json",
     "07_stick_snaps_cc0.json"
 )
+$MingwRuntimeDlls = @(
+    "libgcc_s_seh-1.dll",
+    "libstdc++-6.dll",
+    "libwinpthread-1.dll"
+)
 
 function Show-Usage {
     Write-Host @"
@@ -187,6 +192,17 @@ function Resolve-Sdl3Dll {
     throw "Could not locate SDL3.dll. Pass -Sdl3Dll, set VAPORPLANE_SDL3_DLL, or install mingw-w64-x86_64-SDL3 under $Msys2Root."
 }
 
+function Copy-MingwRuntimeDlls {
+    $mingwBin = Join-Path $Msys2Root "mingw64\bin"
+    foreach ($dll in $MingwRuntimeDlls) {
+        $source = Join-Path $mingwBin $dll
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "MinGW runtime DLL not found: $source"
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $PackageDir $dll) -Force
+    }
+}
+
 function Require-File([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Required file missing: $Path"
@@ -206,6 +222,9 @@ function Verify-Package {
 
     Require-File (Join-Path $PackageDir "vaporplane.exe")
     Require-File (Join-Path $PackageDir "SDL3.dll")
+    foreach ($dll in $MingwRuntimeDlls) {
+        Require-File (Join-Path $PackageDir $dll)
+    }
     Require-File (Join-Path $PackageDir "README_FIRST.txt")
     Require-File (Join-Path $PackageDir "THIRD_PARTY_NOTICES.md")
     Require-File (Join-Path $PackageDir "licenses\LGPL-2.1.txt")
@@ -287,6 +306,9 @@ Copy-Item -LiteralPath $builtExecutable -Destination (Join-Path $PackageDir "vap
 Step "locate/copy SDL3.dll"
 $resolvedSdl3Dll = Resolve-Sdl3Dll
 Copy-Item -LiteralPath $resolvedSdl3Dll -Destination (Join-Path $PackageDir "SDL3.dll") -Force
+
+Step "copy MinGW runtime DLLs"
+Copy-MingwRuntimeDlls
 
 Step "copy starter sample"
 $wavDir = Join-Path $PackageDir "resources\wav"

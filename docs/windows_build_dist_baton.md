@@ -68,6 +68,9 @@ Inside:
 Vaporplane-windows-x64/
   vaporplane.exe
   SDL3.dll
+  libgcc_s_seh-1.dll
+  libstdc++-6.dll
+  libwinpthread-1.dll
   README_FIRST.txt
   THIRD_PARTY_NOTICES.md
   licenses/
@@ -116,6 +119,7 @@ run tests
 create package directory
 copy executable
 locate/copy SDL3.dll
+copy MinGW runtime DLLs
 copy starter sample
 copy starter drum packs
 write tester quickstart
@@ -142,6 +146,18 @@ Defaults:
 4. Fail with a clear message.
 
 Do not silently ship without `SDL3.dll`.
+
+The package must also include the MinGW runtime DLLs required by the MINGW64
+build:
+
+```text
+libgcc_s_seh-1.dll
+libstdc++-6.dll
+libwinpthread-1.dll
+```
+
+These live under `C:\msys64\mingw64\bin` by default, or the equivalent
+`mingw64\bin` directory under `-Msys2Root`.
 
 ## User Data Behavior To Verify
 
@@ -208,6 +224,8 @@ Artifact checks:
 
 - `vaporplane.exe` exists.
 - `SDL3.dll` exists beside `vaporplane.exe`.
+- `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, and `libwinpthread-1.dll` exist
+  beside `vaporplane.exe`.
 - `README_FIRST.txt` exists.
 - `THIRD_PARTY_NOTICES.md` exists.
 - `licenses/LGPL-2.1.txt` exists.
