@@ -2,73 +2,61 @@
 
 ## Summary
 
-This document is the handoff for turning Vaporplane's current Windows developer
-build into an explicit Windows distribution path. The macOS packaging work
-should be treated as the model: normal development builds stay fast and plain,
-while distribution work happens through a separate script/target.
+Vaporplane's supported local Windows build and distribution path is now
+MSYS2/MINGW64. The Visual Studio/vcpkg route was attempted and is not the local
+tester distribution target.
 
-Do not make Windows packaging part of the default build. Ordinary:
+Windows packaging remains explicit. Ordinary development builds should stay
+plain:
 
 ```text
 cmake --build build
 ```
 
-should continue to build only normal executable/test targets.
+Distribution work happens through `scripts/package_windows.ps1`.
 
 ## Current State
 
 - The app builds with CMake, C11/C++17, SDL3, and bundled SoundTouch.
 - `CMakeLists.txt` links `vaporplane` against `SDL3::SDL3` and `SoundTouch`.
 - SoundTouch is built from `third_party/soundtouch` with `SOUNDTOUCH_DLL OFF`,
-  so the current project shape expects SoundTouch to be statically linked into
-  the executable.
-- A local Windows helper exists at `scripts/build-win-mingw.cmd`.
-  - It assumes MSYS2 at `C:\msys64`.
-  - It configures `build-mingw` with Ninja.
-  - It copies `/mingw64/bin/SDL3.dll` into the build directory.
-- GitHub Actions already builds Windows with vcpkg on `windows-2022`.
-  - It installs `sdl3:x64-windows`.
-  - It configures CMake with the vcpkg toolchain.
-  - It builds Release, but currently does not run tests or create an artifact.
-- macOS distribution currently packages:
-  - executable
-  - SDL3 runtime library
-  - starter sample pair
-  - starter drum packs
-  - `THIRD_PARTY_NOTICES.md`
-  - `LGPL-2.1.txt`
-  - `CC0_License_For_Users.pdf`
-  - tester `README_FIRST.txt`
+  so the project expects SoundTouch to be statically linked into the executable.
+- `scripts/build-win-mingw.cmd` is a repo-relative Debug helper for MSYS2 at
+  `C:\msys64`.
+- `scripts/package_windows.ps1` is the Windows distribution entrypoint.
+- GitHub Actions still uses vcpkg on `windows-2022`; CI packaging is a
+  follow-up, not part of the local Windows distribution path.
 
-## Recommended Windows Distribution Shape
+## Windows Distribution Command
 
-Add a separate script, probably:
-
-```text
-scripts/package_windows.ps1
-```
-
-Recommended explicit modes:
+Default local package:
 
 ```text
 powershell -ExecutionPolicy Bypass -File scripts/package_windows.ps1 -Local
-powershell -ExecutionPolicy Bypass -File scripts/package_windows.ps1 -DistDir dist-package-test
 ```
 
-The first version does not need code signing. If signing is added later, keep it
-explicit and credential-free by default:
+Package into a test dist directory:
 
 ```text
-powershell -ExecutionPolicy Bypass -File scripts/package_windows.ps1 -Sign `
-  -CertificatePath path\to\cert.pfx
+powershell -ExecutionPolicy Bypass -File scripts/package_windows.ps1 -Local -DistDir dist-package-test
 ```
 
-Do not hardcode certificate paths, passwords, usernames, or machine-specific
-tool locations. Use script arguments and environment variables only.
+Supported overrides:
+
+```text
+-BuildDir build-windows-release
+-DistDir dist
+-Msys2Root C:\msys64
+-Sdl3Dll C:\path\to\SDL3.dll
+-Generator Ninja
+```
+
+The script does not install MSYS2 packages. It validates that required MINGW64
+tools and SDL3 are available and fails clearly if they are missing.
 
 ## Target Artifact Layout
 
-The Windows package should produce a zip like:
+The Windows package produces:
 
 ```text
 dist/Vaporplane-windows-x64.zip
@@ -98,17 +86,17 @@ Vaporplane-windows-x64/
       ...
 ```
 
-The app currently discovers bundled resources relative to `SDL_GetBasePath()`.
-For macOS this resolves through `Contents/MacOS/../Resources`. A Windows zip
-should add an explicit sibling-resource fallback in `src/app.c` so the app can
-find resources beside `vaporplane.exe`. Check both:
+The app discovers packaged resources relative to `SDL_GetBasePath()`:
 
 ```text
 <base>/../Resources
 <base>/resources
 ```
 
-Keep the fallback dev behavior intact:
+The first path supports macOS app bundles. The second path supports the Windows
+zip layout where `resources` sits beside `vaporplane.exe`.
+
+Development fallback behavior remains:
 
 ```text
 assets/samples
@@ -116,16 +104,15 @@ assets/drum_packs
 exports/
 ```
 
-## Script Requirements
+## Script Behavior
 
-The Windows packaging script should print each major step before doing it and
-stop immediately on failure, including the failed command/status.
-
-Suggested steps:
+The Windows package script runs these steps:
 
 ```text
+validate MSYS2/MINGW64 tools
 configure release build
 build executable
+run tests
 create package directory
 copy executable
 locate/copy SDL3.dll
@@ -133,48 +120,32 @@ copy starter sample
 copy starter drum packs
 write tester quickstart
 copy legal notices
-verify runtime dependencies
+verify package
 zip
 ```
 
-Recommended defaults:
+Defaults:
 
+- MSYS2 root: `C:\msys64`
+- MSYS environment: `MINGW64`
 - Build directory: `build-windows-release`
 - Dist directory: `dist`
 - Package directory: `Vaporplane-windows-x64`
 - Build type/config: `Release`
-- CMake generator: let CMake choose by default unless a generator is supplied.
-- Primary dependency path: vcpkg/MSVC, because CI already uses it.
-- Optional local path: MSYS2/MinGW, because `scripts/build-win-mingw.cmd`
-  already exists and copies `SDL3.dll`.
+- CMake generator: `Ninja`
 
-The script should accept overrides:
-
-```text
--BuildDir build-windows-release
--DistDir dist
--Sdl3Dll C:\path\to\SDL3.dll
--CMakeToolchainFile C:\path\to\vcpkg.cmake
--VcpkgTriplet x64-windows
-```
-
-## SDL3.dll Handling
-
-The package must include `SDL3.dll` beside `vaporplane.exe`.
-
-Acceptable lookup order:
+`SDL3.dll` lookup order:
 
 1. Explicit `-Sdl3Dll`.
 2. `$env:VAPORPLANE_SDL3_DLL`.
-3. vcpkg installed tree, if `VCPKG_INSTALLATION_ROOT` and triplet are known.
-4. MSYS2 fallback: `C:\msys64\mingw64\bin\SDL3.dll`.
-5. Fail with a clear message.
+3. `C:\msys64\mingw64\bin\SDL3.dll` or the equivalent under `-Msys2Root`.
+4. Fail with a clear message.
 
 Do not silently ship without `SDL3.dll`.
 
 ## User Data Behavior To Verify
 
-Packaged Windows builds should use SDL preference paths, matching macOS intent:
+Packaged Windows builds should use SDL preference paths:
 
 ```text
 samples/
@@ -184,14 +155,14 @@ exports/projects/
 exports/renders/
 ```
 
-Expected Windows location is likely under:
+Expected Windows preference area:
 
 ```text
 %APPDATA%\Vaporplane\Vaporplane\
 ```
 
-Verify this on a real Windows run; do not assume the exact resolved path until
-SDL reports it.
+The exact resolved path should be confirmed from SDL on a real Windows run. The
+sample selector shows the active WAV folder path.
 
 First-launch seeding should copy:
 
@@ -206,8 +177,8 @@ Current sentinels:
 .cc0_starter_drum_packs_seeded
 ```
 
-Deleting the seeded sample or drum kits after first launch should not make them
-reappear unless the sentinel is also removed.
+Deleting seeded content after first launch should not make it reappear unless
+the matching sentinel is also removed.
 
 ## Legal And Notices Payload
 
@@ -227,15 +198,7 @@ Important license facts to preserve in README/notice text:
 
 ## Test Plan
 
-Local or CI build:
-
-```text
-cmake -S . -B build-windows-release -DCMAKE_BUILD_TYPE=Release
-cmake --build build-windows-release --config Release --parallel
-ctest --test-dir build-windows-release --output-on-failure
-```
-
-Package smoke:
+Package smoke on Windows:
 
 ```text
 powershell -ExecutionPolicy Bypass -File scripts/package_windows.ps1 -Local -DistDir dist-package-test
@@ -252,7 +215,6 @@ Artifact checks:
 - `resources/wav/` contains only the Makaih demo WAV pair.
 - `resources/drum_packs/` contains the eight curated kit JSONs.
 - No `.DS_Store`, `._*`, or `.gitkeep` files are packaged.
-- No stale RealDrumSamples strings are present in the package.
 
 Runtime smoke on Windows:
 
@@ -266,18 +228,17 @@ Runtime smoke on Windows:
 
 ## CI Follow-Up
 
-After the script works locally, extend `.github/workflows/build.yml`:
+Leave GitHub Actions unchanged until the local MinGW package script is validated
+on Windows.
+
+Future CI work:
 
 - Run `ctest --test-dir build --output-on-failure`.
-- Add an optional packaging job or packaging step for Windows.
-- Upload `Vaporplane-windows-x64.zip` as an artifact.
+- Add an optional Windows packaging job or step.
+- Decide whether to switch Windows CI to MSYS2/MINGW64 or keep vcpkg as a CI-only
+  build signal.
+- Upload `Vaporplane-windows-x64.zip` as an artifact once CI packaging is
+  intentionally enabled.
 
-Keep packaging explicit. Do not make CI packaging imply that local default
+Keep packaging explicit. Do not make CI packaging imply that default local
 development builds must package.
-
-## Open Questions For The Implementer
-
-- Should the first Windows package target MSVC/vcpkg only, or also support
-  MSYS2/MinGW as a first-class package mode?
-- Is unsigned zip distribution acceptable for early testers, or should a later
-  explicit signing mode be planned before wider distribution?

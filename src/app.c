@@ -47,6 +47,8 @@ static bool app_bundle_resources_dir(char *out, size_t out_size) {
     const char *base = SDL_GetBasePath();
     if (!base || !base[0]) return false;
     path_join(out, out_size, base, "../Resources");
+    if (path_is_directory(out)) return true;
+    path_join(out, out_size, base, "resources");
     return path_is_directory(out);
 }
 

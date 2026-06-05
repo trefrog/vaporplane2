@@ -1,6 +1,7 @@
 build/
 build-macos-release/
 build-mingw/
+build-windows-release/
 dist/
 dist-*/
 .DS_Store

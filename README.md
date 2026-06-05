@@ -50,6 +50,24 @@ cmake --build build
 ./build/vaporplane
 ```
 
+On Windows, the supported local path is MSYS2 MINGW64. Install the needed
+MINGW64 packages first, then build from a normal Windows shell with:
+
+```bat
+scripts\build-win-mingw.cmd
+```
+
+To create an unsigned Windows tester zip:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/package_windows.ps1 -Local
+```
+
+The package script defaults to `C:\msys64`, Release, Ninja,
+`build-windows-release`, and `dist\Vaporplane-windows-x64.zip`. Use
+`-Msys2Root`, `-BuildDir`, `-DistDir`, `-Sdl3Dll`, or `-Generator` to override
+those defaults.
+
 If SDL3 is installed somewhere else, point `CMAKE_PREFIX_PATH` at that install
 prefix or make sure CMake can find the SDL3 package config.
 
