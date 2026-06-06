@@ -235,7 +235,7 @@ static double waveform_frame_grip_frames_per_beat(const App *app) {
     return (60.0 / app->clip.tempo_lock.bpm) * (double)app->clip.sample_rate;
 }
 
-static const double waveform_frame_snap_beats[] = { 1.0, 2.0, 3.0, 4.0, 8.0, 16.0 };
+static const double waveform_frame_snap_beats[] = { 1.0, 2.0, 3.0, 4.0, 8.0, 16.0, 32.0, 64.0 };
 
 static int waveform_frame_snap_count(void) {
     return (int)(sizeof(waveform_frame_snap_beats) / sizeof(waveform_frame_snap_beats[0]));

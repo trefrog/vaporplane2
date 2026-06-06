@@ -443,6 +443,32 @@ static int clamp_int(int value, int min_value, int max_value) {
     return value;
 }
 
+static void app_clamp_roster_scroll(App *app, int visible_rows) {
+    if (!app) return;
+    if (visible_rows < 1) visible_rows = 1;
+    app->roster_visible_rows = visible_rows;
+    if (app->roster_clip_count <= 0) {
+        app->selected_roster_clip = -1;
+        app->selected_roster_clip_armed = false;
+        app->roster_scroll_offset = 0;
+        return;
+    }
+    if (app->selected_roster_clip < 0) app->selected_roster_clip = 0;
+    if (app->selected_roster_clip >= app->roster_clip_count) {
+        app->selected_roster_clip = app->roster_clip_count - 1;
+    }
+    int max_scroll = app->roster_clip_count - visible_rows;
+    if (max_scroll < 0) max_scroll = 0;
+    app->roster_scroll_offset = clamp_int(app->roster_scroll_offset, 0, max_scroll);
+    if (app->selected_roster_clip < app->roster_scroll_offset) {
+        app->roster_scroll_offset = app->selected_roster_clip;
+    }
+    if (app->selected_roster_clip >= app->roster_scroll_offset + visible_rows) {
+        app->roster_scroll_offset = app->selected_roster_clip - visible_rows + 1;
+    }
+    app->roster_scroll_offset = clamp_int(app->roster_scroll_offset, 0, max_scroll);
+}
+
 static int64_t clamp_i64(int64_t value, int64_t min_value, int64_t max_value) {
     if (value < min_value) return min_value;
     if (value > max_value) return max_value;
@@ -2941,6 +2967,7 @@ void app_timeline_select_roster_delta(App *app, int delta) {
     app->selected_roster_clip += delta;
     if (app->selected_roster_clip < 0) app->selected_roster_clip = 0;
     if (app->selected_roster_clip >= app->roster_clip_count) app->selected_roster_clip = app->roster_clip_count - 1;
+    app_clamp_roster_scroll(app, app->roster_visible_rows);
     app->selected_roster_clip_armed = false;
 }
 
@@ -7314,6 +7341,8 @@ bool app_load_project_bundle(App *app, const char *bundle_path) {
     app->timeline.playing = false;
     app->transport.playing = false;
     app->selected_roster_clip = staged.roster_clip_count > 0 ? 0 : -1;
+    app->roster_scroll_offset = 0;
+    app->roster_visible_rows = 1;
     app->selected_roster_clip_armed = false;
     app->selected_drum_pattern = staged.drum_pattern_count > 0 ? 0 : -1;
     app->selected_drum_pattern_armed = false;
@@ -7581,6 +7610,7 @@ void app_delete_selected_roster_clip(App *app) {
         app->selected_roster_clip = clamp_int(delete_index, 0, app->roster_clip_count - 1);
         app->selected_roster_clip_armed = false;
     }
+    app_clamp_roster_scroll(app, app->roster_visible_rows);
     app->selected_timeline_instance = timeline_instance_ref_invalid();
     if (!timeline_has_instances(&app->timeline)) {
         app->timeline.timeline_cursor_tick = 0;
@@ -8253,7 +8283,7 @@ void app_snap_tempo_lock_downbeat_to_loop_start(App *app) {
 }
 
 void app_cycle_tempo_lock_target_bars(App *app, int direction) {
-    static const double options[] = {0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0};
+    static const double options[] = {0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0, 16.0};
     int count = (int)(sizeof(options) / sizeof(options[0]));
     int index = 0;
     double best = fabs(app->tempo_lock_draft.target_bars - options[0]);
@@ -9319,15 +9349,28 @@ static void app_render_timeline(App *app) {
                 SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 72.0f, "No patterns yet.");
             }
         } else {
+            int visible = ((int)roster_panel.h - 52) / 18;
+            if (visible < 1) visible = 1;
+            app_clamp_roster_scroll(app, visible);
+
             SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 14.0f, "ROSTER");
+            if (app->roster_clip_count > 0) {
+                SDL_RenderDebugTextFormat(app->renderer,
+                                          roster_panel.x + roster_panel.w - 78.0f,
+                                          roster_panel.y + 14.0f,
+                                          "%d/%d",
+                                          app->selected_roster_clip + 1,
+                                          app->roster_clip_count);
+            }
             SDL_RenderDebugText(app->renderer, roster_panel.x + 14.0f, roster_panel.y + 28.0f, "BPM");
             SDL_RenderDebugText(app->renderer, roster_panel.x + 92.0f, roster_panel.y + 28.0f, "CLIP");
             SDL_RenderDebugText(app->renderer, roster_panel.x + roster_panel.w - 54.0f, roster_panel.y + 28.0f, "BEATS");
-            int visible = ((int)roster_panel.h - 52) / 18;
-            if (visible > app->roster_clip_count) visible = app->roster_clip_count;
-            for (int i = 0; i < visible; ++i) {
+            int first = app->roster_scroll_offset;
+            int last = first + visible;
+            if (last > app->roster_clip_count) last = app->roster_clip_count;
+            for (int i = first; i < last; ++i) {
                 RosterClip *clip = &app->roster[i];
-                float y = roster_panel.y + 48.0f + (float)i * 18.0f;
+                float y = roster_panel.y + 48.0f + (float)(i - first) * 18.0f;
                 if (i == app->selected_roster_clip) {
                     SDL_FRect row = { roster_panel.x + 10.0f, y - 3.0f, roster_panel.w - 20.0f, 16.0f };
                     if (app->selected_roster_clip_armed) SDL_SetRenderDrawColor(app->renderer, 86, 78, 38, 230);
@@ -10873,6 +10916,8 @@ bool app_init(App *app){
     app->timeline_edit_ghost_lane = 0;
     app->timeline_edit_ghost_seam_side = TIMELINE_SEAM_NONE;
     app->selected_roster_clip = -1;
+    app->roster_scroll_offset = 0;
+    app->roster_visible_rows = 1;
     app->selected_roster_clip_armed = false;
     app->selected_drum_pattern = -1;
     app->selected_drum_pattern_armed = false;

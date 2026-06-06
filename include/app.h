@@ -294,6 +294,8 @@ typedef struct App {
     int64_t timeline_edit_duration_ticks;
     bool timeline_edit_ghost_valid;
     int selected_roster_clip;
+    int roster_scroll_offset;
+    int roster_visible_rows;
     bool selected_roster_clip_armed;
     int selected_drum_pattern;
     bool selected_drum_pattern_armed;
