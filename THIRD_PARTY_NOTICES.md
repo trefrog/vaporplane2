@@ -48,6 +48,21 @@ the following restrictions:
 For packaged binary builds, Vaporplane may bundle the SDL3 runtime library, such
 as `SDL3.dll` on Windows or `libSDL3.0.dylib` on macOS.
 
+## libsndfile
+
+**Name:** libsndfile
+**Website:** https://libsndfile.github.io/libsndfile/
+**Source:** https://github.com/libsndfile/libsndfile
+**License:** GNU Lesser General Public License, version 2.1 or version 3
+
+Vaporplane can optionally use libsndfile for importing audio file formats beyond
+WAV, such as FLAC, MP3, AIFF, and AIF, when libsndfile is available at build
+time.
+
+If Vaporplane is distributed as a binary linked with libsndfile, the distribution
+must comply with the applicable LGPL terms for libsndfile and any codec
+libraries that libsndfile uses in that build.
+
 ## SoundTouch
 
 **Name:** SoundTouch Audio Processing Library

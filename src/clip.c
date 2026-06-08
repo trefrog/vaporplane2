@@ -1,5 +1,7 @@
 #include "clip.h"
+#include "audio_file.h"
 #include <SDL3/SDL.h>
+#include <limits.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -86,17 +88,32 @@ static void clip_load_sidecar_metadata(AudioClip *clip, const char *path) {
     SDL_free(json);
 }
 
-bool clip_init_from_wav(AudioClip *clip, const char *path) {
+bool clip_init_from_audio_file(AudioClip *clip, const char *path) {
     memset(clip, 0, sizeof(*clip));
-    SDL_AudioSpec src_spec; Uint8 *buf = NULL; Uint32 len = 0;
-    if (!SDL_LoadWAV(path, &src_spec, &buf, &len)) return false;
+    AudioFileData decoded;
+    if (!audio_file_decode(&decoded, path)) return false;
+    if (decoded.sample_rate <= 0 || decoded.channels <= 0 ||
+        decoded.frame_count == 0 || !decoded.samples) {
+        audio_file_data_destroy(&decoded);
+        return false;
+    }
 
     Uint8 *converted = NULL; int converted_len = 0;
-    SDL_AudioSpec dst = { .format = SDL_AUDIO_F32, .channels = 2, .freq = src_spec.freq };
-    if (!SDL_ConvertAudioSamples(&src_spec, buf, (int)len, &dst, &converted, &converted_len)) {
-        SDL_free(buf); return false;
+    Uint64 decoded_bytes = (Uint64)decoded.frame_count * (Uint64)decoded.channels * sizeof(float);
+    if (decoded_bytes > (Uint64)INT_MAX) {
+        audio_file_data_destroy(&decoded);
+        return false;
     }
-    SDL_free(buf);
+    SDL_AudioSpec src = { .format = SDL_AUDIO_F32, .channels = decoded.channels, .freq = decoded.sample_rate };
+    SDL_AudioSpec dst = { .format = SDL_AUDIO_F32, .channels = 2, .freq = decoded.sample_rate };
+    if (!SDL_ConvertAudioSamples(&src, (const Uint8 *)decoded.samples, (int)decoded_bytes, &dst, &converted, &converted_len)) {
+        audio_file_data_destroy(&decoded); return false;
+    }
+    audio_file_data_destroy(&decoded);
+    if (converted_len <= 0 || (converted_len % (int)(sizeof(float) * (size_t)dst.channels)) != 0) {
+        SDL_free(converted);
+        return false;
+    }
 
     clip->sample_rate = dst.freq;
     clip->channels = dst.channels;
@@ -108,6 +125,10 @@ bool clip_init_from_wav(AudioClip *clip, const char *path) {
     clip_defaults(clip);
     clip_load_sidecar_metadata(clip, path);
     return true;
+}
+
+bool clip_init_from_wav(AudioClip *clip, const char *path) {
+    return clip_init_from_audio_file(clip, path);
 }
 
 void clip_init_generated(AudioClip *clip, int sample_rate, float seconds) {

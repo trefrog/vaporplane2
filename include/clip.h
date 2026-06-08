@@ -35,6 +35,7 @@ typedef struct {
 } AudioClip;
 
 bool clip_init_from_wav(AudioClip *clip, const char *path);
+bool clip_init_from_audio_file(AudioClip *clip, const char *path);
 void clip_init_generated(AudioClip *clip, int sample_rate, float seconds);
 void clip_destroy(AudioClip *clip);
 void clip_reset_loop(AudioClip *clip);

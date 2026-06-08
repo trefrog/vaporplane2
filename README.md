@@ -3,10 +3,10 @@
 Vaporplane is a small C11 + SDL3 sample-loop instrument for vaporwave-style
 editing, loop archaeology, and gamepad-first timeline sketching.
 
-It is built around a waveform-as-playfield workflow: load a WAV, trim a loop,
-calibrate it against musical time, capture it into a roster, and place those
-captured clips on a compact tick-based timeline. The target is an immediate,
-tactile instrument rather than a conventional DAW.
+It is built around a waveform-as-playfield workflow: load an audio file, trim a
+loop, calibrate it against musical time, capture it into a roster, and place
+those captured clips on a compact tick-based timeline. The target is an
+immediate, tactile instrument rather than a conventional DAW.
 
 [⬇️ see it in action on youtube 🔴]
 [![Vaporplane demo](https://img.youtube.com/vi/MDcz9ypPbWk/maxresdefault.jpg)](https://www.youtube.com/watch?v=MDcz9ypPbWk)
@@ -17,10 +17,11 @@ Not a DAW.
 
 - Waveform editor with smooth pan/zoom, loop start/end markers, playhead, and
   live loop audition.
-- `assets/samples/` browser for `*.wav` files, with generated fallback audio if
-  no sample is available.
-- Optional `*.wav.json` sidecars for source BPM, meter, target length, and
-  downbeat metadata.
+- `assets/samples/` browser for WAV files, plus FLAC, MP3, AIFF, and AIF when
+  libsndfile is available, with generated fallback audio if no sample is
+  available.
+- Optional audio-file sidecars such as `*.wav.json`, `*.flac.json`, or
+  `*.mp3.json` for source BPM, meter, target length, and downbeat metadata.
 - Tempo Lock mode for calibrating loops by BPM, downbeat, meter, and target
   bars before capture.
 - Roster capture: the current loop becomes an owned in-memory PCM clip with
@@ -44,14 +45,19 @@ Requirements:
 - CMake 3.20+
 - C11 compiler
 - SDL3
+- libsndfile optional, for FLAC/MP3/AIFF import
 
-On macOS with Homebrew SDL3:
+On macOS with Homebrew SDL3 and optional libsndfile:
 
 ```bash
-cmake -S . -B build -DCMAKE_PREFIX_PATH="$(brew --prefix sdl3)"
+brew install sdl3 libsndfile
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$(brew --prefix sdl3);$(brew --prefix libsndfile)"
 cmake --build build
 ./build/vaporplane
 ```
+
+To force the WAV-only fallback build, configure with
+`-DVAPORPLANE_ENABLE_SNDFILE=OFF`.
 
 On Windows, the supported local path is MSYS2 MINGW64. Install the needed
 MINGW64 packages first, then build from a normal Windows shell with:
@@ -76,17 +82,20 @@ prefix or make sure CMake can find the SDL3 package config.
 
 ## Samples
 
-Put WAV files in:
+Put audio files in:
 
 ```text
 assets/samples/
 ```
 
-Vaporplane lists those files in the in-app sample selector. Sidecar metadata can
-live next to a sample as:
+Vaporplane always lists WAV files. If libsndfile is found at build time, it also
+lists FLAC, MP3, AIFF, and AIF files. Sidecar metadata can live next to a sample
+as:
 
 ```text
 sample.wav.json
+sample.flac.json
+sample.mp3.json
 ```
 
 The sidecar parser currently understands simple tempo-lock fields such as BPM,
@@ -95,7 +104,7 @@ sidecar for the active source after confirmation.
 
 ## Core Workflow
 
-1. Open the app and load a WAV from the sample selector.
+1. Open the app and load an audio file from the sample selector.
 2. Trim the loop start/end markers in the waveform view.
 3. Use Tempo Lock when the loop needs musical calibration.
 4. Capture the loop into the roster.

@@ -30,6 +30,20 @@ static bool path_is_directory(const char *path) {
     return path && path[0] && SDL_GetPathInfo(path, &info) && info.type == SDL_PATHTYPE_DIRECTORY;
 }
 
+static bool app_sample_extension_supported(const char *name) {
+    const char *dot = name ? SDL_strrchr(name, '.') : NULL;
+    if (!dot) return false;
+    if (SDL_strcasecmp(dot, ".wav") == 0) return true;
+#ifdef VAPORPLANE_HAVE_SNDFILE
+    return SDL_strcasecmp(dot, ".flac") == 0 ||
+           SDL_strcasecmp(dot, ".mp3") == 0 ||
+           SDL_strcasecmp(dot, ".aiff") == 0 ||
+           SDL_strcasecmp(dot, ".aif") == 0;
+#else
+    return false;
+#endif
+}
+
 static void path_join(char *out, size_t out_size, const char *base, const char *leaf) {
     if (!out || out_size == 0) return;
     if (!base || !base[0]) {
@@ -2510,7 +2524,7 @@ static void app_active_sidecar_tempo_params(App *app, TempoLockParams *params) {
 void app_request_write_tempo_sidecar(App *app) {
     if (app->view_mode != APP_VIEW_WAVEFORM) return;
     if (app->waveform_source_mode != WAVEFORM_SOURCE_WAV || !app->waveform_source_path[0]) {
-        app_set_status(app, "Sidecar write is source WAV only");
+        app_set_status(app, "Sidecar write is source audio only");
         return;
     }
     app->waveform_sidecar_confirm_open = true;
@@ -2527,7 +2541,7 @@ void app_confirm_write_tempo_sidecar(App *app) {
     if (!app->waveform_sidecar_confirm_open) return;
     app->waveform_sidecar_confirm_open = false;
     if (app->waveform_source_mode != WAVEFORM_SOURCE_WAV || !app->waveform_source_path[0]) {
-        app_set_status(app, "Sidecar write is source WAV only");
+        app_set_status(app, "Sidecar write is source audio only");
         return;
     }
 
@@ -8333,13 +8347,17 @@ void app_refresh_sample_list(App *app) {
     app_resolve_sample_dir(app);
 
     int count = 0;
-    char **names = SDL_GlobDirectory(app->sample_dir, "*.wav", SDL_GLOB_CASEINSENSITIVE, &count);
+    char **names = SDL_GlobDirectory(app->sample_dir, "*", SDL_GLOB_CASEINSENSITIVE, &count);
     if (!names) return;
     qsort(names, (size_t)count, sizeof(char *), compare_strings);
 
     for (int i = 0; i < count && app->sample_count < APP_MAX_SAMPLES; ++i) {
+        if (!app_sample_extension_supported(names[i])) continue;
+        char path[CLIP_MAX_PATH];
+        path_join(path, sizeof(path), app->sample_dir, names[i]);
+        if (path_is_directory(path)) continue;
         SampleEntry *entry = &app->samples[app->sample_count++];
-        path_join(entry->path, sizeof(entry->path), app->sample_dir, names[i]);
+        SDL_strlcpy(entry->path, path, sizeof(entry->path));
         SDL_strlcpy(entry->name, names[i], sizeof(entry->name));
     }
     SDL_free(names);
@@ -8347,8 +8365,8 @@ void app_refresh_sample_list(App *app) {
 
 bool load_clip_from_path(App *app, const char *path) {
     AudioClip next;
-    if (!clip_init_from_wav(&next, path)) {
-        app_set_status(app, "Could not load WAV");
+    if (!clip_init_from_audio_file(&next, path)) {
+        app_set_status(app, "Could not load audio file");
         return false;
     }
 
@@ -8388,7 +8406,7 @@ bool load_clip_from_path(App *app, const char *path) {
 
 bool app_load_selected_sample(App *app) {
     if (app->sample_count <= 0) {
-        SDL_snprintf(app->status_text, sizeof(app->status_text), "No WAV files in %s", app->sample_dir);
+        SDL_snprintf(app->status_text, sizeof(app->status_text), "No supported audio files in %s", app->sample_dir);
         return false;
     }
     return load_clip_from_path(app, app->samples[app->selected_sample].path);
@@ -10748,7 +10766,7 @@ static void app_render_overlay(App *app) {
         SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 30.0f, "Up/Down select   Return load   Tab close");
 
         if (app->sample_count <= 0) {
-            SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 58.0f, "No WAV files found.");
+            SDL_RenderDebugText(app->renderer, panel.x + 16.0f, panel.y + 58.0f, "No supported audio files found.");
             return;
         }
 
