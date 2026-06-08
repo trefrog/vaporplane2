@@ -8,6 +8,8 @@ calibrate it against musical time, capture it into a roster, and place those
 captured clips on a compact tick-based timeline. The target is an immediate,
 tactile instrument rather than a conventional DAW.
 
+[![Vaporplane demo](https://img.youtube.com/vi/MDcz9ypPbWk/maxresdefault.jpg)](https://www.youtube.com/watch?v=MDcz9ypPbWk)
+
 Not a DAW.
 
 ## Current Shape
