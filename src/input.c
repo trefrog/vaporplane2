@@ -69,6 +69,32 @@ static void nudge_loop_edge(App *app, int target, long frames) {
     app_note_loop_anchors_moved(app);
 }
 
+static void waveform_loop_edge_disarm(App *app) {
+    if(!app) return;
+    app->waveform_loop_edge_arm = WAVEFORM_LOOP_EDGE_ARM_NONE;
+}
+
+static void waveform_loop_edge_arm(App *app, WaveformLoopEdgeArm arm) {
+    if(!app) return;
+    app->waveform_loop_edge_arm = arm;
+    switch(arm) {
+        case WAVEFORM_LOOP_EDGE_ARM_START:
+            gamepad_edit_target = 0;
+            app_focus_loop_start(app);
+            SDL_strlcpy(app->status_text, "Loop start armed: D-pad L/R trims", sizeof(app->status_text));
+            break;
+        case WAVEFORM_LOOP_EDGE_ARM_END:
+            gamepad_edit_target = 1;
+            app_focus_loop_end(app);
+            SDL_strlcpy(app->status_text, "Loop end armed: D-pad L/R trims", sizeof(app->status_text));
+            break;
+        case WAVEFORM_LOOP_EDGE_ARM_NONE:
+        default:
+            waveform_loop_edge_disarm(app);
+            break;
+    }
+}
+
 static size_t visible_frame_count(App *app) {
     size_t start = 0, end = 0;
     waveform_view_get_frame_bounds(&app->view, &app->clip, &start, &end);
@@ -1001,6 +1027,7 @@ void input_update_gamepad(App *app, double dt){
     bool left_shoulder_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
     bool right_shoulder_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
     bool left_stick_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    bool right_stick_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
 
     if(app->waveform_sidecar_confirm_open) {
         if(south_pressed) app_confirm_write_tempo_sidecar(app);
@@ -1009,6 +1036,7 @@ void input_update_gamepad(App *app, double dt){
     }
 
     if(r2_shift && start_pressed && !app->waveform_frame_grip_active) {
+        if(app->view_mode == APP_VIEW_WAVEFORM) waveform_loop_edge_disarm(app);
         app_toggle_view_mode(app);
         return;
     }
@@ -1278,10 +1306,12 @@ void input_update_gamepad(App *app, double dt){
 
     if(waveform_frame_grip_available(app)) {
         if(l2_shift && app->waveform_frame_grip_active) {
+            waveform_loop_edge_disarm(app);
             waveform_frame_grip_update(app, ly, dt, r2_shift);
             return;
         }
         if(l2_shift && !r2_shift) {
+            waveform_loop_edge_disarm(app);
             app->waveform_frame_grip_l2_seconds += dt;
             if(app->waveform_frame_grip_l2_seconds >= WAVEFORM_FRAME_GRIP_L2_ARM_SECONDS) {
                 waveform_frame_grip_update(app, ly, dt, false);
@@ -1304,6 +1334,9 @@ void input_update_gamepad(App *app, double dt){
     }
 
     if(r2_shift) {
+        if(south_pressed || east_pressed || west_pressed || north_pressed || back_pressed) {
+            waveform_loop_edge_disarm(app);
+        }
         if(l2_shift && south_pressed) app_capture_current_loop_to_roster(app);
         else if(l2_shift && back_pressed) app_request_write_tempo_sidecar(app);
         else if(south_pressed) set_loop_to_visible(app);
@@ -1311,6 +1344,11 @@ void input_update_gamepad(App *app, double dt){
         if(east_pressed) app_clear_tempo_lock(app);
         if(south_pressed || north_pressed || east_pressed || back_pressed) return;
     } else {
+        bool canceling_normal_action =
+            south_pressed || east_pressed || west_pressed || north_pressed ||
+            start_pressed || back_pressed || left_stick_pressed || right_stick_pressed;
+        if(canceling_normal_action) waveform_loop_edge_disarm(app);
+
         if(south_pressed) toggle_playing(app);
         if(start_pressed) app_waveform_menu_open(app);
         if(east_pressed) jump_to_loop_start(app);
@@ -1322,21 +1360,17 @@ void input_update_gamepad(App *app, double dt){
             gamepad_edit_target=1;
             app_focus_loop_end(app);
         }
+        if(!canceling_normal_action) {
+            if(left_shoulder_pressed) waveform_loop_edge_arm(app, WAVEFORM_LOOP_EDGE_ARM_START);
+            if(right_shoulder_pressed) waveform_loop_edge_arm(app, WAVEFORM_LOOP_EDGE_ARM_END);
+        }
     }
 
-    if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) {
+    if(right_stick_pressed) {
         app_refresh_sample_list(app);
         app->sample_selector_open=true;
     }
     if(back_pressed) toggle_metronome(app);
-    if(left_shoulder_pressed) {
-        gamepad_edit_target=0;
-        app_focus_loop_start(app);
-    }
-    if(right_shoulder_pressed) {
-        gamepad_edit_target=1;
-        app_focus_loop_end(app);
-    }
     if(left_stick_pressed) {
         app_clear_waveform_frame_grip(app);
         clip_reset_loop(&app->clip);
@@ -1357,18 +1391,16 @@ void input_update_gamepad(App *app, double dt){
     if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app->view.target_span *= 1.0 - fmin(0.9, dt * 1.8);
     if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app->view.target_span *= 1.0 + dt * 1.8;
 
-    if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) {
-        gamepad_edit_target = 0;
-    }
-    if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
-        gamepad_edit_target = 1;
-    }
     long dpad_step = (long)((double)visible_frame_count(app) * 0.1 * dt * (1.0 - left_trigger * 0.8));
     if(dpad_step < 1) dpad_step = 1;
     long trim_frames = 0;
     if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) trim_frames -= dpad_step;
     if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) trim_frames += dpad_step;
-    if(trim_frames != 0) nudge_loop_edge(app, gamepad_edit_target, trim_frames);
+    if(trim_frames != 0) {
+        if(app->waveform_loop_edge_arm == WAVEFORM_LOOP_EDGE_ARM_START) nudge_loop_edge(app, 0, trim_frames);
+        else if(app->waveform_loop_edge_arm == WAVEFORM_LOOP_EDGE_ARM_END) nudge_loop_edge(app, 1, trim_frames);
+        else SDL_strlcpy(app->status_text, "L1/R1 arms loop trim", sizeof(app->status_text));
+    }
 
     clamp_view_target(app);
 }

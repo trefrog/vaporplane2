@@ -151,6 +151,12 @@ typedef enum {
 } WaveformFrameGripAnchor;
 
 typedef enum {
+    WAVEFORM_LOOP_EDGE_ARM_NONE,
+    WAVEFORM_LOOP_EDGE_ARM_START,
+    WAVEFORM_LOOP_EDGE_ARM_END
+} WaveformLoopEdgeArm;
+
+typedef enum {
     APP_TEXT_ENTRY_DISPLAY_NAME,
     APP_TEXT_ENTRY_FILENAME_SAFE,
     APP_TEXT_ENTRY_SEARCH_FILTER
@@ -200,6 +206,7 @@ typedef struct App {
     char waveform_render_error[96];
     bool roster_commit_menu_open;
     int roster_commit_menu_selected;
+    WaveformLoopEdgeArm waveform_loop_edge_arm;
     bool waveform_frame_grip_active;
     bool waveform_frame_grip_exact_valid;
     size_t waveform_frame_grip_left_frame;

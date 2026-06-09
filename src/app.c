@@ -1697,6 +1697,7 @@ static void app_set_waveform_source_generated(App *app) {
     app->waveform_menu_open = false;
     app->waveform_render_dialog_open = false;
     app->roster_commit_menu_open = false;
+    app->waveform_loop_edge_arm = WAVEFORM_LOOP_EDGE_ARM_NONE;
 }
 
 static void app_set_waveform_source_wav(App *app, const char *path) {
@@ -1709,6 +1710,7 @@ static void app_set_waveform_source_wav(App *app, const char *path) {
     app->waveform_menu_open = false;
     app->waveform_render_dialog_open = false;
     app->roster_commit_menu_open = false;
+    app->waveform_loop_edge_arm = WAVEFORM_LOOP_EDGE_ARM_NONE;
 }
 
 static void app_set_waveform_source_roster(App *app, int roster_index, const RosterClip *clip) {
@@ -1725,6 +1727,7 @@ static void app_set_waveform_source_roster(App *app, int roster_index, const Ros
     app->waveform_menu_open = false;
     app->waveform_render_dialog_open = false;
     app->roster_commit_menu_open = false;
+    app->waveform_loop_edge_arm = WAVEFORM_LOOP_EDGE_ARM_NONE;
 }
 
 void app_clear_waveform_frame_grip(App *app) {
@@ -8478,9 +8481,10 @@ static void app_render_controls_legend(App *app) {
         { "Esc", "Cancel / Project menu", "East", false },
         { "", "WAVEFORM", "", true },
         { "Space", "Play / pause", "South / Start", false },
-        { "A / D", "Move loop start", "", false },
-        { "J / L", "Move loop end", "", false },
-        { "Arrows", "Trim / zoom", "D-pad", false },
+        { "A / D", "Move loop start", "L1 arms start", false },
+        { "J / L", "Move loop end", "R1 arms end", false },
+        { "", "Trim armed edge", "D-pad L/R", false },
+        { "Up / Down", "Zoom waveform", "D-pad U/D", false },
         { "T", "Tempo Lock", "R2+North", false },
         { "", "Set visible loop", "R2+South", false },
         { "", "Capture to roster", "L2+R2+South", false },
@@ -10869,6 +10873,7 @@ bool app_init(App *app){
     app->waveform_render_error[0] = '\0';
     app->roster_commit_menu_open = false;
     app->roster_commit_menu_selected = 0;
+    app->waveform_loop_edge_arm = WAVEFORM_LOOP_EDGE_ARM_NONE;
     app->text_entry_open = false;
     app->text_entry_mode = APP_TEXT_ENTRY_DISPLAY_NAME;
     app->text_entry_action = APP_TEXT_ENTRY_ACTION_NONE;

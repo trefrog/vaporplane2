@@ -340,6 +340,7 @@ User folders:
 Waveform:
 - Space or South/Start plays.
 - A/D move loop start; J/L move loop end.
+- Gamepad: L1/R1 arms loop start/end; D-pad L/R trims only the armed edge; D-pad U/D zooms.
 - T opens Tempo Lock when the loop needs BPM/downbeat calibration.
 - L2+R2+South captures the current calibrated loop into the roster.
 
