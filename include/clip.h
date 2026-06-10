@@ -27,6 +27,8 @@ typedef struct {
     double clip_metadata_bpm;
     bool clip_tempo_locked;
     TempoLockParams tempo_lock;
+    bool has_full_source_tempo_metadata;
+    TempoLockParams full_source_tempo_metadata;
     int beats_per_bar;
     int beat_unit;
     size_t downbeat_frame;

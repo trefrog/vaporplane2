@@ -25,6 +25,10 @@ static void app_set_audio_unavailable_status(App *app) {
     app_set_status(app, "Audio unavailable");
 }
 
+static double bytes_to_mib(size_t bytes) {
+    return (double)bytes / (1024.0 * 1024.0);
+}
+
 static bool path_is_directory(const char *path) {
     SDL_PathInfo info;
     return path && path[0] && SDL_GetPathInfo(path, &info) && info.type == SDL_PATHTYPE_DIRECTORY;
@@ -442,6 +446,14 @@ static int next_capture_number(const App *app, const char *base) {
         }
     }
     return max_seen + 1;
+}
+
+static bool roster_clip_name_exists(const App *app, const char *name) {
+    if (!app || !name || !name[0]) return false;
+    for (int i = 0; i < app->roster_clip_count; ++i) {
+        if (SDL_strcmp(app->roster[i].name, name) == 0) return true;
+    }
+    return false;
 }
 
 static int64_t beats_to_ticks(double beats, int ticks_per_beat) {
@@ -1151,6 +1163,24 @@ static void sync_timeline_play_range(App *app) {
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
 }
 
+static void app_ensure_roster_timeline_surface_no_lock(App *app) {
+    if (!app || app->timeline.initialized) return;
+    app->timeline.initialized = true;
+    if (app->timeline.ticks_per_beat <= 0) {
+        app->timeline.ticks_per_beat = app->transport.ppqn > 0 ? app->transport.ppqn : 960;
+    }
+    if (app->timeline.timeline_bpm <= 0.0) {
+        app->timeline.timeline_bpm = app->transport.bpm > 0.0 ? app->transport.bpm : TIMELINE_DEFAULT_BPM;
+    }
+    if (app->timeline.timeline_beats_per_bar <= 0) app->timeline.timeline_beats_per_bar = 4;
+    if (app->timeline.timeline_beat_unit <= 0) app->timeline.timeline_beat_unit = 4;
+    if (app->timeline.view_span_ticks <= 0.0) {
+        app->timeline.view_span_ticks = (double)app->timeline.ticks_per_beat * 4.0;
+    }
+    timeline_ensure_tempo_anchor_no_lock(&app->timeline);
+    sync_timeline_play_range_no_lock(app);
+}
+
 static void app_timeline_fit_play_range_anchors(App *app) {
     if (!app->timeline.initialized || app->timeline.length_ticks <= 0) return;
     int64_t start = 0, end = 0;
@@ -1835,6 +1865,7 @@ static bool app_get_explicit_loop_calibration(const App *app, TempoLockParams *p
 static const char *waveform_menu_item_label(const App *app, WaveformMenuItem item) {
     switch (item) {
         case WAVEFORM_MENU_ITEM_NORMALIZE: return "Normalize";
+        case WAVEFORM_MENU_ITEM_CAPTURE_WHOLE_SOURCE: return "Send whole source to roster";
         case WAVEFORM_MENU_ITEM_RENDER_TEMPO:
             return app_get_explicit_loop_calibration(app, NULL) ? "Render tempo to BPM..." : "Render tempo percent...";
         case WAVEFORM_MENU_ITEM_RENDER_PITCH: return "Render pitch semitones...";
@@ -2057,6 +2088,148 @@ static void app_capture_current_loop_to_roster_new(App *app) {
 
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Captured %s to roster", app->roster[roster_index].name);
+}
+
+static bool app_capture_whole_source_to_roster(App *app) {
+    if (!app || app->view_mode != APP_VIEW_WAVEFORM ||
+        app->waveform_source_mode != WAVEFORM_SOURCE_WAV ||
+        !app->waveform_source_path[0]) {
+        app_set_status(app, "Whole-source capture is source audio only");
+        return false;
+    }
+    if (!app->clip.samples || app->clip.frame_count == 0 ||
+        app->clip.channels <= 0 || app->clip.sample_rate <= 0) {
+        app_set_status(app, "No source to capture");
+        return false;
+    }
+    if (app->roster_clip_count >= APP_MAX_ROSTER_CLIPS) {
+        app_set_status(app, "Roster full");
+        return false;
+    }
+
+    size_t channels = (size_t)app->clip.channels;
+    if (app->clip.frame_count > SIZE_MAX / channels) {
+        app_set_status(app, "source too large for long roster capture");
+        return false;
+    }
+    size_t sample_count = app->clip.frame_count * channels;
+    if (sample_count > SIZE_MAX / sizeof(float)) {
+        app_set_status(app, "source too large for long roster capture");
+        return false;
+    }
+    size_t byte_count = sample_count * sizeof(float);
+    if (byte_count > APP_MAX_LONG_CAPTURE_BYTES) {
+        double needed_mib = bytes_to_mib(byte_count);
+        double limit_mib = bytes_to_mib(APP_MAX_LONG_CAPTURE_BYTES);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Long roster capture rejected: source needs %.1f MiB, limit %.1f MiB",
+                    needed_mib,
+                    limit_mib);
+        SDL_snprintf(app->status_text,
+                     sizeof(app->status_text),
+                     "source too large for long roster capture (needs %.1f MiB, limit %.0f MiB)",
+                     needed_mib,
+                     limit_mib);
+        return false;
+    }
+
+    float *samples = (float *)SDL_malloc(byte_count);
+    if (!samples) {
+        app_set_status(app, "Memory allocation failed");
+        return false;
+    }
+    SDL_memcpy(samples, app->clip.samples, byte_count);
+
+    RosterClip next;
+    SDL_memset(&next, 0, sizeof(next));
+    generate_stable_id("sample", next.sample_id, sizeof(next.sample_id));
+    generate_stable_id("roster", next.roster_clip_id, sizeof(next.roster_clip_id));
+
+    char source_base[APP_ROSTER_CLIP_NAME_MAX];
+    capture_base_name(&app->clip, source_base, sizeof(source_base));
+    char whole_base[APP_ROSTER_CLIP_NAME_MAX];
+    SDL_snprintf(whole_base, sizeof(whole_base), "%s whole", source_base);
+    if (roster_clip_name_exists(app, whole_base)) {
+        int number = next_capture_number(app, whole_base);
+        SDL_snprintf(next.name, sizeof(next.name), "%s#%03d", whole_base, number);
+    } else {
+        SDL_strlcpy(next.name, whole_base, sizeof(next.name));
+    }
+
+    const char *source_path = app->waveform_source_path[0] ? app->waveform_source_path : app->clip.file_path;
+    SDL_strlcpy(next.source_path, source_path, sizeof(next.source_path));
+    next.source_loop_start_frame = 0;
+    next.source_loop_end_frame = app->clip.frame_count;
+    next.source_sample_rate = app->clip.sample_rate;
+    next.loop_start_frame = 0;
+    next.loop_end_frame = app->clip.frame_count;
+    next.sample_rate = app->clip.sample_rate;
+    next.channels = app->clip.channels;
+    next.frame_count = app->clip.frame_count;
+    next.samples = samples;
+    next.midi_note = app_next_available_midi_note(app);
+    next.midi_channel = 0;
+    next.midi_velocity = 127;
+    next.color = roster_color_for_append(app);
+
+    if (app->clip.has_full_source_tempo_metadata) {
+        TempoLockParams tempo = app->clip.full_source_tempo_metadata;
+        next.tempo_calibrated = tempo.bpm > 0.0 &&
+            tempo.beats_per_bar > 0 &&
+            tempo.beat_unit > 0 &&
+            tempo.target_bars > 0.0;
+        if (next.tempo_calibrated) {
+            next.source_bpm = timeline_clamp_bpm(tempo.bpm);
+            next.beats_per_bar = tempo.beats_per_bar;
+            next.beat_unit = tempo.beat_unit;
+            next.target_bars = tempo.target_bars;
+            next.target_beats = tempo.target_bars * (double)tempo.beats_per_bar;
+            next.downbeat_offset_frames = tempo.downbeat_frame < next.frame_count ? tempo.downbeat_frame : 0;
+        }
+    }
+    if (!next.tempo_calibrated) {
+        next.source_bpm = 0.0;
+        next.beats_per_bar = 4;
+        next.beat_unit = 4;
+        next.target_bars = 0.0;
+        next.target_beats = 0.0;
+        next.downbeat_offset_frames = 0;
+    }
+
+    if (app->audio.stream && !SDL_LockAudioStream(app->audio.stream)) {
+        SDL_free(next.samples);
+        next.samples = NULL;
+        app_set_status(app, "Could not lock audio stream");
+        return false;
+    }
+    if (app->roster_clip_count >= APP_MAX_ROSTER_CLIPS) {
+        if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+        SDL_free(next.samples);
+        next.samples = NULL;
+        app_set_status(app, "Roster full");
+        return false;
+    }
+
+    int roster_index = app->roster_clip_count;
+    app->roster[roster_index] = next;
+    app->roster_clip_count++;
+    app->selected_roster_clip = roster_index;
+    app->selected_roster_clip_armed = false;
+    app_clamp_roster_scroll(app, app->roster_visible_rows);
+    app_ensure_roster_timeline_surface_no_lock(app);
+    app->timeline_focus_zone = TIMELINE_FOCUS_ROSTER;
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Long roster capture copied %.1f MiB into roster clip %d",
+                bytes_to_mib(byte_count),
+                roster_index);
+    SDL_snprintf(app->status_text,
+                 sizeof(app->status_text),
+                 "Captured %s to roster (%.1f MiB)",
+                 app->roster[roster_index].name,
+                 bytes_to_mib(byte_count));
+    return true;
 }
 
 static void waveform_render_name_suffix(WaveformRenderDialogMode dialog_mode,
@@ -3642,6 +3815,12 @@ void app_waveform_menu_apply(App *app) {
             break;
         case WAVEFORM_MENU_ITEM_RENDER_RATE:
             app_waveform_render_dialog_open_mode(app, WAVEFORM_RENDER_DIALOG_RATE_PERCENT);
+            break;
+        case WAVEFORM_MENU_ITEM_CAPTURE_WHOLE_SOURCE:
+            if (app_capture_whole_source_to_roster(app)) {
+                app->waveform_menu_open = false;
+                app->waveform_menu_selected = 0;
+            }
             break;
         case WAVEFORM_MENU_ITEM_CANCEL:
         default:

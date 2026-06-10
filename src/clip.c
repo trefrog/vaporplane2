@@ -16,6 +16,8 @@ static void clip_defaults(AudioClip *clip) {
     clip->tempo_lock.beats_per_bar = 4;
     clip->tempo_lock.beat_unit = 4;
     clip->tempo_lock.target_bars = 4.0;
+    clip->has_full_source_tempo_metadata = false;
+    clip->full_source_tempo_metadata = clip->tempo_lock;
     clip->beats_per_bar = 4;
     clip->beat_unit = 4;
     clip->downbeat_frame = clip->loop_start_frame;
@@ -56,7 +58,8 @@ static void clip_load_sidecar_metadata(AudioClip *clip, const char *path) {
     SDL_free(bytes);
 
     double value = 0.0;
-    if (json_number_value(json, "bpm", &value) && value > 0.0) {
+    bool has_sidecar_bpm = json_number_value(json, "bpm", &value) && value > 0.0;
+    if (has_sidecar_bpm) {
         clip->has_clip_metadata_bpm = true;
         clip->clip_metadata_bpm = value;
         clip->source_bpm = value;
@@ -70,7 +73,8 @@ static void clip_load_sidecar_metadata(AudioClip *clip, const char *path) {
         clip->beat_unit = (int)value;
         clip->tempo_lock.beat_unit = (int)value;
     }
-    if (json_number_value(json, "target_bars", &value) && value > 0.0) {
+    bool has_sidecar_target_bars = json_number_value(json, "target_bars", &value) && value > 0.0;
+    if (has_sidecar_target_bars) {
         clip->tempo_lock.target_bars = value;
     }
     if (json_number_value(json, "downbeat_frame", &value) && value >= 0.0) {
@@ -83,6 +87,13 @@ static void clip_load_sidecar_metadata(AudioClip *clip, const char *path) {
 
     if (clip->has_clip_metadata_bpm) {
         clip->clip_tempo_locked = true;
+    }
+    if (has_sidecar_bpm && has_sidecar_target_bars &&
+        clip->tempo_lock.beats_per_bar > 0 &&
+        clip->tempo_lock.beat_unit > 0 &&
+        clip->tempo_lock.target_bars > 0.0) {
+        clip->has_full_source_tempo_metadata = true;
+        clip->full_source_tempo_metadata = clip->tempo_lock;
     }
 
     SDL_free(json);
