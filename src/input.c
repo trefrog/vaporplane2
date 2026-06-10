@@ -809,6 +809,14 @@ bool input_handle_event(App *app, const SDL_Event *e){
         return true;
     }
     if(app->project_browser_open) {
+        if(app->project_browser_blank_confirm_open) {
+            switch(e->key.key) {
+                case SDLK_ESCAPE: app_project_browser_cancel_blank_project(app); break;
+                case SDLK_RETURN: app_project_browser_confirm_blank_project(app); break;
+                default: break;
+            }
+            return true;
+        }
         switch(e->key.key) {
             case SDLK_ESCAPE: app_project_browser_close(app); break;
             case SDLK_UP: app_project_browser_move(app, -1); break;
@@ -963,6 +971,12 @@ void input_update_gamepad(App *app, double dt){
     }
 
     if(app->project_browser_open) {
+        if(app->project_browser_blank_confirm_open) {
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) app_project_browser_confirm_blank_project(app);
+            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_EAST) ||
+               button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_START)) app_project_browser_cancel_blank_project(app);
+            return;
+        }
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_project_browser_move(app, -1);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_project_browser_move(app, 1);
         if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) app_project_browser_open_selected(app);

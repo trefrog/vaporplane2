@@ -6357,6 +6357,21 @@ static bool project_validation_openable(ProjectValidationStatus status) {
     return status == PROJECT_VALIDATION_VALID || status == PROJECT_VALIDATION_WARNING;
 }
 
+static void project_browser_init_blank_entry(ProjectBrowserEntry *entry) {
+    if (!entry) return;
+    SDL_memset(entry, 0, sizeof(*entry));
+    entry->is_blank_project = true;
+    SDL_strlcpy(entry->folder_name, "<new blank project>", sizeof(entry->folder_name));
+    entry->quick_validation.status = PROJECT_VALIDATION_VALID;
+    SDL_strlcpy(entry->quick_validation.reason, "New blank project", sizeof(entry->quick_validation.reason));
+    SDL_strlcpy(entry->quick_validation.detail,
+                "Clears the current timeline, roster, drum patterns, and master FX.",
+                sizeof(entry->quick_validation.detail));
+    SDL_strlcpy(entry->quick_validation.project_name, "<new blank project>", sizeof(entry->quick_validation.project_name));
+    entry->full_validation = entry->quick_validation;
+    entry->full_validation_ready = true;
+}
+
 static void app_project_browser_clear_preview(App *app) {
     if (!app) return;
     audio_engine_stop_file_preview(&app->audio);
@@ -6370,6 +6385,11 @@ static void app_project_browser_validate_selected(App *app) {
     if (!app || app->project_browser_count <= 0) return;
     app->project_browser_selected = clamp_int(app->project_browser_selected, 0, app->project_browser_count - 1);
     ProjectBrowserEntry *entry = &app->project_browser_entries[app->project_browser_selected];
+    if (entry->is_blank_project) {
+        entry->full_validation = entry->quick_validation;
+        entry->full_validation_ready = true;
+        return;
+    }
     project_validate_bundle(entry->path, PROJECT_VALIDATION_FULL, &entry->full_validation);
     entry->full_validation_ready = true;
 }
@@ -6378,48 +6398,45 @@ void app_project_browser_refresh(App *app) {
     if (!app) return;
     app->project_browser_count = 0;
     app->project_browser_selected = 0;
+    app->project_browser_blank_confirm_open = false;
     SDL_memset(app->project_browser_entries, 0, sizeof(app->project_browser_entries));
+    project_browser_init_blank_entry(&app->project_browser_entries[app->project_browser_count++]);
 
     if (!resolve_project_export_dir(app, app->project_browser_dir, sizeof(app->project_browser_dir))) {
-        app_set_status(app, "Could not open project folder");
+        app_project_browser_validate_selected(app);
+        app_set_status(app, "Project browser: blank project only");
         return;
     }
 
     int count = 0;
     char **matches = SDL_GlobDirectory(app->project_browser_dir, "*.vapor", 0, &count);
-    if (!matches) {
-        app_set_status(app, "No project bundles found");
-        return;
+    if (matches) {
+        for (int i = 0; i < count && app->project_browser_count < APP_MAX_PROJECTS; ++i) {
+            char path[CLIP_MAX_PATH];
+            path_join(path, sizeof(path), app->project_browser_dir, matches[i]);
+            SDL_PathInfo info;
+            if (!SDL_GetPathInfo(path, &info) || info.type != SDL_PATHTYPE_DIRECTORY) continue;
+            ProjectBrowserEntry *entry = &app->project_browser_entries[app->project_browser_count++];
+            SDL_strlcpy(entry->path, path, sizeof(entry->path));
+            SDL_strlcpy(entry->folder_name, matches[i], sizeof(entry->folder_name));
+            entry->modify_time = info.modify_time;
+            project_validate_bundle(entry->path, PROJECT_VALIDATION_QUICK, &entry->quick_validation);
+        }
+        SDL_free(matches);
     }
 
-    for (int i = 0; i < count && app->project_browser_count < APP_MAX_PROJECTS; ++i) {
-        char path[CLIP_MAX_PATH];
-        path_join(path, sizeof(path), app->project_browser_dir, matches[i]);
-        SDL_PathInfo info;
-        if (!SDL_GetPathInfo(path, &info) || info.type != SDL_PATHTYPE_DIRECTORY) continue;
-        ProjectBrowserEntry *entry = &app->project_browser_entries[app->project_browser_count++];
-        SDL_strlcpy(entry->path, path, sizeof(entry->path));
-        SDL_strlcpy(entry->folder_name, matches[i], sizeof(entry->folder_name));
-        entry->modify_time = info.modify_time;
-        project_validate_bundle(entry->path, PROJECT_VALIDATION_QUICK, &entry->quick_validation);
-    }
-    SDL_free(matches);
-
-    if (app->project_browser_count > 1) {
-        qsort(app->project_browser_entries,
-              (size_t)app->project_browser_count,
+    int bundle_count = app->project_browser_count - 1;
+    if (bundle_count > 1) {
+        qsort(&app->project_browser_entries[1],
+              (size_t)bundle_count,
               sizeof(app->project_browser_entries[0]),
               compare_project_browser_entries);
     }
-    if (app->project_browser_count > 0) {
-        app_project_browser_validate_selected(app);
-        SDL_snprintf(app->status_text, sizeof(app->status_text),
-                     "Project browser: %d bundle%s",
-                     app->project_browser_count,
-                     app->project_browser_count == 1 ? "" : "s");
-    } else {
-        app_set_status(app, "No project bundles found");
-    }
+    app_project_browser_validate_selected(app);
+    SDL_snprintf(app->status_text, sizeof(app->status_text),
+                 bundle_count > 0 ? "Project browser: %d bundle%s" : "Project browser: no saved bundles",
+                 bundle_count,
+                 bundle_count == 1 ? "" : "s");
 }
 
 void app_project_browser_open(App *app) {
@@ -6436,17 +6453,123 @@ void app_project_browser_close(App *app) {
     if (!app) return;
     app_project_browser_clear_preview(app);
     app->project_browser_open = false;
+    app->project_browser_blank_confirm_open = false;
     app_set_status(app, "Project browser closed");
 }
 
 void app_project_browser_move(App *app, int delta) {
-    if (!app || !app->project_browser_open || delta == 0 || app->project_browser_count <= 0) return;
+    if (!app || !app->project_browser_open || app->project_browser_blank_confirm_open || delta == 0 || app->project_browser_count <= 0) return;
     int selected = app->project_browser_selected + delta;
     while (selected < 0) selected += app->project_browser_count;
     selected %= app->project_browser_count;
     if (selected == app->project_browser_selected) return;
     app->project_browser_selected = selected;
     app_project_browser_validate_selected(app);
+}
+
+static void app_reset_current_project_to_blank(App *app) {
+    if (!app) return;
+
+    app_cancel_timeline_bounce(app);
+    app_stop_active_audio(app);
+    app_project_browser_clear_preview(app);
+
+    if (app->waveform_source_mode == WAVEFORM_SOURCE_ROSTER) {
+        app_set_waveform_source_generated(app);
+    }
+    app_clear_waveform_frame_grip(app);
+
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+
+    for (int i = 0; i < app->roster_clip_count; ++i) {
+        roster_clip_destroy(&app->roster[i]);
+    }
+    SDL_memset(app->roster, 0, sizeof(app->roster));
+    app->roster_clip_count = 0;
+    SDL_memset(app->drum_patterns, 0, sizeof(app->drum_patterns));
+    app->drum_pattern_count = 0;
+
+    transport_init(&app->transport, TIMELINE_DEFAULT_BPM, 960, 4, 4);
+    app->transport.playing = false;
+    app->transport.metronome_env = 0.0f;
+    app->transport_bpm = TIMELINE_DEFAULT_BPM;
+    app->transport_bpm_manual = false;
+
+    SDL_memset(&app->timeline, 0, sizeof(app->timeline));
+    app->timeline.ticks_per_beat = app->transport.ppqn;
+    app->timeline.timeline_bpm = TIMELINE_DEFAULT_BPM;
+    app->timeline.timeline_beats_per_bar = 4;
+    app->timeline.timeline_beat_unit = 4;
+    timeline_set_tempo_event_no_lock(&app->timeline, 0, app->timeline.timeline_bpm);
+    timeline_init_lanes(&app->timeline);
+    app->timeline.timeline_cursor_tick = 0;
+    app->timeline.timeline_cursor_seam_side = TIMELINE_SEAM_NONE;
+    app->timeline.play_range_start_tick = 0;
+    app->timeline.play_range_end_tick = 0;
+    app->timeline.play_range_loop_enabled = false;
+    app->timeline.play_range_custom = false;
+    app->timeline.view_center_tick = (double)app->timeline.ticks_per_beat * 2.0;
+    app->timeline.view_span_ticks = (double)app->timeline.ticks_per_beat * 4.0;
+    app->timeline.tape_speed = TIMELINE_TAPE_SPEED_DEFAULT;
+
+    app->audio.playback_mode = AUDIO_PLAYBACK_TIMELINE;
+    app->audio.timeline_playhead_tick = 0.0;
+    app->audio.preview_active = false;
+    app->audio.preview_roster_clip_index = -1;
+    app->audio.preview_frame = 0.0;
+    app->audio.file_preview_active = false;
+    app->audio.file_preview_clip = NULL;
+    app->audio.file_preview_frame = 0.0;
+    app->audio.metronome_beat_valid = false;
+    app->audio.master_gain = 1.0f;
+    SDL_memset(&app->audio.meter, 0, sizeof(app->audio.meter));
+    audio_engine_init_master_fx(&app->audio);
+    SDL_memset(app->audio.lane_meters, 0, sizeof(app->audio.lane_meters));
+    SDL_memset(app->audio.lane_analyzer_samples, 0, sizeof(app->audio.lane_analyzer_samples));
+    app->audio.lane_analyzer_write_index = 0;
+    app->audio.lane_analyzer_sample_count = 0;
+    app->audio.active_analyzer_lane = -1;
+    app->audio.lane_analyzer_active = false;
+    if (app->audio.stream) SDL_ClearAudioStream(app->audio.stream);
+
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    app->project_id[0] = '\0';
+    app->project_name[0] = '\0';
+    app->selected_roster_clip = -1;
+    app->roster_scroll_offset = 0;
+    app->roster_visible_rows = 1;
+    app->selected_roster_clip_armed = false;
+    app->selected_drum_pattern = -1;
+    app->selected_drum_pattern_armed = false;
+    app->drum_machine_step = 0;
+    app->drum_machine_pad = 0;
+    app->selected_timeline_lane = 0;
+    app->inspected_timeline_lane = 0;
+    app->lane_analyzer_visual_lane = -1;
+    app->selected_timeline_instance = timeline_instance_ref_invalid();
+    app->timeline_focus_zone = TIMELINE_FOCUS_RULER;
+    app->timeline_tape_control_mode = TIMELINE_TAPE_CONTROL_BPM;
+    app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
+    app->timeline_play_range_adjusting = false;
+    app->timeline_edit_mode = TIMELINE_EDIT_NONE;
+    app->timeline_edit_instance = timeline_instance_ref_invalid();
+    app->timeline_edit_instance_kind = TIMELINE_INSTANCE_AUDIO_CLIP;
+    app->timeline_edit_roster_clip_index = -1;
+    app->timeline_edit_pattern_index = -1;
+    app->timeline_edit_ghost_valid = false;
+    app->project_menu_open = false;
+    app->project_menu_selected = 0;
+    app->project_browser_open = false;
+    app->project_browser_blank_confirm_open = false;
+    app->sample_selector_open = false;
+    app->waveform_sidecar_confirm_open = false;
+    app->waveform_menu_open = false;
+    app->waveform_render_dialog_open = false;
+    app->roster_commit_menu_open = false;
+    app_timeline_clear_context_menu(app);
+    app->view_mode = APP_VIEW_TIMELINE;
+    sync_transport_from_app(app);
 }
 
 void app_project_browser_open_selected(App *app) {
@@ -6457,6 +6580,12 @@ void app_project_browser_open_selected(App *app) {
     }
     app_project_browser_validate_selected(app);
     ProjectBrowserEntry *entry = &app->project_browser_entries[app->project_browser_selected];
+    if (entry->is_blank_project) {
+        app_project_browser_clear_preview(app);
+        app->project_browser_blank_confirm_open = true;
+        app_set_status(app, "Confirm new blank project");
+        return;
+    }
     ProjectValidationResult *validation = &entry->full_validation;
     if (!project_validation_openable(validation->status)) {
         SDL_snprintf(app->status_text, sizeof(app->status_text),
@@ -6475,6 +6604,18 @@ void app_project_browser_open_selected(App *app) {
     }
 }
 
+void app_project_browser_confirm_blank_project(App *app) {
+    if (!app || !app->project_browser_open || !app->project_browser_blank_confirm_open) return;
+    app_reset_current_project_to_blank(app);
+    app_set_status(app, "New blank project");
+}
+
+void app_project_browser_cancel_blank_project(App *app) {
+    if (!app || !app->project_browser_blank_confirm_open) return;
+    app->project_browser_blank_confirm_open = false;
+    app_set_status(app, "New blank cancelled");
+}
+
 void app_project_browser_preview_selected(App *app) {
     if (!app || !app->project_browser_open) return;
     if (app->project_browser_count <= 0) {
@@ -6483,6 +6624,11 @@ void app_project_browser_preview_selected(App *app) {
     }
     app_project_browser_validate_selected(app);
     ProjectBrowserEntry *entry = &app->project_browser_entries[app->project_browser_selected];
+    if (entry->is_blank_project) {
+        app_project_browser_clear_preview(app);
+        app_set_status(app, "No preview for blank project");
+        return;
+    }
     ProjectValidationResult *validation = &entry->full_validation;
     if (!validation->preview_available) {
         SDL_snprintf(app->status_text, sizeof(app->status_text),
@@ -10787,6 +10933,22 @@ static void render_project_browser(App *app) {
             SDL_SetRenderDrawColor(app->renderer, 255, 220, 130, 255);
             SDL_RenderRect(app->renderer, &highlight);
         }
+        if (entry->is_blank_project) {
+            SDL_SetRenderDrawColor(app->renderer,
+                                   selected ? 226 : 180,
+                                   selected ? 252 : 218,
+                                   selected ? 246 : 226,
+                                   255);
+            SDL_RenderDebugTextFormat(app->renderer,
+                                      panel.x + 16.0f,
+                                      y,
+                                      "%c %-8s  %-32s  %s",
+                                      selected ? '>' : ' ',
+                                      "NEW",
+                                      entry->folder_name,
+                                      "clear current workspace");
+            continue;
+        }
         ProjectValidationResult *row_validation = (selected && entry->full_validation_ready) ?
                                                   &entry->full_validation :
                                                   &entry->quick_validation;
@@ -10812,16 +10974,60 @@ static void render_project_browser(App *app) {
     SDL_FRect detail = { panel.x + 10.0f, panel.y + panel.h - detail_h, panel.w - 20.0f, detail_h - 10.0f };
     SDL_SetRenderDrawColor(app->renderer, 14, 18, 26, 230);
     SDL_RenderFillRect(app->renderer, &detail);
-    set_draw_color(app->renderer, project_validation_color(focused->status, true));
+    set_draw_color(app->renderer, selected->is_blank_project ?
+                                  (SDL_Color){ 255, 220, 130, 255 } :
+                                  project_validation_color(focused->status, true));
     SDL_RenderRect(app->renderer, &detail);
-    SDL_RenderDebugTextFormat(app->renderer, detail.x + 10.0f, detail.y + 10.0f,
-                              "%s  %s",
-                              project_validation_status_label(focused->status),
-                              focused->reason[0] ? focused->reason : "unknown");
+    if (selected->is_blank_project) {
+        SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 10.0f,
+                            "NEW  Start from a blank in-memory project");
+    } else {
+        SDL_RenderDebugTextFormat(app->renderer, detail.x + 10.0f, detail.y + 10.0f,
+                                  "%s  %s",
+                                  project_validation_status_label(focused->status),
+                                  focused->reason[0] ? focused->reason : "unknown");
+    }
     SDL_SetRenderDrawColor(app->renderer, 220, 230, 235, 255);
-    SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 28.0f,
-                        focused->detail[0] ? focused->detail : selected->path);
-    SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 46.0f, selected->path);
+    if (selected->is_blank_project) {
+        SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 28.0f,
+                            "Clears timeline, roster, drum patterns, tape speed, reverb, and plugins.");
+        SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 46.0f,
+                            "South/Enter asks for confirmation.");
+    } else {
+        SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 28.0f,
+                            focused->detail[0] ? focused->detail : selected->path);
+        SDL_RenderDebugText(app->renderer, detail.x + 10.0f, detail.y + 46.0f, selected->path);
+    }
+
+    if (app->project_browser_blank_confirm_open) {
+        SDL_FRect confirm = {
+            panel.x + panel.w * 0.5f - 235.0f,
+            panel.y + panel.h * 0.5f - 72.0f,
+            470.0f,
+            144.0f
+        };
+        if (confirm.x < panel.x + 18.0f) confirm.x = panel.x + 18.0f;
+        if (confirm.x + confirm.w > panel.x + panel.w - 18.0f) confirm.x = panel.x + panel.w - 18.0f - confirm.w;
+        if (confirm.y < panel.y + 18.0f) confirm.y = panel.y + 18.0f;
+        if (confirm.y + confirm.h > panel.y + panel.h - 18.0f) confirm.y = panel.y + panel.h - 18.0f - confirm.h;
+        SDL_FRect shadow = { confirm.x + 10.0f, confirm.y + 12.0f, confirm.w + 16.0f, confirm.h + 16.0f };
+        SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 178);
+        SDL_RenderFillRect(app->renderer, &shadow);
+        SDL_SetRenderDrawColor(app->renderer, 18, 10, 14, 248);
+        SDL_RenderFillRect(app->renderer, &confirm);
+        SDL_SetRenderDrawColor(app->renderer, 255, 120, 130, 255);
+        SDL_RenderRect(app->renderer, &confirm);
+        SDL_SetRenderDrawColor(app->renderer, 255, 226, 226, 255);
+        SDL_RenderDebugText(app->renderer, confirm.x + 18.0f, confirm.y + 18.0f, "CONFIRM NEW BLANK PROJECT");
+        SDL_SetRenderDrawColor(app->renderer, 235, 210, 214, 255);
+        SDL_RenderDebugText(app->renderer, confirm.x + 18.0f, confirm.y + 46.0f,
+                            "This clears the current timeline, roster, drum patterns,");
+        SDL_RenderDebugText(app->renderer, confirm.x + 18.0f, confirm.y + 64.0f,
+                            "surface edits, tape speed, reverb, and master plugins.");
+        SDL_SetRenderDrawColor(app->renderer, 255, 238, 204, 255);
+        SDL_RenderDebugText(app->renderer, confirm.x + 18.0f, confirm.y + 104.0f,
+                            "South/Enter confirms   East/Esc/Start cancels");
+    }
 }
 
 static void text_with_caret_display(const App *app, char *out, size_t out_size, int max_chars) {
@@ -11168,6 +11374,7 @@ bool app_init(App *app){
     app->project_browser_open = false;
     app->project_browser_count = 0;
     app->project_browser_selected = 0;
+    app->project_browser_blank_confirm_open = false;
     app->project_browser_dir[0] = '\0';
     app->project_browser_preview_clip_loaded = false;
     app->waveform_menu_open = false;

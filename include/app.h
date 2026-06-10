@@ -23,6 +23,7 @@ typedef struct {
     ProjectValidationResult quick_validation;
     ProjectValidationResult full_validation;
     bool full_validation_ready;
+    bool is_blank_project;
     SDL_Time modify_time;
 } ProjectBrowserEntry;
 
@@ -227,6 +228,7 @@ typedef struct App {
     int project_browser_count;
     int project_browser_selected;
     bool project_browser_open;
+    bool project_browser_blank_confirm_open;
     char project_browser_dir[CLIP_MAX_PATH];
     AudioClip project_browser_preview_clip;
     bool project_browser_preview_clip_loaded;
@@ -408,6 +410,8 @@ void app_project_browser_refresh(App *app);
 void app_project_browser_move(App *app, int delta);
 void app_project_browser_open_selected(App *app);
 void app_project_browser_preview_selected(App *app);
+void app_project_browser_confirm_blank_project(App *app);
+void app_project_browser_cancel_blank_project(App *app);
 bool app_save_project_bundle(App *app, const char *bundle_path);
 bool app_load_project_bundle(App *app, const char *bundle_path);
 bool app_export_timeline_wav(App *app, const char *path);
