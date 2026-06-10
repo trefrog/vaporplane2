@@ -211,6 +211,7 @@ Vaporplane Quickstart
 First move:
 - Press F1 in the app to show/hide the controls legend.
 - Press F2 or R2+Start to cycle Waveform, Timeline, and Master Mix.
+- Press L2+Start in Timeline to open the Project menu.
 - The packaged starter sample is copied into your user samples folder on first launch.
 - The packaged starter sample is CC BY-NC-SA 4.0 material and is not for commercial use.
 - The packaged CC0 starter drum kits are copied into your user drum_packs folder on first launch.

@@ -96,6 +96,7 @@ typedef enum {
     TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE,
     TIMELINE_CONTEXT_ITEM_APPLY_LANE_VELOCITY,
     TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM,
+    TIMELINE_CONTEXT_ITEM_BOUNCE_TO_ROSTER,
     TIMELINE_CONTEXT_ITEM_RENAME_ROSTER,
     TIMELINE_CONTEXT_ITEM_PLACE_FREE,
     TIMELINE_CONTEXT_ITEM_PLACE_PULSE,
@@ -277,6 +278,15 @@ typedef struct App {
     TimelineTapeControlMode timeline_tape_control_mode;
     TimelineRangeHandle timeline_play_range_handle;
     bool timeline_play_range_adjusting;
+    bool timeline_bounce_active;
+    float *timeline_bounce_samples;
+    size_t timeline_bounce_target_frames;
+    size_t timeline_bounce_recorded_frames;
+    int timeline_bounce_sample_rate;
+    int64_t timeline_bounce_start_tick;
+    int64_t timeline_bounce_end_tick;
+    bool timeline_bounce_prev_metronome_enabled;
+    bool timeline_bounce_prev_play_range_loop_enabled;
     bool timeline_context_menu_open;
     bool project_menu_open;
     int project_menu_selected;
@@ -356,6 +366,7 @@ void app_toggle_controls_legend(App *app);
 bool app_stop_active_audio(App *app);
 void app_toggle_timeline_playback(App *app);
 void app_rewind_timeline(App *app);
+void app_cancel_timeline_bounce(App *app);
 void app_timeline_jump_to_play_range_start(App *app);
 void app_timeline_jump_playhead_to_cursor(App *app);
 void app_timeline_toggle_play_range_loop(App *app);

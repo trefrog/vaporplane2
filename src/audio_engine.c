@@ -1113,9 +1113,34 @@ static float clamp_output(float sample) {
     return sample;
 }
 
+static void capture_timeline_bounce_frame(AudioEngine *a, float left, float right) {
+    if(!a || !a->timeline_bounce_recording_active) return;
+    if(!a->timeline_bounce_recording_samples ||
+       a->timeline_bounce_recording_target_frames == 0 ||
+       a->timeline_bounce_recording_capacity_frames == 0 ||
+       a->timeline_bounce_recording_frames >= a->timeline_bounce_recording_capacity_frames) {
+        a->timeline_bounce_recording_failed = true;
+        a->timeline_bounce_recording_active = false;
+        return;
+    }
+
+    size_t frame = a->timeline_bounce_recording_frames;
+    a->timeline_bounce_recording_samples[frame * 2u] = left;
+    a->timeline_bounce_recording_samples[frame * 2u + 1u] = right;
+    a->timeline_bounce_recording_frames++;
+
+    if(a->timeline_bounce_recording_frames >= a->timeline_bounce_recording_target_frames) {
+        a->timeline_bounce_recording_active = false;
+        a->timeline_bounce_recording_complete = true;
+    }
+}
+
 static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right) {
     float left = 0.f, right = 0.f;
     int active_clips = 0;
+    bool capture_bounce_frame = a->timeline_bounce_recording_active &&
+                                a->playback_mode == AUDIO_PLAYBACK_TIMELINE &&
+                                a->timeline && a->timeline->playing;
     if (a->playback_mode == AUDIO_PLAYBACK_TIMELINE) {
         active_clips += mix_timeline(a, &left, &right);
     } else if (a->clip && a->clip->samples && a->clip->frame_count>1 && a->transport->playing) {
@@ -1162,8 +1187,11 @@ static void render_audio_frame(AudioEngine *a, float *out_left, float *out_right
     }
     master_limiter_process(a, &final_left, &final_right);
     update_master_meter(a, final_left, final_right);
-    *out_left = clamp_output(final_left);
-    *out_right = clamp_output(final_right);
+    float output_left = clamp_output(final_left);
+    float output_right = clamp_output(final_right);
+    *out_left = output_left;
+    *out_right = output_right;
+    if(capture_bounce_frame) capture_timeline_bounce_frame(a, output_left, output_right);
 }
 
 static void SDLCALL feed_audio(void *userdata, SDL_AudioStream *stream, int additional_amount, int total_amount){
@@ -1382,6 +1410,58 @@ int64_t audio_engine_get_timeline_playhead_tick(const AudioEngine *a) {
     int64_t tick = a->timeline ? a->timeline->playhead_tick : 0;
     if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
     return tick;
+}
+
+bool audio_engine_start_timeline_bounce_recording(AudioEngine *a,
+                                                  float *samples,
+                                                  size_t capacity_frames,
+                                                  size_t target_frames,
+                                                  int64_t range_end_tick) {
+    if(!a || !samples || capacity_frames == 0 || target_frames == 0 || target_frames > capacity_frames) {
+        return false;
+    }
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    a->timeline_bounce_recording_active = true;
+    a->timeline_bounce_recording_complete = false;
+    a->timeline_bounce_recording_failed = false;
+    a->timeline_bounce_recording_samples = samples;
+    a->timeline_bounce_recording_capacity_frames = capacity_frames;
+    a->timeline_bounce_recording_target_frames = target_frames;
+    a->timeline_bounce_recording_frames = 0;
+    a->timeline_bounce_recording_range_end_tick = range_end_tick;
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+    return true;
+}
+
+void audio_engine_cancel_timeline_bounce_recording(AudioEngine *a) {
+    if(!a) return;
+    if(a->stream) SDL_LockAudioStream(a->stream);
+    a->timeline_bounce_recording_active = false;
+    a->timeline_bounce_recording_complete = false;
+    a->timeline_bounce_recording_failed = false;
+    a->timeline_bounce_recording_samples = NULL;
+    a->timeline_bounce_recording_capacity_frames = 0;
+    a->timeline_bounce_recording_target_frames = 0;
+    a->timeline_bounce_recording_frames = 0;
+    a->timeline_bounce_recording_range_end_tick = 0;
+    if(a->stream) SDL_UnlockAudioStream(a->stream);
+}
+
+void audio_engine_get_timeline_bounce_recording_state(const AudioEngine *a,
+                                                      AudioTimelineBounceRecordingState *state) {
+    if(!state) return;
+    SDL_memset(state, 0, sizeof(*state));
+    if(!a) return;
+    AudioEngine *mutable_audio = (AudioEngine *)a;
+    if(mutable_audio->stream) SDL_LockAudioStream(mutable_audio->stream);
+    state->active = a->timeline_bounce_recording_active;
+    state->complete = a->timeline_bounce_recording_complete;
+    state->failed = a->timeline_bounce_recording_failed;
+    state->recorded_frames = a->timeline_bounce_recording_frames;
+    state->target_frames = a->timeline_bounce_recording_target_frames;
+    state->capacity_frames = a->timeline_bounce_recording_capacity_frames;
+    state->range_end_tick = a->timeline_bounce_recording_range_end_tick;
+    if(mutable_audio->stream) SDL_UnlockAudioStream(mutable_audio->stream);
 }
 
 void audio_engine_get_master_meter(const AudioEngine *a, MasterMeterState *meter) {

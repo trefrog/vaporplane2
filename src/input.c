@@ -784,6 +784,10 @@ bool input_handle_event(App *app, const SDL_Event *e){
         return true;
     }
     if(e->type!=SDL_EVENT_KEY_DOWN) return true;
+    if(app->timeline_bounce_active) {
+        if(e->key.key == SDLK_ESCAPE) app_cancel_timeline_bounce(app);
+        return true;
+    }
     if(e->key.key==SDLK_F12) {
         app_toggle_debug_overlay(app);
         return true;
@@ -1029,6 +1033,11 @@ void input_update_gamepad(App *app, double dt){
     bool left_stick_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK);
     bool right_stick_pressed = button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
 
+    if(app->timeline_bounce_active) {
+        if(east_pressed) app_cancel_timeline_bounce(app);
+        return;
+    }
+
     if(app->waveform_sidecar_confirm_open) {
         if(south_pressed) app_confirm_write_tempo_sidecar(app);
         if(east_pressed) app_cancel_write_tempo_sidecar(app);
@@ -1130,6 +1139,11 @@ void input_update_gamepad(App *app, double dt){
             if(south_pressed || east_pressed || west_pressed || north_pressed) return;
         }
 
+        if(l2_shift && start_pressed) {
+            app_project_menu_open(app);
+            return;
+        }
+
         if(app->project_menu_open) {
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_project_menu_move(app, -1);
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_project_menu_move(app, 1);
@@ -1229,7 +1243,7 @@ void input_update_gamepad(App *app, double dt){
         }
 
         if(app->timeline_focus_zone == TIMELINE_FOCUS_ROSTER) {
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) {
+            if(right_stick_pressed) {
                 app_preview_selected_roster_clip(app);
                 return;
             }

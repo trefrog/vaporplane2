@@ -166,6 +166,7 @@ Common mappings:
 - Bumpers: select loop edges in Waveform, cycle focus in Timeline/Master Mix
 - Left stick: pan waveform or timeline view
 - D-pad: trim, zoom, move cursor, edit ghosts, or adjust focused controls
+- Left trigger + Start: open the Timeline Project menu
 - Right trigger + Start: cycle main views
 - Right trigger + South: timeline play/pause or waveform frame-grip commit
 - Right trigger + West: set timeline playhead to cursor

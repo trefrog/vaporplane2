@@ -171,6 +171,14 @@ typedef struct {
     int active_analyzer_lane;
     bool lane_analyzer_active;
     AudioDebugStats debug_stats;
+    bool timeline_bounce_recording_active;
+    bool timeline_bounce_recording_complete;
+    bool timeline_bounce_recording_failed;
+    float *timeline_bounce_recording_samples;
+    size_t timeline_bounce_recording_capacity_frames;
+    size_t timeline_bounce_recording_target_frames;
+    size_t timeline_bounce_recording_frames;
+    int64_t timeline_bounce_recording_range_end_tick;
 } AudioEngine;
 
 typedef struct {
@@ -179,6 +187,16 @@ typedef struct {
     int64_t range_end_tick;
     bool finished;
 } AudioTimelineRenderState;
+
+typedef struct {
+    bool active;
+    bool complete;
+    bool failed;
+    size_t recorded_frames;
+    size_t target_frames;
+    size_t capacity_frames;
+    int64_t range_end_tick;
+} AudioTimelineBounceRecordingState;
 
 bool audio_engine_init(AudioEngine *a, AudioClip *clip, Transport *transport);
 void audio_engine_shutdown(AudioEngine *a);
@@ -200,6 +218,13 @@ void audio_engine_stop_file_preview(AudioEngine *a);
 void audio_engine_set_timeline_playhead(AudioEngine *a, int64_t tick);
 bool audio_engine_timeline_is_playing(const AudioEngine *a);
 int64_t audio_engine_get_timeline_playhead_tick(const AudioEngine *a);
+bool audio_engine_start_timeline_bounce_recording(AudioEngine *a,
+                                                  float *samples,
+                                                  size_t capacity_frames,
+                                                  size_t target_frames,
+                                                  int64_t range_end_tick);
+void audio_engine_cancel_timeline_bounce_recording(AudioEngine *a);
+void audio_engine_get_timeline_bounce_recording_state(const AudioEngine *a, AudioTimelineBounceRecordingState *state);
 void audio_timeline_render_state_init(AudioTimelineRenderState *state,
                                       int64_t range_start_tick,
                                       int64_t range_end_tick);

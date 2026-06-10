@@ -956,15 +956,18 @@ static int timeline_context_menu_items(const App *app,
                 }
             } else if (app->timeline_focus_zone == TIMELINE_FOCUS_LANE_INDEX) {
                 if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_APPLY_LANE_VELOCITY;
+                if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_BOUNCE_TO_ROSTER;
                 if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
                 break;
             }
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_INSERT_BAR;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_BOUNCE_TO_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
         case TIMELINE_CONTEXT_SCOPE_INSTANCE:
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_INSERT_BAR;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_BOUNCE_TO_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
         case TIMELINE_CONTEXT_SCOPE_ROSTER:
@@ -973,6 +976,7 @@ static int timeline_context_menu_items(const App *app,
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_FREE;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_PLACE_PULSE;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_INSERT_PULSE;
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_BOUNCE_TO_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_EXPORT_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_DELETE_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
@@ -986,6 +990,7 @@ static int timeline_context_menu_items(const App *app,
                 if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_DUPLICATE_PATTERN;
                 if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_DELETE_PATTERN;
             }
+            if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_BOUNCE_TO_ROSTER;
             if (count < max_items) items[count++] = TIMELINE_CONTEXT_ITEM_CANCEL;
             break;
         case TIMELINE_CONTEXT_SCOPE_CONFIRM_ROSTER_DELETE:
@@ -1024,6 +1029,7 @@ static const char *timeline_context_item_label(TimelineContextMenuItem item) {
         case TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE: return "Remove instance";
         case TIMELINE_CONTEXT_ITEM_APPLY_LANE_VELOCITY: return "Apply lane velocity...";
         case TIMELINE_CONTEXT_ITEM_OPEN_WAVEFORM: return "Open waveform";
+        case TIMELINE_CONTEXT_ITEM_BOUNCE_TO_ROSTER: return "Bounce to roster";
         case TIMELINE_CONTEXT_ITEM_RENAME_ROSTER: return "Rename roster clip";
         case TIMELINE_CONTEXT_ITEM_PLACE_FREE: return "Place free";
         case TIMELINE_CONTEXT_ITEM_PLACE_PULSE: return "Place pulse";
@@ -1072,6 +1078,7 @@ static bool app_export_timeline_wav_named(App *app, const char *filename_text);
 static bool app_export_roster_clip_wav_named(App *app, int roster_index, const char *filename_text);
 static bool app_rename_roster_clip_named(App *app, int roster_index, const char *display_name);
 static bool app_rename_drum_pattern_named(App *app, int pattern_index, const char *display_name);
+static bool app_start_timeline_bounce(App *app);
 static void roster_export_filename(const RosterClip *clip, char *out, size_t out_size);
 static void app_text_entry_open(App *app,
                                 AppTextEntryMode mode,
@@ -3830,6 +3837,9 @@ void app_timeline_context_menu_apply(App *app) {
         case TIMELINE_CONTEXT_ITEM_INSERT_BAR:
             app_timeline_insert_bar_at_cursor(app);
             break;
+        case TIMELINE_CONTEXT_ITEM_BOUNCE_TO_ROSTER:
+            app_start_timeline_bounce(app);
+            break;
         case TIMELINE_CONTEXT_ITEM_REMOVE_INSTANCE:
             if (timeline_instance_ref_valid(&app->timeline, app->timeline_context_menu_instance)) {
                 app->selected_timeline_instance = app->timeline_context_menu_instance;
@@ -6065,6 +6075,273 @@ bool app_export_timeline_wav(App *app, const char *path) {
                      file,
                      peak);
     }
+    return true;
+}
+
+static void app_reset_timeline_bounce_state(App *app) {
+    if (!app) return;
+    app->timeline_bounce_active = false;
+    app->timeline_bounce_samples = NULL;
+    app->timeline_bounce_target_frames = 0;
+    app->timeline_bounce_recorded_frames = 0;
+    app->timeline_bounce_sample_rate = 0;
+    app->timeline_bounce_start_tick = 0;
+    app->timeline_bounce_end_tick = 0;
+    app->timeline_bounce_prev_metronome_enabled = false;
+    app->timeline_bounce_prev_play_range_loop_enabled = false;
+}
+
+static void app_restore_timeline_bounce_settings(App *app) {
+    if (!app) return;
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    app->transport.metronome_enabled = app->timeline_bounce_prev_metronome_enabled;
+    if (!app->transport.metronome_enabled) app->transport.metronome_env = 0.0f;
+    app->timeline.play_range_loop_enabled = app->timeline_bounce_prev_play_range_loop_enabled;
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+    sync_transport_from_app(app);
+}
+
+static void app_clear_queued_audio(App *app) {
+    if (!app || !app->audio.stream) return;
+    SDL_LockAudioStream(app->audio.stream);
+    SDL_ClearAudioStream(app->audio.stream);
+    SDL_UnlockAudioStream(app->audio.stream);
+}
+
+static bool app_append_timeline_bounce_to_roster(App *app,
+                                                 float *samples,
+                                                 size_t frame_count,
+                                                 int sample_rate,
+                                                 int64_t start_tick,
+                                                 int64_t end_tick) {
+    if (!app || !samples || frame_count < APP_MIN_CAPTURE_FRAMES || sample_rate <= 0 || end_tick <= start_tick) {
+        return false;
+    }
+    if (app->roster_clip_count >= APP_MAX_ROSTER_CLIPS) {
+        app_set_status(app, "Roster full");
+        return false;
+    }
+
+    RosterClip next;
+    SDL_memset(&next, 0, sizeof(next));
+    generate_stable_id("sample", next.sample_id, sizeof(next.sample_id));
+    generate_stable_id("roster", next.roster_clip_id, sizeof(next.roster_clip_id));
+    const char *base = "timeline bounce";
+    int number = next_capture_number(app, base);
+    SDL_snprintf(next.name, sizeof(next.name), "%s#%03d", base, number);
+    SDL_strlcpy(next.source_path, "timeline bounce", sizeof(next.source_path));
+    next.source_loop_start_frame = 0;
+    next.source_loop_end_frame = frame_count;
+    next.source_sample_rate = sample_rate;
+    next.loop_start_frame = 0;
+    next.loop_end_frame = frame_count;
+    next.sample_rate = sample_rate;
+    next.channels = 2;
+    next.frame_count = frame_count;
+    next.samples = samples;
+    next.midi_note = app_next_available_midi_note(app);
+    next.midi_channel = 0;
+    next.midi_velocity = 127;
+    next.color = roster_color_for_append(app);
+
+    int ticks_per_beat = app->timeline.ticks_per_beat > 0 ? app->timeline.ticks_per_beat : 960;
+    int beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
+    int beat_unit = app->timeline.timeline_beat_unit > 0 ? app->timeline.timeline_beat_unit : 4;
+    double target_beats = (double)(end_tick - start_tick) / (double)ticks_per_beat;
+    double source_bpm = timeline_audible_bpm_at_tick(&app->timeline, (double)start_tick);
+    next.tempo_calibrated = source_bpm > 0.0 && target_beats > 0.0;
+    if (next.tempo_calibrated) {
+        next.source_bpm = timeline_clamp_bpm(source_bpm);
+        next.beats_per_bar = beats_per_bar;
+        next.beat_unit = beat_unit;
+        next.target_beats = target_beats;
+        next.target_bars = target_beats / (double)beats_per_bar;
+        next.downbeat_offset_frames = 0;
+    } else {
+        next.source_bpm = 0.0;
+        next.beats_per_bar = 4;
+        next.beat_unit = 4;
+        next.target_beats = 0.0;
+        next.target_bars = 0.0;
+        next.downbeat_offset_frames = 0;
+    }
+
+    if (app->audio.stream && !SDL_LockAudioStream(app->audio.stream)) {
+        app_set_status(app, "Could not lock audio stream");
+        return false;
+    }
+    int roster_index = app->roster_clip_count;
+    app->roster[roster_index] = next;
+    app->roster_clip_count++;
+    app->selected_roster_clip = roster_index;
+    app->selected_roster_clip_armed = false;
+    app_clamp_roster_scroll(app, app->roster_visible_rows);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Bounced %s to roster", app->roster[roster_index].name);
+    return true;
+}
+
+static void app_finish_timeline_bounce(App *app, size_t recorded_frames) {
+    if (!app || !app->timeline_bounce_active) return;
+
+    audio_engine_cancel_timeline_bounce_recording(&app->audio);
+    audio_engine_stop_timeline(&app->audio, false);
+    app_restore_timeline_bounce_settings(app);
+
+    float *samples = app->timeline_bounce_samples;
+    size_t frame_count = recorded_frames;
+    if (frame_count > app->timeline_bounce_target_frames) frame_count = app->timeline_bounce_target_frames;
+    int sample_rate = app->timeline_bounce_sample_rate;
+    int64_t start_tick = app->timeline_bounce_start_tick;
+    int64_t end_tick = app->timeline_bounce_end_tick;
+
+    app_reset_timeline_bounce_state(app);
+    bool appended = app_append_timeline_bounce_to_roster(app, samples, frame_count, sample_rate, start_tick, end_tick);
+    if (!appended) {
+        SDL_free(samples);
+        if (!app->status_text[0]) app_set_status(app, "Could not bounce to roster");
+    }
+}
+
+static void app_abort_timeline_bounce(App *app, const char *status) {
+    if (!app || (!app->timeline_bounce_active && !app->timeline_bounce_samples)) return;
+    audio_engine_cancel_timeline_bounce_recording(&app->audio);
+    audio_engine_stop_timeline(&app->audio, false);
+    app_clear_queued_audio(app);
+    app_restore_timeline_bounce_settings(app);
+    SDL_free(app->timeline_bounce_samples);
+    app_reset_timeline_bounce_state(app);
+    app_set_status(app, status && status[0] ? status : "Bounce cancelled");
+}
+
+void app_cancel_timeline_bounce(App *app) {
+    app_abort_timeline_bounce(app, "Bounce cancelled");
+}
+
+static void app_update_timeline_bounce(App *app) {
+    if (!app || !app->timeline_bounce_active) return;
+    AudioTimelineBounceRecordingState state;
+    audio_engine_get_timeline_bounce_recording_state(&app->audio, &state);
+    app->timeline_bounce_recorded_frames = state.recorded_frames;
+    if (state.failed) {
+        app_abort_timeline_bounce(app, "Bounce recording failed");
+        return;
+    }
+    if (state.complete) {
+        app_finish_timeline_bounce(app, state.recorded_frames);
+        return;
+    }
+    if (!audio_engine_timeline_is_playing(&app->audio)) {
+        if (state.recorded_frames >= APP_MIN_CAPTURE_FRAMES) {
+            app_finish_timeline_bounce(app, state.recorded_frames);
+        } else {
+            app_abort_timeline_bounce(app, "Bounce stopped");
+        }
+    }
+}
+
+static bool app_start_timeline_bounce(App *app) {
+    if (!app) return false;
+    if (app->timeline_bounce_active) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Bounce already recording");
+        return false;
+    }
+    if (!app->audio.stream) {
+        app_timeline_clear_context_menu(app);
+        app_set_audio_unavailable_status(app);
+        return false;
+    }
+
+    sync_timeline_play_range(app);
+    int64_t start_tick = 0;
+    int64_t end_tick = 0;
+    if (!app->timeline.initialized || !timeline_has_instances(&app->timeline) ||
+        !app_timeline_export_range(app, &start_tick, &end_tick)) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "No timeline range to bounce");
+        return false;
+    }
+    if (!app_timeline_has_renderable_clip_in_range(app, start_tick, end_tick)) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "No renderable timeline clips");
+        return false;
+    }
+    if (app->roster_clip_count >= APP_MAX_ROSTER_CLIPS) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Roster full");
+        return false;
+    }
+
+    int sample_rate = app->audio.spec.freq > 0 ? app->audio.spec.freq : VAPORPLANE_PROJECT_SAMPLE_RATE;
+    double speed = (double)timeline_effective_tape_speed(&app->timeline);
+    double seconds = timeline_seconds_between_ticks(&app->timeline, (double)start_tick, (double)end_tick);
+    if (speed <= 0.0) speed = 1.0;
+    seconds /= speed;
+    if (seconds <= 0.0) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "No timeline range to bounce");
+        return false;
+    }
+    size_t target_frames = (size_t)ceil(seconds * (double)sample_rate);
+    if (target_frames < APP_MIN_CAPTURE_FRAMES || target_frames > APP_MAX_CAPTURE_FRAMES ||
+        target_frames > SIZE_MAX / 2u ||
+        target_frames * 2u > SIZE_MAX / sizeof(float)) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Bounce is too large");
+        return false;
+    }
+    size_t sample_count = target_frames * 2u;
+    size_t byte_count = sample_count * sizeof(float);
+    if (byte_count > APP_MAX_CAPTURE_BYTES) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Bounce is too large");
+        return false;
+    }
+
+    float *samples = (float *)SDL_malloc(byte_count);
+    if (!samples) {
+        app_timeline_clear_context_menu(app);
+        app_set_status(app, "Memory allocation failed");
+        return false;
+    }
+    SDL_memset(samples, 0, byte_count);
+
+    app_stop_active_audio(app);
+    app_timeline_clear_context_menu(app);
+    app->project_menu_open = false;
+    app->timeline_bounce_active = true;
+    app->timeline_bounce_samples = samples;
+    app->timeline_bounce_target_frames = target_frames;
+    app->timeline_bounce_recorded_frames = 0;
+    app->timeline_bounce_sample_rate = sample_rate;
+    app->timeline_bounce_start_tick = start_tick;
+    app->timeline_bounce_end_tick = end_tick;
+    app->timeline_bounce_prev_metronome_enabled = app->transport.metronome_enabled;
+    app->timeline_bounce_prev_play_range_loop_enabled = app->timeline.play_range_loop_enabled;
+
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    app->transport.metronome_enabled = false;
+    app->transport.metronome_env = 0.0f;
+    app->timeline.play_range_loop_enabled = false;
+    if (app->audio.stream) {
+        SDL_ClearAudioStream(app->audio.stream);
+        SDL_UnlockAudioStream(app->audio.stream);
+    }
+    audio_engine_clear_master_reverb_tail(&app->audio);
+    audio_engine_set_timeline_playhead(&app->audio, start_tick);
+    if (!audio_engine_start_timeline_bounce_recording(&app->audio, samples, target_frames, target_frames, end_tick)) {
+        app_abort_timeline_bounce(app, "Could not start bounce");
+        return false;
+    }
+    audio_engine_start_timeline(&app->audio);
+    if (!audio_engine_timeline_is_playing(&app->audio)) {
+        app_abort_timeline_bounce(app, "Could not start timeline");
+        return false;
+    }
+
+    SDL_snprintf(app->status_text, sizeof(app->status_text), "Bounce recording %.2fs", seconds);
     return true;
 }
 
@@ -8478,7 +8755,7 @@ static void app_render_controls_legend(App *app) {
         { "F2", "Change view", "R2+Start", false },
         { "Tab", "Shift focus", "Bumpers", false },
         { "Enter / C", "Activate / menu", "South / Start", false },
-        { "Esc", "Cancel / Project menu", "East", false },
+        { "Esc", "Cancel / Project menu", "East / L2+Start", false },
         { "", "WAVEFORM", "", true },
         { "Space", "Play / pause", "South / Start", false },
         { "A / D", "Move loop start", "L1 arms start", false },
@@ -8904,6 +9181,35 @@ static void render_roster_commit_menu(App *app, int w, int h) {
     }
 }
 
+static void render_filled_circle(SDL_Renderer *renderer, float cx, float cy, int radius) {
+    if (!renderer || radius <= 0) return;
+    for (int dy = -radius; dy <= radius; ++dy) {
+        int dx = (int)floor(sqrt((double)(radius * radius - dy * dy)));
+        SDL_RenderLine(renderer, cx - (float)dx, cy + (float)dy, cx + (float)dx, cy + (float)dy);
+    }
+}
+
+static void render_timeline_bounce_indicator(App *app, float x, float y) {
+    if (!app || !app->timeline_bounce_active) return;
+    Uint64 ticks = SDL_GetTicks();
+    bool lit = ((ticks / 240u) % 2u) == 0u;
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(app->renderer, 255, 48, 64, lit ? 255 : 96);
+    render_filled_circle(app->renderer, x + 8.0f, y + 7.0f, 7);
+    SDL_SetRenderDrawColor(app->renderer, 255, 238, 238, 255);
+    double progress = 0.0;
+    if (app->timeline_bounce_target_frames > 0) {
+        progress = (double)app->timeline_bounce_recorded_frames / (double)app->timeline_bounce_target_frames;
+        if (progress < 0.0) progress = 0.0;
+        if (progress > 1.0) progress = 1.0;
+    }
+    SDL_RenderDebugTextFormat(app->renderer,
+                              x + 24.0f,
+                              y,
+                              "BOUNCE REC %3.0f%%",
+                              progress * 100.0);
+}
+
 static void app_render_timeline(App *app) {
     int w = 0, h = 0;
     SDL_GetRenderOutputSize(app->renderer, &w, &h);
@@ -8972,6 +9278,7 @@ static void app_render_timeline(App *app) {
                               timeline_valid_tempo_event_count(&app->timeline),
                               app->roster_clip_count,
                               timeline_playing ? "playing" : "stopped");
+    render_timeline_bounce_indicator(app, 24.0f, 114.0f);
     int64_t range_start = 0, range_end = 0;
     timeline_effective_play_range(&app->timeline, &range_start, &range_end);
     const char *cursor_side_label = timeline_seam_side_label(app->timeline.timeline_cursor_seam_side);
@@ -10928,6 +11235,15 @@ bool app_init(App *app){
     app->timeline_tape_control_mode = TIMELINE_TAPE_CONTROL_BPM;
     app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
     app->timeline_play_range_adjusting = false;
+    app->timeline_bounce_active = false;
+    app->timeline_bounce_samples = NULL;
+    app->timeline_bounce_target_frames = 0;
+    app->timeline_bounce_recorded_frames = 0;
+    app->timeline_bounce_sample_rate = 0;
+    app->timeline_bounce_start_tick = 0;
+    app->timeline_bounce_end_tick = 0;
+    app->timeline_bounce_prev_metronome_enabled = false;
+    app->timeline_bounce_prev_play_range_loop_enabled = false;
     app_timeline_clear_context_menu(app);
     app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
     app->timeline_edit_instance = timeline_instance_ref_invalid();
@@ -11005,6 +11321,7 @@ void app_run(App *app){
     while(app->running){
         SDL_Event e; while(SDL_PollEvent(&e)) if(!input_handle_event(app,&e)) app->running=false;
         Uint64 now=SDL_GetTicksNS(); double dt=(double)(now-prev)/1e9; prev=now; app_debug_update_frame_stats(app, dt); input_update_gamepad(app,dt);
+        app_update_timeline_bounce(app);
         waveform_view_update(&app->view, dt);
         if (app->view_mode == APP_VIEW_LANE_INSPECTOR) {
             app_render_lane_inspector(app);
@@ -11029,6 +11346,7 @@ void app_run(App *app){
 }
 void app_shutdown(App *app){
     if(app->text_entry_open && app->window) SDL_StopTextInput(app->window);
+    app_cancel_timeline_bounce(app);
     app_project_browser_clear_preview(app);
     audio_engine_shutdown(&app->audio);
     clip_destroy(&app->clip);
