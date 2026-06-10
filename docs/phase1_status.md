@@ -124,8 +124,8 @@ cmake --build build
 - In `TRACK AREA`: `Up/Down` moves the lane cursor, and `Enter`/South selects the instance under the cursor in that lane; pressing it again enters `MOVE INSTANCE`.
 - In `TRACK AREA`, gamepad `L2 + left stick X` glides the cursor horizontally with hold acceleration.
 - In `RULER` or `TRACK AREA`, gamepad `L2 + d-pad left/right` or `R2 + d-pad left/right` moves the cursor by one bar and may skip tempo seam barriers. In `ROSTER`, d-pad left/right moves the cursor by snap units and `R2 + d-pad left/right` moves it by one bar.
-- In `TRACK AREA`, `[` / `]` decreases/increases selected instance velocity. Gamepad `L2 + d-pad up/down` also adjusts velocity.
-- In `MOVE INSTANCE`: d-pad or arrow left/right moves a lifted ghost by snap units, gamepad `R2 + d-pad left/right` hops it by one bar, d-pad or arrow up/down moves it between lanes, South/Enter confirms, East/Escape cancels and keeps the original lane/start tick.
+- In `TRACK AREA`, `,` / `.` nudges selected-instance micro-offset, `Shift+,` / `Shift+.` edits selected-instance gate length, and `[` / `]` decreases/increases selected instance velocity. Gamepad `L2+R2 + d-pad left/right` arms then edits offset, `L2+R2 + d-pad up/down` arms then edits length, and `L2 + d-pad up/down` arms then edits velocity.
+- In `MOVE INSTANCE`: d-pad or arrow left/right moves a lifted ghost by snap units while preserving derived 16th-note offset, gamepad `R2 + d-pad left/right` hops it by one bar, d-pad or arrow up/down moves it between lanes, South/Enter confirms, East/Escape cancels and keeps the original lane/start tick.
 - In `ROSTER`: `Up/Down` selects a roster row; `Left/Right` moves the timeline cursor without disarming it; South/Enter arms it, and pressing again enters `PLACE CLIP` at the snapped cursor on the selected timeline lane.
 - In `PLACE CLIP`: d-pad or arrow left/right moves a lifted ghost by snap units and respects tempo seams, gamepad `R2 + d-pad left/right` hops it by one bar, d-pad or arrow up/down chooses lane 1..8, South/Enter confirms, East/Escape cancels.
 - `Place free` does not alter ruler tempo. `Place pulse` writes/conforms a tempo event at the placement tick from the roster clip source BPM. `Insert pulse` shifts later timeline material and later tempo events before placing the source pulse.
@@ -206,7 +206,7 @@ cmake --build build
 - In timeline lane-index focus: d-pad up/down chooses a lane, South opens Lane Inspector
 - In Lane Inspector: South toggles mute, East returns to timeline, R2+face buttons control timeline transport
 - In timeline move/place: d-pad left/right moves by snap units, R2+d-pad left/right hops by one bar, and d-pad up/down chooses lane
-- In timeline track focus: L2 + left stick X glides the cursor, L2/R2 + d-pad left/right moves by bar, and L2 + d-pad up/down adjusts selected instance velocity
+- In timeline track focus: L2 + left stick X glides the cursor, L2/R2 + d-pad left/right moves by bar, L2+R2 + d-pad edits selected offset/length after the value bubble is armed, and L2 + d-pad up/down edits selected velocity after arming
 - In timeline roster focus: d-pad left/right moves the cursor, R2+d-pad left/right hops by bar, and right stick click previews the selected roster clip
 
 ## Known limitations

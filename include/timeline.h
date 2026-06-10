@@ -137,6 +137,13 @@ typedef struct {
 } TimelineTempoEvent;
 
 typedef enum {
+    TIMELINE_VALUE_BUBBLE_NONE,
+    TIMELINE_VALUE_BUBBLE_OFFSET,
+    TIMELINE_VALUE_BUBBLE_LENGTH,
+    TIMELINE_VALUE_BUBBLE_VELOCITY
+} TimelineValueBubbleMode;
+
+typedef enum {
     TIMELINE_FOCUS_TRANSPORT,
     TIMELINE_FOCUS_RULER,
     TIMELINE_FOCUS_LANE_INDEX,
@@ -259,6 +266,68 @@ static inline double timeline_tape_pitch_semitones(float speed) {
 
 static inline float timeline_tape_speed_from_pitch_semitones(double semitones) {
     return timeline_clamp_tape_speed((float)pow(2.0, semitones / 12.0));
+}
+
+static inline int64_t timeline_sixteenth_ticks_for_ppqn(int ticks_per_beat) {
+    int64_t ticks = ticks_per_beat > 0 ? (int64_t)ticks_per_beat : 960;
+    ticks /= 4;
+    return ticks > 0 ? ticks : 1;
+}
+
+static inline int64_t timeline_sixteenth_ticks(const MasterTimeline *timeline) {
+    int ticks_per_beat = timeline && timeline->ticks_per_beat > 0 ? timeline->ticks_per_beat : 960;
+    return timeline_sixteenth_ticks_for_ppqn(ticks_per_beat);
+}
+
+static inline int64_t timeline_nearest_tick_anchor(int64_t tick, int64_t grid_ticks) {
+    if (grid_ticks <= 1) return tick < 0 ? 0 : tick;
+    if (tick <= 0) return 0;
+    return ((tick + grid_ticks / 2) / grid_ticks) * grid_ticks;
+}
+
+static inline int64_t timeline_instance_anchor_tick(const MasterTimeline *timeline,
+                                                    const TimelineInstance *instance) {
+    if (!instance) return 0;
+    return timeline_nearest_tick_anchor(instance->start_tick, timeline_sixteenth_ticks(timeline));
+}
+
+static inline int64_t timeline_instance_end_tick(const TimelineInstance *instance) {
+    if (!instance) return 0;
+    return instance->start_tick + instance->duration_ticks;
+}
+
+static inline int64_t timeline_micro_offset_limit(int64_t sixteenth_ticks) {
+    if (sixteenth_ticks <= 1) return 0;
+    return (sixteenth_ticks - 1) / 2;
+}
+
+static inline void timeline_micro_offset_bounds(int64_t anchor_tick,
+                                                int64_t sixteenth_ticks,
+                                                int64_t *min_start_tick,
+                                                int64_t *max_start_tick) {
+    int64_t limit = timeline_micro_offset_limit(sixteenth_ticks);
+    int64_t min_tick = anchor_tick - limit;
+    int64_t max_tick = anchor_tick + limit;
+    if (min_tick < 0) min_tick = 0;
+    if (max_tick < min_tick) max_tick = min_tick;
+    if (min_start_tick) *min_start_tick = min_tick;
+    if (max_start_tick) *max_start_tick = max_tick;
+}
+
+static inline int64_t timeline_clamp_start_to_anchor_offset_bounds(int64_t anchor_tick,
+                                                                   int64_t start_tick,
+                                                                   int64_t sixteenth_ticks) {
+    int64_t min_tick = 0;
+    int64_t max_tick = 0;
+    timeline_micro_offset_bounds(anchor_tick, sixteenth_ticks, &min_tick, &max_tick);
+    if (start_tick < min_tick) return min_tick;
+    if (start_tick > max_tick) return max_tick;
+    return start_tick;
+}
+
+static inline int64_t timeline_micro_offset_step(int64_t sixteenth_ticks) {
+    int64_t step = sixteenth_ticks / 16;
+    return step > 0 ? step : 1;
 }
 
 static inline double timeline_seconds_between_ticks(const MasterTimeline *timeline, double start_tick, double end_tick) {

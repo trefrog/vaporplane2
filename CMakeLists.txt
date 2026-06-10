@@ -51,10 +51,38 @@ target_include_directories(test_stretch_soundtouch PRIVATE include)
 target_link_libraries(test_stretch_soundtouch PRIVATE SoundTouch)
 add_test(NAME stretch_soundtouch COMMAND test_stretch_soundtouch)
 
+add_executable(test_timeline_math
+    tests/test_timeline_math.c
+)
+target_include_directories(test_timeline_math PRIVATE include)
+target_link_libraries(test_timeline_math PRIVATE SDL3::SDL3)
+add_test(NAME timeline_math COMMAND test_timeline_math)
+
+add_executable(test_timeline_audio
+    tests/test_timeline_audio.c
+    src/audio_engine.c
+    src/transport.c
+)
+target_include_directories(test_timeline_audio PRIVATE include)
+target_link_libraries(test_timeline_audio PRIVATE SDL3::SDL3)
+add_test(NAME timeline_audio COMMAND test_timeline_audio)
+
+add_executable(test_timeline_guarded_edits
+    tests/test_timeline_guarded_edits.c
+    src/app.c src/input.c src/audio_engine.c src/transport.c src/clip.c src/audio_file.c src/waveform.c src/project_validation.c
+    src/stretch_soundtouch.cpp
+)
+target_include_directories(test_timeline_guarded_edits PRIVATE include)
+target_link_libraries(test_timeline_guarded_edits PRIVATE SDL3::SDL3 SoundTouch)
+add_test(NAME timeline_guarded_edits COMMAND test_timeline_guarded_edits)
+
 if(UNIX)
     find_library(MATH_LIBRARY m)
     if(MATH_LIBRARY)
         target_link_libraries(vaporplane PRIVATE ${MATH_LIBRARY})
         target_link_libraries(test_stretch_soundtouch PRIVATE ${MATH_LIBRARY})
+        target_link_libraries(test_timeline_math PRIVATE ${MATH_LIBRARY})
+        target_link_libraries(test_timeline_audio PRIVATE ${MATH_LIBRARY})
+        target_link_libraries(test_timeline_guarded_edits PRIVATE ${MATH_LIBRARY})
     endif()
 endif()

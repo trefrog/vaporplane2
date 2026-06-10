@@ -669,36 +669,6 @@ static void decay_lane_monitors(AudioEngine *a) {
     }
 }
 
-static bool roster_clip_loop_bounds(const RosterClip *clip, size_t *loop_start, size_t *loop_end) {
-    if(!clip || !clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0 || clip->channels <= 0) return false;
-    size_t start = clip->loop_start_frame;
-    size_t end = clip->loop_end_frame;
-    if(end > clip->frame_count) end = clip->frame_count;
-    if(end <= start + 1) {
-        start = 0;
-        end = clip->frame_count;
-    }
-    if(end <= start + 1) return false;
-    if(loop_start) *loop_start = start;
-    if(loop_end) *loop_end = end;
-    return true;
-}
-
-static float roster_sample_at_looped(const RosterClip *clip, double frame, int channel, size_t loop_start, size_t loop_end) {
-    if(!clip || !clip->samples || loop_end <= loop_start) return 0.0f;
-    double loop_len = (double)(loop_end - loop_start);
-    while(frame < (double)loop_start) frame += loop_len;
-    while(frame >= (double)loop_end) frame -= loop_len;
-
-    size_t i0 = (size_t)frame;
-    size_t i1 = i0 + 1 < loop_end ? i0 + 1 : loop_start;
-    double frac = frame - (double)i0;
-    int c = channel < clip->channels ? channel : clip->channels - 1;
-    float s0 = clip->samples[i0 * (size_t)clip->channels + (size_t)c];
-    float s1 = clip->samples[i1 * (size_t)clip->channels + (size_t)c];
-    return (float)((1.0 - frac) * s0 + frac * s1);
-}
-
 static float audio_clip_one_shot_sample_at(const AudioClip *clip, double frame, int channel) {
     /* Drum pads use decoded sample values at unity; all musical gain comes after this read. */
     if(!clip || !clip->samples || clip->frame_count == 0 || clip->channels <= 0) return 0.0f;
@@ -810,13 +780,13 @@ static int mix_timeline_frame_core(const MasterTimeline *timeline,
                 if(playhead_tick < instance_start || playhead_tick >= instance_end) continue;
 
                 const RosterClip *clip = &roster[instance->roster_clip_index];
-                size_t loop_start = 0;
-                size_t loop_end = 0;
-                if(!roster_clip_loop_bounds(clip, &loop_start, &loop_end)) continue;
+                if(!clip->samples || clip->frame_count == 0 || clip->sample_rate <= 0 || clip->channels <= 0) continue;
                 double elapsed_seconds = timeline_seconds_between_ticks(timeline, instance_start, playhead_tick);
                 double instance_duration_seconds = timeline_seconds_between_ticks(timeline, instance_start, instance_end);
-                double source_frame = (double)loop_start + elapsed_seconds * (double)clip->sample_rate;
-                double gain = timeline_declik_gain(elapsed_seconds, instance_duration_seconds, instance_duration_seconds, output_rate);
+                double source_duration_seconds = (double)clip->frame_count / (double)clip->sample_rate;
+                double source_frame = elapsed_seconds * (double)clip->sample_rate;
+                if(source_frame < 0.0 || source_frame >= (double)clip->frame_count) continue;
+                double gain = timeline_declik_gain(elapsed_seconds, source_duration_seconds, instance_duration_seconds, output_rate);
                 double range_elapsed_seconds = timeline_seconds_between_ticks(timeline, (double)range_start_tick, playhead_tick);
                 double range_duration_seconds = timeline_seconds_between_ticks(timeline, (double)range_start_tick, (double)range_end_tick);
                 double range_gain = timeline_declik_gain(range_elapsed_seconds, range_duration_seconds, range_duration_seconds, output_rate);
@@ -824,8 +794,8 @@ static int mix_timeline_frame_core(const MasterTimeline *timeline,
                 if(gain <= 0.0) continue;
 
                 float instance_gain = velocity_to_gain(instance->midi_velocity) * lane_gain * (float)gain;
-                lane_l += roster_sample_at_looped(clip, source_frame, 0, loop_start, loop_end) * instance_gain;
-                lane_r += roster_sample_at_looped(clip, source_frame, 1, loop_start, loop_end) * instance_gain;
+                lane_l += roster_sample_at(clip, source_frame, 0) * instance_gain;
+                lane_r += roster_sample_at(clip, source_frame, 1) * instance_gain;
                 active_count++;
             }
         }

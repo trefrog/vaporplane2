@@ -149,6 +149,8 @@ Timeline:
 - `Tab` / `Shift+Tab`: cycle focus zones
 - `Enter`: activate focused zone, select/drop clips, or apply menu item
 - `C`: open the focus-aware context menu
+- `,` / `.`: nudge the selected instance micro-offset earlier/later
+- `Shift+,` / `Shift+.`: shorten/lengthen the selected instance gate
 - `[` / `]`: adjust selected instance velocity, or adjust a tempo event when the
   ruler cursor is on one
 - `0`: reset tape speed from transport focus
@@ -172,6 +174,8 @@ Common mappings:
 - Right trigger + West: set timeline playhead to cursor
 - Right trigger + East: rewind timeline to play range start
 - Left trigger + Right trigger + South: capture the calibrated/current loop
+- Left trigger + Right trigger + D-pad: arm then edit selected timeline offset
+  or gate length
 - Right stick click: open sample selector in Waveform or preview roster clip in
   Timeline roster focus
 

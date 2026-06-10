@@ -747,9 +747,104 @@ static void app_set_timeline_edit_status(App *app) {
                  timeline_edit_clip_name(app));
 }
 
+static int64_t timeline_move_anchor_min_for_offset(int64_t offset_ticks, int64_t sixteenth_ticks) {
+    if (offset_ticks >= 0) return 0;
+    int64_t min_anchor = -offset_ticks;
+    if (sixteenth_ticks <= 1) return min_anchor;
+    int64_t remainder = min_anchor % sixteenth_ticks;
+    if (remainder != 0) min_anchor += sixteenth_ticks - remainder;
+    return min_anchor;
+}
+
+static int64_t timeline_clamp_move_anchor_for_offset(int64_t anchor_tick,
+                                                     int64_t offset_ticks,
+                                                     int64_t sixteenth_ticks) {
+    int64_t min_anchor = timeline_move_anchor_min_for_offset(offset_ticks, sixteenth_ticks);
+    if (anchor_tick < min_anchor) anchor_tick = min_anchor;
+    if (anchor_tick < 0) anchor_tick = 0;
+    return anchor_tick;
+}
+
+static void timeline_format_length_ticks(const MasterTimeline *timeline,
+                                         int64_t ticks,
+                                         char *out,
+                                         size_t out_size) {
+    if (!out || out_size == 0) return;
+    if (ticks <= 0) {
+        SDL_snprintf(out, out_size, "len 0t");
+        return;
+    }
+    int64_t beat = timeline_snap_ticks(timeline);
+    int beats_per_bar = timeline && timeline->timeline_beats_per_bar > 0 ?
+        timeline->timeline_beats_per_bar : 4;
+    int64_t bar = beat * (int64_t)beats_per_bar;
+    int64_t sixteenth = timeline_sixteenth_ticks(timeline);
+    if (bar > 0 && ticks % bar == 0) {
+        long long bars = (long long)(ticks / bar);
+        SDL_snprintf(out, out_size, "%lld bar%s", bars, bars == 1 ? "" : "s");
+        return;
+    }
+    if (sixteenth > 0 && ticks % sixteenth == 0) {
+        long long units = (long long)(ticks / sixteenth);
+        if (units == 1) SDL_snprintf(out, out_size, "1/16");
+        else if (units == 2) SDL_snprintf(out, out_size, "1/8");
+        else if (units == 4) SDL_snprintf(out, out_size, "1/4");
+        else if (units == 8) SDL_snprintf(out, out_size, "1/2");
+        else SDL_snprintf(out, out_size, "%lld/16", units);
+        return;
+    }
+    SDL_snprintf(out, out_size, "len %lldt", (long long)ticks);
+}
+
+static void timeline_format_offset_ticks(int64_t offset_ticks, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    if (offset_ticks == 0) SDL_snprintf(out, out_size, "offset centered");
+    else SDL_snprintf(out, out_size, "offset %+lldt", (long long)offset_ticks);
+}
+
+static bool timeline_value_bubble_label(const App *app, char *out, size_t out_size) {
+    if (!app || !out || out_size == 0 ||
+        app->timeline_value_bubble_mode == TIMELINE_VALUE_BUBBLE_NONE ||
+        !timeline_instance_ref_valid(&app->timeline, app->timeline_value_bubble_instance)) {
+        return false;
+    }
+    const TimelineInstance *instance = timeline_const_instance_from_ref(&app->timeline,
+                                                                        app->timeline_value_bubble_instance);
+    if (!instance) return false;
+    switch (app->timeline_value_bubble_mode) {
+        case TIMELINE_VALUE_BUBBLE_OFFSET:
+        {
+            int64_t anchor = timeline_instance_anchor_tick(&app->timeline, instance);
+            timeline_format_offset_ticks(instance->start_tick - anchor, out, out_size);
+            return true;
+        }
+        case TIMELINE_VALUE_BUBBLE_LENGTH:
+        {
+            char length[32];
+            timeline_format_length_ticks(&app->timeline, instance->duration_ticks, length, sizeof(length));
+            if (SDL_strncmp(length, "len ", 4) == 0) SDL_snprintf(out, out_size, "%s", length);
+            else SDL_snprintf(out, out_size, "len %s", length);
+            return true;
+        }
+        case TIMELINE_VALUE_BUBBLE_VELOCITY:
+            SDL_snprintf(out, out_size, "v%d", clamp_int(instance->midi_velocity, 1, 127));
+            return true;
+        case TIMELINE_VALUE_BUBBLE_NONE:
+        default:
+            return false;
+    }
+}
+
+void app_timeline_dismiss_value_bubble(App *app) {
+    if (!app) return;
+    app->timeline_value_bubble_mode = TIMELINE_VALUE_BUBBLE_NONE;
+    app->timeline_value_bubble_instance = timeline_instance_ref_invalid();
+}
+
 #define TIMELINE_CONTEXT_MAX_ITEMS 12
 
 static void app_timeline_clear_context_menu(App *app) {
+    app_timeline_dismiss_value_bubble(app);
     app->timeline_context_menu_open = false;
     app->timeline_context_menu_scope = TIMELINE_CONTEXT_SCOPE_NONE;
     app->timeline_context_menu_selected = 0;
@@ -1413,8 +1508,18 @@ static void timeline_update_ghost_valid(App *app) {
 }
 
 static void timeline_clamp_ghost_start(App *app) {
-    if (app->timeline_edit_ghost_start_tick < 0) app->timeline_edit_ghost_start_tick = 0;
-    app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline_edit_ghost_start_tick);
+    if (app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE) {
+        int64_t sixteenth = timeline_sixteenth_ticks(&app->timeline);
+        int64_t anchor = app->timeline_edit_ghost_start_tick - app->timeline_edit_preserved_offset_ticks;
+        anchor = timeline_clamp_move_anchor_for_offset(anchor,
+                                                       app->timeline_edit_preserved_offset_ticks,
+                                                       sixteenth);
+        app->timeline_edit_ghost_start_tick = anchor + app->timeline_edit_preserved_offset_ticks;
+        if (app->timeline_edit_ghost_start_tick < 0) app->timeline_edit_ghost_start_tick = 0;
+    } else {
+        if (app->timeline_edit_ghost_start_tick < 0) app->timeline_edit_ghost_start_tick = 0;
+        app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline_edit_ghost_start_tick);
+    }
     timeline_normalize_ghost_seam_side(app);
 }
 
@@ -1523,6 +1628,7 @@ static void timeline_enter_move_instance(App *app) {
         app_set_status(app, "no instance selected");
         return;
     }
+    app_timeline_dismiss_value_bubble(app);
     TimelineInstance *instance = timeline_instance_from_ref(&app->timeline, app->selected_timeline_instance);
     app->timeline_edit_mode = TIMELINE_EDIT_MOVE_INSTANCE;
     app->timeline_edit_placement_mode = TIMELINE_PLACE_FREE;
@@ -1534,6 +1640,8 @@ static void timeline_enter_move_instance(App *app) {
     app->timeline_edit_ghost_lane = app->selected_timeline_instance.lane_index;
     app->timeline_edit_original_start_tick = instance->start_tick;
     app->timeline_edit_ghost_start_tick = instance->start_tick;
+    int64_t anchor_tick = timeline_instance_anchor_tick(&app->timeline, instance);
+    app->timeline_edit_preserved_offset_ticks = instance->start_tick - anchor_tick;
     app->timeline_edit_original_seam_side = timeline_default_seam_side_for_tick(&app->timeline, instance->start_tick);
     if (app->timeline.timeline_cursor_tick == instance->start_tick &&
         app->timeline.timeline_cursor_seam_side != TIMELINE_SEAM_NONE) {
@@ -1547,6 +1655,7 @@ static void timeline_enter_move_instance(App *app) {
 }
 
 static void timeline_enter_place_clip(App *app, TimelinePlacementMode placement_mode) {
+    app_timeline_dismiss_value_bubble(app);
     if (app->selected_roster_clip < 0 || app->selected_roster_clip >= app->roster_clip_count) {
         app_set_status(app, "roster empty");
         return;
@@ -1579,6 +1688,7 @@ static void timeline_enter_place_clip(App *app, TimelinePlacementMode placement_
     app->timeline_edit_original_lane = lane_index;
     app->timeline_edit_ghost_lane = lane_index;
     app->timeline_edit_original_start_tick = 0;
+    app->timeline_edit_preserved_offset_ticks = 0;
     app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick);
     app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
     app->timeline_edit_ghost_seam_side = app->timeline.timeline_cursor_tick == app->timeline_edit_ghost_start_tick ?
@@ -1592,6 +1702,7 @@ static void timeline_enter_place_clip(App *app, TimelinePlacementMode placement_
 }
 
 static void timeline_enter_place_pattern(App *app) {
+    app_timeline_dismiss_value_bubble(app);
     if (!app_selected_timeline_lane_is_drum(app)) {
         app_set_status(app, "Select a drum lane for patterns");
         return;
@@ -1619,6 +1730,7 @@ static void timeline_enter_place_pattern(App *app) {
     app->timeline_edit_original_lane = lane_index;
     app->timeline_edit_ghost_lane = lane_index;
     app->timeline_edit_original_start_tick = 0;
+    app->timeline_edit_preserved_offset_ticks = 0;
     app->timeline_edit_ghost_start_tick = timeline_snap_tick_down(app, app->timeline.timeline_cursor_tick);
     app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
     app->timeline_edit_ghost_seam_side = app->timeline.timeline_cursor_tick == app->timeline_edit_ghost_start_tick ?
@@ -3180,12 +3292,26 @@ void app_timeline_select_lane_delta(App *app, int delta) {
 void app_timeline_nudge_edit_ghost(App *app, int direction) {
     if (direction == 0 || app->timeline_edit_mode == TIMELINE_EDIT_NONE) return;
     int64_t snap = timeline_edit_snap_ticks(app);
-    timeline_nudge_tick_with_seams(&app->timeline,
-                                   &app->timeline_edit_ghost_start_tick,
-                                   &app->timeline_edit_ghost_seam_side,
-                                   direction,
-                                   snap,
-                                   true);
+    if (app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE) {
+        int64_t anchor = app->timeline_edit_ghost_start_tick - app->timeline_edit_preserved_offset_ticks;
+        timeline_nudge_tick_with_seams(&app->timeline,
+                                       &anchor,
+                                       &app->timeline_edit_ghost_seam_side,
+                                       direction,
+                                       snap,
+                                       true);
+        anchor = timeline_clamp_move_anchor_for_offset(anchor,
+                                                       app->timeline_edit_preserved_offset_ticks,
+                                                       timeline_sixteenth_ticks(&app->timeline));
+        app->timeline_edit_ghost_start_tick = anchor + app->timeline_edit_preserved_offset_ticks;
+    } else {
+        timeline_nudge_tick_with_seams(&app->timeline,
+                                       &app->timeline_edit_ghost_start_tick,
+                                       &app->timeline_edit_ghost_seam_side,
+                                       direction,
+                                       snap,
+                                       true);
+    }
     timeline_clamp_ghost_start(app);
     timeline_update_ghost_valid(app);
     if (!app->timeline_edit_ghost_valid) app_set_status(app, "overlap blocked");
@@ -3197,12 +3323,26 @@ void app_timeline_nudge_edit_ghost_by_bar(App *app, int direction) {
     int beats_per_bar = app->timeline.timeline_beats_per_bar > 0 ? app->timeline.timeline_beats_per_bar : 4;
     int64_t bar_ticks = timeline_snap_ticks(&app->timeline) * (int64_t)beats_per_bar;
     if (bar_ticks < 1) bar_ticks = 1;
-    timeline_nudge_tick_with_seams(&app->timeline,
-                                   &app->timeline_edit_ghost_start_tick,
-                                   &app->timeline_edit_ghost_seam_side,
-                                   direction,
-                                   bar_ticks,
-                                   false);
+    if (app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE) {
+        int64_t anchor = app->timeline_edit_ghost_start_tick - app->timeline_edit_preserved_offset_ticks;
+        timeline_nudge_tick_with_seams(&app->timeline,
+                                       &anchor,
+                                       &app->timeline_edit_ghost_seam_side,
+                                       direction,
+                                       bar_ticks,
+                                       false);
+        anchor = timeline_clamp_move_anchor_for_offset(anchor,
+                                                       app->timeline_edit_preserved_offset_ticks,
+                                                       timeline_sixteenth_ticks(&app->timeline));
+        app->timeline_edit_ghost_start_tick = anchor + app->timeline_edit_preserved_offset_ticks;
+    } else {
+        timeline_nudge_tick_with_seams(&app->timeline,
+                                       &app->timeline_edit_ghost_start_tick,
+                                       &app->timeline_edit_ghost_seam_side,
+                                       direction,
+                                       bar_ticks,
+                                       false);
+    }
     timeline_clamp_ghost_start(app);
     timeline_update_ghost_valid(app);
     if (!app->timeline_edit_ghost_valid) app_set_status(app, "overlap blocked");
@@ -3282,6 +3422,7 @@ static void app_timeline_confirm_edit_mode(App *app) {
         if (!instance || !timeline_lane_index_valid(app->timeline_edit_ghost_lane)) {
             if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
             app->timeline_edit_mode = TIMELINE_EDIT_NONE;
+            app->timeline_edit_preserved_offset_ticks = 0;
             app_set_status(app, "Move cancelled");
             return;
         }
@@ -3314,6 +3455,7 @@ static void app_timeline_confirm_edit_mode(App *app) {
         sync_timeline_play_range_no_lock(app);
         if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
         app->timeline_edit_mode = TIMELINE_EDIT_NONE;
+        app->timeline_edit_preserved_offset_ticks = 0;
         app_set_status(app, "Instance moved");
         return;
     }
@@ -3425,6 +3567,7 @@ static void app_timeline_confirm_edit_mode(App *app) {
         else if (completed_mode == TIMELINE_PLACE_PULSE) app_set_status(app, "Pulse placed");
         else if (instance->kind == TIMELINE_INSTANCE_DRUM_PATTERN) app_set_status(app, "Pattern placed");
         else app_set_status(app, "Clip placed");
+        app->timeline_edit_preserved_offset_ticks = 0;
     }
 }
 
@@ -3445,6 +3588,7 @@ static void app_timeline_cancel_edit_mode(App *app) {
     app->timeline_edit_roster_clip_index = -1;
     app->timeline_edit_pattern_index = -1;
     app->timeline_edit_ghost_lane = 0;
+    app->timeline_edit_preserved_offset_ticks = 0;
     app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
     app->timeline_edit_ghost_seam_side = TIMELINE_SEAM_NONE;
     app->timeline_edit_ghost_valid = false;
@@ -3539,6 +3683,11 @@ void app_timeline_cancel_focus(App *app) {
     }
     if (app->timeline_context_menu_open) {
         app_timeline_close_context_menu(app);
+        return;
+    }
+    if (app->timeline_value_bubble_mode != TIMELINE_VALUE_BUBBLE_NONE) {
+        app_timeline_dismiss_value_bubble(app);
+        app_set_status(app, "Value edit cancelled");
         return;
     }
     if (app->timeline_edit_mode != TIMELINE_EDIT_NONE) {
@@ -6736,7 +6885,10 @@ static void app_reset_current_project_to_blank(App *app) {
     app->timeline_edit_instance_kind = TIMELINE_INSTANCE_AUDIO_CLIP;
     app->timeline_edit_roster_clip_index = -1;
     app->timeline_edit_pattern_index = -1;
+    app->timeline_edit_preserved_offset_ticks = 0;
     app->timeline_edit_ghost_valid = false;
+    app->timeline_value_bubble_mode = TIMELINE_VALUE_BUBBLE_NONE;
+    app->timeline_value_bubble_instance = timeline_instance_ref_invalid();
     app->project_menu_open = false;
     app->project_menu_selected = 0;
     app->project_browser_open = false;
@@ -7978,6 +8130,7 @@ bool app_load_project_bundle(App *app, const char *bundle_path) {
     app->timeline_play_range_handle = TIMELINE_RANGE_HANDLE_START;
     app->timeline_play_range_adjusting = false;
     app->timeline_edit_mode = TIMELINE_EDIT_NONE;
+    app->timeline_edit_preserved_offset_ticks = 0;
     app_timeline_clear_context_menu(app);
     app->project_menu_open = false;
     app->view_mode = APP_VIEW_TIMELINE;
@@ -8261,6 +8414,132 @@ void app_timeline_adjust_selected_instance_velocity(App *app, int delta) {
     if (instance) instance->midi_velocity = velocity;
     if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
     SDL_snprintf(app->status_text, sizeof(app->status_text), "Velocity %d", velocity);
+}
+
+void app_timeline_nudge_selected_instance_offset(App *app, int direction) {
+    if (!app || direction == 0) return;
+    if (!timeline_instance_ref_valid(&app->timeline, app->selected_timeline_instance)) {
+        app_set_status(app, "No instance selected");
+        return;
+    }
+
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    TimelineInstance *instance = timeline_instance_from_ref(&app->timeline, app->selected_timeline_instance);
+    if (!instance || instance->duration_ticks <= 0) {
+        if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+        app_set_status(app, "Invalid instance");
+        return;
+    }
+
+    int64_t sixteenth = timeline_sixteenth_ticks(&app->timeline);
+    int64_t anchor = timeline_instance_anchor_tick(&app->timeline, instance);
+    int64_t step = timeline_micro_offset_step(sixteenth) * (direction > 0 ? 1 : -1);
+    int64_t proposed_start = instance->start_tick + step;
+    proposed_start = timeline_clamp_start_to_anchor_offset_bounds(anchor, proposed_start, sixteenth);
+    TimelineInstanceRef ignore = app->selected_timeline_instance;
+    bool overlap = timeline_range_overlaps_existing(app,
+                                                    ignore.lane_index,
+                                                    proposed_start,
+                                                    instance->duration_ticks,
+                                                    ignore,
+                                                    false);
+    if (overlap) {
+        if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+        app_set_status(app, "overlap blocked");
+        return;
+    }
+
+    instance->start_tick = proposed_start;
+    recompute_timeline_length_no_lock(app);
+    sync_timeline_play_range_no_lock(app);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    char label[40];
+    timeline_format_offset_ticks(proposed_start - anchor, label, sizeof(label));
+    app_set_status(app, label);
+}
+
+void app_timeline_adjust_selected_instance_length(App *app, int direction) {
+    if (!app || direction == 0) return;
+    if (!timeline_instance_ref_valid(&app->timeline, app->selected_timeline_instance)) {
+        app_set_status(app, "No instance selected");
+        return;
+    }
+
+    if (app->audio.stream) SDL_LockAudioStream(app->audio.stream);
+    TimelineInstance *instance = timeline_instance_from_ref(&app->timeline, app->selected_timeline_instance);
+    if (!instance) {
+        if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+        app_set_status(app, "Invalid instance");
+        return;
+    }
+
+    int64_t step = timeline_edit_snap_ticks(app);
+    if (step < 1) step = 1;
+    int64_t proposed_duration = instance->duration_ticks + step * (direction > 0 ? 1 : -1);
+    if (proposed_duration < 1) proposed_duration = 1;
+    TimelineInstanceRef ignore = app->selected_timeline_instance;
+    bool overlap = timeline_range_overlaps_existing(app,
+                                                    ignore.lane_index,
+                                                    instance->start_tick,
+                                                    proposed_duration,
+                                                    ignore,
+                                                    false);
+    if (overlap) {
+        if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+        app_set_status(app, "overlap blocked");
+        return;
+    }
+
+    instance->duration_ticks = proposed_duration;
+    recompute_timeline_length_no_lock(app);
+    sync_timeline_play_range_no_lock(app);
+    if (app->audio.stream) SDL_UnlockAudioStream(app->audio.stream);
+
+    char length[32];
+    timeline_format_length_ticks(&app->timeline, proposed_duration, length, sizeof(length));
+    if (SDL_strncmp(length, "len ", 4) == 0) app_set_status(app, length);
+    else SDL_snprintf(app->status_text, sizeof(app->status_text), "length %s", length);
+}
+
+void app_timeline_guarded_value_edit(App *app, TimelineValueBubbleMode mode, int direction) {
+    if (!app || mode == TIMELINE_VALUE_BUBBLE_NONE || direction == 0) return;
+    if (app->timeline_edit_mode != TIMELINE_EDIT_NONE || app->timeline_play_range_adjusting) {
+        app_set_status(app, "Confirm or cancel edit first");
+        return;
+    }
+    if (!timeline_instance_ref_valid(&app->timeline, app->selected_timeline_instance)) {
+        app_timeline_dismiss_value_bubble(app);
+        app_set_status(app, "No instance selected");
+        return;
+    }
+
+    bool already_armed = app->timeline_value_bubble_mode == mode &&
+        timeline_instance_ref_equal(app->timeline_value_bubble_instance, app->selected_timeline_instance);
+    app->timeline_value_bubble_mode = mode;
+    app->timeline_value_bubble_instance = app->selected_timeline_instance;
+    if (!already_armed) {
+        char label[40];
+        if (timeline_value_bubble_label(app, label, sizeof(label))) app_set_status(app, label);
+        return;
+    }
+
+    switch (mode) {
+        case TIMELINE_VALUE_BUBBLE_OFFSET:
+            app_timeline_nudge_selected_instance_offset(app, direction);
+            break;
+        case TIMELINE_VALUE_BUBBLE_LENGTH:
+            app_timeline_adjust_selected_instance_length(app, direction);
+            break;
+        case TIMELINE_VALUE_BUBBLE_VELOCITY:
+            app_timeline_adjust_selected_instance_velocity(app, direction);
+            break;
+        case TIMELINE_VALUE_BUBBLE_NONE:
+        default:
+            break;
+    }
+    app->timeline_value_bubble_mode = mode;
+    app->timeline_value_bubble_instance = app->selected_timeline_instance;
 }
 
 void app_preview_selected_roster_clip(App *app) {
@@ -9097,7 +9376,9 @@ static void app_render_controls_legend(App *app) {
         { "", "Loop play range", "R2+North", false },
         { "Left / Right", "Pan / cursor", "D-pad L/R", false },
         { "Up / Down", "Zoom / lane", "D-pad U/D", false },
-        { "[ / ]", "Velocity / marked BPM", "", false },
+        { ", / .", "Micro-offset", "L2+R2 D-pad L/R", false },
+        { "Shift+, / .", "Gate length", "L2+R2 D-pad U/D", false },
+        { "[ / ]", "Velocity / marked BPM", "L2 D-pad U/D", false },
         { "", "TRACKS + ROSTER", "", true },
         { "Enter", "Select / move / place", "South", false },
         { "C", "Context menu", "Start", false },
@@ -9220,6 +9501,147 @@ static void render_timeline_block(App *app,
                                     255);
         SDL_RenderDebugText(renderer, draw.x + 8.0f, draw.y + 10.0f, label);
     }
+}
+
+static float timeline_clamp_x(float value, float min_value, float max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
+static void render_timeline_value_bubble(App *app,
+                                         SDL_FRect track_rect,
+                                         SDL_FRect block,
+                                         float anchor_x,
+                                         const char *label) {
+    if (!app || !label || !label[0]) return;
+    float text_w = debug_text_width(label);
+    SDL_FRect bubble = {
+        anchor_x + 4.0f,
+        block.y + 3.0f,
+        text_w + 14.0f,
+        18.0f
+    };
+    if (bubble.x + bubble.w > track_rect.x + track_rect.w - 4.0f) {
+        bubble.x = track_rect.x + track_rect.w - bubble.w - 4.0f;
+    }
+    if (bubble.x < track_rect.x + 4.0f) bubble.x = track_rect.x + 4.0f;
+    if (bubble.y + bubble.h > track_rect.y + track_rect.h - 4.0f) {
+        bubble.y = track_rect.y + track_rect.h - bubble.h - 4.0f;
+    }
+    if (bubble.y < track_rect.y + 4.0f) bubble.y = track_rect.y + 4.0f;
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(app->renderer, 8, 10, 16, 236);
+    SDL_RenderFillRect(app->renderer, &bubble);
+    SDL_SetRenderDrawColor(app->renderer, 130, 238, 234, 255);
+    SDL_RenderRect(app->renderer, &bubble);
+    SDL_SetRenderDrawColor(app->renderer, 238, 246, 248, 255);
+    SDL_RenderDebugText(app->renderer, bubble.x + 7.0f, bubble.y + 5.0f, label);
+}
+
+static void render_timeline_instance_visual(App *app,
+                                            SDL_FRect track_rect,
+                                            float lane_y,
+                                            float lane_h,
+                                            double view_start,
+                                            double view_span,
+                                            float timeline_x,
+                                            float timeline_w,
+                                            int64_t anchor_tick,
+                                            int64_t true_start_tick,
+                                            int64_t duration_ticks,
+                                            SDL_Color clip_color,
+                                            SDL_Color lane_color,
+                                            const char *label,
+                                            TimelineBlockStyle style,
+                                            bool muted,
+                                            bool selected,
+                                            const char *bubble_label) {
+    if (!app || duration_ticks <= 0) return;
+    int64_t true_end_tick = true_start_tick + duration_ticks;
+    double body_start_tick = (true_end_tick <= anchor_tick && true_start_tick < anchor_tick) ?
+        (double)true_start_tick : (double)anchor_tick;
+    double body_end_tick = (double)true_end_tick;
+    if (body_end_tick < body_start_tick) {
+        double tmp = body_start_tick;
+        body_start_tick = body_end_tick;
+        body_end_tick = tmp;
+    }
+
+    float view_left = timeline_x;
+    float view_right = timeline_x + timeline_w;
+    float body_x0 = timeline_x_for_tick(body_start_tick, view_start, view_span, timeline_x, timeline_w);
+    float body_x1 = timeline_x_for_tick(body_end_tick, view_start, view_span, timeline_x, timeline_w);
+    if (body_x1 < view_left || body_x0 > view_right) {
+        body_x0 = timeline_x_for_tick((double)true_start_tick, view_start, view_span, timeline_x, timeline_w);
+        body_x1 = timeline_x_for_tick((double)true_end_tick, view_start, view_span, timeline_x, timeline_w);
+    }
+    body_x0 = timeline_clamp_x(body_x0, view_left, view_right);
+    body_x1 = timeline_clamp_x(body_x1, view_left, view_right);
+    if (body_x1 < body_x0) {
+        float tmp = body_x0;
+        body_x0 = body_x1;
+        body_x1 = tmp;
+    }
+
+    SDL_FRect block = { body_x0 + 2.0f, lane_y + 5.0f, body_x1 - body_x0 - 4.0f, lane_h - 10.0f };
+    if (block.h < 4.0f) block.h = 4.0f;
+    if (block.w < 8.0f) {
+        float right_edge = body_x1 - 2.0f;
+        block.w = 8.0f;
+        block.x = right_edge - block.w;
+        if (block.x < view_left + 2.0f) block.x = view_left + 2.0f;
+    }
+    render_timeline_block(app, block, clip_color, lane_color, label, style, muted);
+
+    float anchor_x = timeline_x_for_tick((double)anchor_tick, view_start, view_span, timeline_x, timeline_w);
+    float true_start_x = timeline_x_for_tick((double)true_start_tick, view_start, view_span, timeline_x, timeline_w);
+    float true_end_x = timeline_x_for_tick((double)true_end_tick, view_start, view_span, timeline_x, timeline_w);
+    bool anchor_visible = anchor_x >= view_left && anchor_x <= view_right;
+    bool start_visible = true_start_x >= view_left && true_start_x <= view_right;
+    bool end_visible = true_end_x >= view_left && true_end_x <= view_right;
+    int64_t offset_ticks = true_start_tick - anchor_tick;
+
+    SDL_SetRenderDrawBlendMode(app->renderer, SDL_BLENDMODE_BLEND);
+    SDL_Color marker = selected ? (SDL_Color){ 255, 255, 255, 255 } : lane_color;
+    if (muted) marker = color_muted(marker);
+    set_draw_color(app->renderer, marker);
+    if (anchor_visible) {
+        SDL_FRect handle = { anchor_x - 2.0f, block.y, 4.0f, block.h };
+        SDL_RenderFillRect(app->renderer, &handle);
+    }
+    if (end_visible) {
+        SDL_RenderLine(app->renderer, true_end_x, block.y - 1.0f, true_end_x, block.y + block.h + 1.0f);
+    }
+
+    if (offset_ticks < 0) {
+        float x0 = timeline_clamp_x(true_start_x, view_left, view_right);
+        float x1 = timeline_clamp_x(anchor_x, view_left, view_right);
+        float y = block.y + block.h * 0.48f;
+        SDL_SetRenderDrawColor(app->renderer, 255, 238, 180, muted ? 130 : 230);
+        SDL_RenderLine(app->renderer, x0, y, x1, y);
+        if (start_visible) SDL_RenderLine(app->renderer, true_start_x, y - 4.0f, true_start_x, y + 4.0f);
+    } else if (offset_ticks > 0) {
+        float x0 = timeline_clamp_x(anchor_x, view_left, view_right);
+        float x1 = timeline_clamp_x(true_start_x, view_left, view_right);
+        if (x1 > x0) {
+            SDL_FRect lead = { x0, block.y + 2.0f, x1 - x0, block.h - 4.0f };
+            SDL_SetRenderDrawColor(app->renderer, 6, 8, 14, muted ? 98 : 138);
+            SDL_RenderFillRect(app->renderer, &lead);
+        }
+        if (start_visible) {
+            SDL_SetRenderDrawColor(app->renderer, 255, 238, 180, muted ? 130 : 230);
+            SDL_RenderLine(app->renderer, true_start_x, block.y + 1.0f, true_start_x, block.y + block.h - 1.0f);
+        }
+    }
+
+    if (selected && start_visible) {
+        SDL_SetRenderDrawColor(app->renderer, 255, 255, 255, 190);
+        SDL_RenderLine(app->renderer, true_start_x, block.y - 2.0f, true_start_x, block.y + block.h + 2.0f);
+    }
+
+    render_timeline_value_bubble(app, track_rect, block, anchor_x, bubble_label);
 }
 
 static void render_focus_outline(App *app, SDL_FRect rect, TimelineFocusZone zone) {
@@ -9860,18 +10282,13 @@ static void app_render_timeline(App *app) {
                 clip_color = clip->color;
                 instance_name = clip->name;
             }
-            double instance_start = (double)instance->start_tick;
-            double instance_end = (double)(instance->start_tick + instance->duration_ticks);
-            if (instance_end < view_start || instance_start > view_end) continue;
-            float x = timeline_x_for_tick(instance_start, view_start, view_span, timeline_x, timeline_w);
-            float end_x = timeline_x_for_tick(instance_end, view_start, view_span, timeline_x, timeline_w);
-            if (x < timeline_x) x = timeline_x;
-            if (end_x > timeline_x + timeline_w) end_x = timeline_x + timeline_w;
-            float block_w = end_x - x;
-            if (block_w < 8.0f) block_w = 8.0f;
             float lane_y = track_rect.y + (float)lane_index * lane_h;
-            SDL_FRect block = { x + 2.0f, lane_y + 5.0f, block_w - 4.0f, lane_h - 10.0f };
-            if (block.w < 8.0f) block.w = 8.0f;
+            int64_t anchor_tick = timeline_instance_anchor_tick(&app->timeline, instance);
+            int64_t true_start_tick = instance->start_tick;
+            int64_t true_end_tick = timeline_instance_end_tick(instance);
+            int64_t visual_min_tick = anchor_tick < true_start_tick ? anchor_tick : true_start_tick;
+            int64_t visual_max_tick = anchor_tick > true_end_tick ? anchor_tick : true_end_tick;
+            if ((double)visual_max_tick < view_start || (double)visual_min_tick > view_end) continue;
             TimelineBlockStyle style = timeline_instance_ref_equal(ref, app->selected_timeline_instance) ? TIMELINE_BLOCK_SELECTED : TIMELINE_BLOCK_NORMAL;
             if (app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE &&
                 timeline_instance_ref_equal(ref, app->timeline_edit_instance)) {
@@ -9879,7 +10296,30 @@ static void app_render_timeline(App *app) {
             }
             char label[APP_ROSTER_CLIP_NAME_MAX + 16];
             SDL_snprintf(label, sizeof(label), "%s v%d", instance_name, instance->midi_velocity);
-            render_timeline_block(app, block, clip_color, lane_color, label, style, lane->muted);
+            char bubble_label[40];
+            const char *bubble_text = NULL;
+            if (timeline_instance_ref_equal(ref, app->timeline_value_bubble_instance) &&
+                timeline_value_bubble_label(app, bubble_label, sizeof(bubble_label))) {
+                bubble_text = bubble_label;
+            }
+            render_timeline_instance_visual(app,
+                                            track_rect,
+                                            lane_y,
+                                            lane_h,
+                                            view_start,
+                                            view_span,
+                                            timeline_x,
+                                            timeline_w,
+                                            anchor_tick,
+                                            true_start_tick,
+                                            instance->duration_ticks,
+                                            clip_color,
+                                            lane_color,
+                                            label,
+                                            style,
+                                            lane->muted,
+                                            timeline_instance_ref_equal(ref, app->selected_timeline_instance),
+                                            bubble_text);
         }
     }
 
@@ -9903,19 +10343,17 @@ static void app_render_timeline(App *app) {
             ghost_material_valid = true;
         }
         if (ghost_material_valid) {
-            double ghost_start = (double)app->timeline_edit_ghost_start_tick;
-            double ghost_end = (double)(app->timeline_edit_ghost_start_tick + app->timeline_edit_duration_ticks);
-            if (ghost_end >= view_start && ghost_start <= view_end) {
-            float x = timeline_x_for_tick(ghost_start, view_start, view_span, timeline_x, timeline_w);
-            float end_x = timeline_x_for_tick(ghost_end, view_start, view_span, timeline_x, timeline_w);
-            if (x < timeline_x) x = timeline_x;
-            if (end_x > timeline_x + timeline_w) end_x = timeline_x + timeline_w;
-            float block_w = end_x - x;
-            if (block_w < 8.0f) block_w = 8.0f;
+            int64_t ghost_start = app->timeline_edit_ghost_start_tick;
+            int64_t ghost_end = app->timeline_edit_ghost_start_tick + app->timeline_edit_duration_ticks;
+            int64_t ghost_anchor = app->timeline_edit_mode == TIMELINE_EDIT_MOVE_INSTANCE ?
+                app->timeline_edit_ghost_start_tick - app->timeline_edit_preserved_offset_ticks :
+                timeline_nearest_tick_anchor(app->timeline_edit_ghost_start_tick,
+                                             timeline_sixteenth_ticks(&app->timeline));
+            int64_t visual_min_tick = ghost_anchor < ghost_start ? ghost_anchor : ghost_start;
+            int64_t visual_max_tick = ghost_anchor > ghost_end ? ghost_anchor : ghost_end;
+            if ((double)visual_max_tick >= view_start && (double)visual_min_tick <= view_end) {
             int ghost_lane = clamp_int(app->timeline_edit_ghost_lane, 0, TIMELINE_MAX_LANES - 1);
             float lane_y = track_rect.y + (float)ghost_lane * lane_h;
-            SDL_FRect ghost = { x + 2.0f, lane_y + 5.0f, block_w - 4.0f, lane_h - 10.0f };
-            if (ghost.w < 8.0f) ghost.w = 8.0f;
             char ghost_label[APP_ROSTER_CLIP_NAME_MAX + 16];
             if (app->timeline_edit_ghost_valid) {
                 const char *ghost_verb = app->timeline_edit_mode == TIMELINE_EDIT_PLACE_CLIP ?
@@ -9930,13 +10368,24 @@ static void app_render_timeline(App *app) {
             TimelineLane *ghost_timeline_lane = &app->timeline.lanes[ghost_lane];
             const LanePalette *ghost_palette = lane_palette_for_index(ghost_timeline_lane->palette_index);
             SDL_Color ghost_lane_color = ghost_palette ? ghost_palette->pastel : (SDL_Color){ 180, 188, 205, 255 };
-            render_timeline_block(app,
-                                  ghost,
-                                  ghost_color,
-                                  ghost_lane_color,
-                                  ghost_label,
-                                  app->timeline_edit_ghost_valid ? TIMELINE_BLOCK_GHOST_VALID : TIMELINE_BLOCK_GHOST_INVALID,
-                                  ghost_timeline_lane->muted);
+            render_timeline_instance_visual(app,
+                                            track_rect,
+                                            lane_y,
+                                            lane_h,
+                                            view_start,
+                                            view_span,
+                                            timeline_x,
+                                            timeline_w,
+                                            ghost_anchor,
+                                            ghost_start,
+                                            app->timeline_edit_duration_ticks,
+                                            ghost_color,
+                                            ghost_lane_color,
+                                            ghost_label,
+                                            app->timeline_edit_ghost_valid ? TIMELINE_BLOCK_GHOST_VALID : TIMELINE_BLOCK_GHOST_INVALID,
+                                            ghost_timeline_lane->muted,
+                                            false,
+                                            NULL);
         }
         }
     }
@@ -11638,8 +12087,11 @@ bool app_init(App *app){
     app->timeline_edit_pattern_index = -1;
     app->timeline_edit_original_lane = 0;
     app->timeline_edit_original_seam_side = TIMELINE_SEAM_NONE;
+    app->timeline_edit_preserved_offset_ticks = 0;
     app->timeline_edit_ghost_lane = 0;
     app->timeline_edit_ghost_seam_side = TIMELINE_SEAM_NONE;
+    app->timeline_value_bubble_mode = TIMELINE_VALUE_BUBBLE_NONE;
+    app->timeline_value_bubble_instance = timeline_instance_ref_invalid();
     app->selected_roster_clip = -1;
     app->roster_scroll_offset = 0;
     app->roster_visible_rows = 1;
