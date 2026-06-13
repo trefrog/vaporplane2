@@ -38,7 +38,7 @@ int main(void)
     assert(app.timeline_value_bubble_mode == TIMELINE_VALUE_BUBBLE_OFFSET);
 
     app_timeline_guarded_value_edit(&app, TIMELINE_VALUE_BUBBLE_OFFSET, 1);
-    assert(app.timeline.lanes[0].instances[0].start_tick == 255);
+    assert(app.timeline.lanes[0].instances[0].start_tick == 241);
 
     app_timeline_dismiss_value_bubble(&app);
     assert(app.timeline_value_bubble_mode == TIMELINE_VALUE_BUBBLE_NONE);
@@ -48,14 +48,14 @@ int main(void)
     assert(app.timeline_value_bubble_mode == TIMELINE_VALUE_BUBBLE_LENGTH);
 
     app_timeline_guarded_value_edit(&app, TIMELINE_VALUE_BUBBLE_LENGTH, 1);
-    assert(app.timeline.lanes[0].instances[0].duration_ticks == 480);
+    assert(app.timeline.lanes[0].instances[0].duration_ticks == 241);
 
-    app_timeline_guarded_value_edit(&app, TIMELINE_VALUE_BUBBLE_VELOCITY, 5);
+    app_timeline_guarded_value_edit(&app, TIMELINE_VALUE_BUBBLE_VELOCITY, 1);
     assert(app.timeline.lanes[0].instances[0].midi_velocity == 100);
     assert(app.timeline_value_bubble_mode == TIMELINE_VALUE_BUBBLE_VELOCITY);
 
-    app_timeline_guarded_value_edit(&app, TIMELINE_VALUE_BUBBLE_VELOCITY, 5);
-    assert(app.timeline.lanes[0].instances[0].midi_velocity == 105);
+    app_timeline_guarded_value_edit(&app, TIMELINE_VALUE_BUBBLE_VELOCITY, 1);
+    assert(app.timeline.lanes[0].instances[0].midi_velocity == 101);
 
     return 0;
 }

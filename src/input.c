@@ -11,10 +11,21 @@ static double tempo_bpm_dpad_repeat_timer = 0.0;
 static int timeline_cursor_stick_direction = 0;
 static double timeline_cursor_stick_repeat_timer = 0.0;
 static double timeline_cursor_stick_held_seconds = 0.0;
+static TimelineValueBubbleMode timeline_value_dpad_repeat_mode = TIMELINE_VALUE_BUBBLE_NONE;
+static int timeline_value_dpad_repeat_direction = 0;
+static double timeline_value_dpad_repeat_timer = 0.0;
 static int text_entry_stick_x_direction = 0;
 static int text_entry_stick_y_direction = 0;
 
 static bool button_pressed(SDL_Gamepad *gamepad, SDL_GamepadButton button);
+
+static void consume_dpad_buttons(SDL_Gamepad *gamepad) {
+    if (!gamepad) return;
+    previous_buttons[SDL_GAMEPAD_BUTTON_DPAD_LEFT] = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    previous_buttons[SDL_GAMEPAD_BUTTON_DPAD_RIGHT] = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    previous_buttons[SDL_GAMEPAD_BUTTON_DPAD_UP] = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP);
+    previous_buttons[SDL_GAMEPAD_BUTTON_DPAD_DOWN] = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+}
 
 static const double TEMPO_LOCK_BPM_DPAD_NUDGE = 0.1;
 static const double TEMPO_LOCK_BPM_DPAD_COARSE_NUDGE = 1.0;
@@ -23,6 +34,8 @@ static const double TEMPO_LOCK_BPM_DPAD_REPEAT_INTERVAL = 0.12;
 static const double TEMPO_LOCK_BPM_DPAD_COARSE_REPEAT_INTERVAL = 0.07;
 static const double TIMELINE_CURSOR_STICK_THRESHOLD = 0.28;
 static const double TIMELINE_CURSOR_STICK_MAX_HELD = 3.0;
+static const double TIMELINE_VALUE_DPAD_REPEAT_DELAY = 0.16;
+static const double TIMELINE_VALUE_DPAD_REPEAT_INTERVAL = 0.045;
 static const double WAVEFORM_FRAME_GRIP_L2_ARM_SECONDS = 0.12;
 
 static void clamp_view_target(App *app) {
@@ -506,6 +519,41 @@ static void update_timeline_cursor_stick(App *app, double x_axis, double dt) {
         timeline_cursor_stick_repeat_timer += timeline_cursor_stick_interval(strength, timeline_cursor_stick_held_seconds);
         safety++;
     }
+}
+
+static void reset_timeline_value_dpad_repeat(void) {
+    timeline_value_dpad_repeat_mode = TIMELINE_VALUE_BUBBLE_NONE;
+    timeline_value_dpad_repeat_direction = 0;
+    timeline_value_dpad_repeat_timer = 0.0;
+}
+
+static bool update_timeline_value_dpad_repeat(App *app,
+                                              double dt,
+                                              TimelineValueBubbleMode mode,
+                                              int direction) {
+    if (app && app->gamepad) consume_dpad_buttons(app->gamepad);
+    if (!app || mode == TIMELINE_VALUE_BUBBLE_NONE || direction == 0) {
+        reset_timeline_value_dpad_repeat();
+        return false;
+    }
+
+    if (mode != timeline_value_dpad_repeat_mode ||
+        direction != timeline_value_dpad_repeat_direction) {
+        timeline_value_dpad_repeat_mode = mode;
+        timeline_value_dpad_repeat_direction = direction;
+        timeline_value_dpad_repeat_timer = TIMELINE_VALUE_DPAD_REPEAT_DELAY;
+        app_timeline_guarded_value_edit(app, mode, direction);
+        return true;
+    }
+
+    timeline_value_dpad_repeat_timer -= dt;
+    int safety = 0;
+    while (timeline_value_dpad_repeat_timer <= 0.0 && safety < 8) {
+        app_timeline_guarded_value_edit(app, mode, direction);
+        timeline_value_dpad_repeat_timer += TIMELINE_VALUE_DPAD_REPEAT_INTERVAL;
+        safety++;
+    }
+    return true;
 }
 
 static void update_tempo_bpm_dpad(App *app, double dt, bool coarse) {
@@ -1205,9 +1253,17 @@ void input_update_gamepad(App *app, double dt){
 
         if(app->timeline_value_bubble_mode == TIMELINE_VALUE_BUBBLE_OFFSET ||
            app->timeline_value_bubble_mode == TIMELINE_VALUE_BUBBLE_LENGTH) {
-            if(!l2_shift || !r2_shift) app_timeline_dismiss_value_bubble(app);
+            if(!l2_shift || !r2_shift) {
+                app_timeline_dismiss_value_bubble(app);
+                reset_timeline_value_dpad_repeat();
+                consume_dpad_buttons(app->gamepad);
+            }
         } else if(app->timeline_value_bubble_mode == TIMELINE_VALUE_BUBBLE_VELOCITY) {
-            if(!l2_shift || r2_shift) app_timeline_dismiss_value_bubble(app);
+            if(!l2_shift || r2_shift) {
+                app_timeline_dismiss_value_bubble(app);
+                reset_timeline_value_dpad_repeat();
+                consume_dpad_buttons(app->gamepad);
+            }
         }
 
         bool l2_track_cursor_grab = l2_shift &&
@@ -1222,7 +1278,10 @@ void input_update_gamepad(App *app, double dt){
         app_zoom_timeline_view(app, 1.0 + (l2_track_cursor_grab ? 0.0 : ly) * dt * 1.4 * timeline_view_speed);
 
         if(south_pressed) app_timeline_activate_focus(app);
-        if(east_pressed) app_timeline_cancel_focus(app);
+        if(east_pressed) {
+            reset_timeline_value_dpad_repeat();
+            app_timeline_cancel_focus(app);
+        }
         if(app->timeline_edit_mode != TIMELINE_EDIT_NONE) {
             if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
                 if(r2_shift) app_timeline_nudge_edit_ghost_by_bar(app, -1);
@@ -1237,20 +1296,31 @@ void input_update_gamepad(App *app, double dt){
             return;
         }
         if(l2_shift && r2_shift && app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA) {
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) app_timeline_guarded_value_edit(app, TIMELINE_VALUE_BUBBLE_OFFSET, -1);
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) app_timeline_guarded_value_edit(app, TIMELINE_VALUE_BUBBLE_OFFSET, 1);
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_guarded_value_edit(app, TIMELINE_VALUE_BUBBLE_LENGTH, 1);
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_guarded_value_edit(app, TIMELINE_VALUE_BUBBLE_LENGTH, -1);
-            if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP) ||
-               SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN) ||
-               SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT) ||
-               SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) return;
+            bool left = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+            bool right = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+            bool up = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP);
+            bool down = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+            int horizontal = (right ? 1 : 0) - (left ? 1 : 0);
+            int vertical = (up ? 1 : 0) - (down ? 1 : 0);
+            if(horizontal != 0) {
+                update_timeline_value_dpad_repeat(app, dt, TIMELINE_VALUE_BUBBLE_OFFSET, horizontal);
+                return;
+            }
+            if(vertical != 0) {
+                update_timeline_value_dpad_repeat(app, dt, TIMELINE_VALUE_BUBBLE_LENGTH, vertical);
+                return;
+            }
+            reset_timeline_value_dpad_repeat();
         }
         if(l2_shift && app->timeline_focus_zone == TIMELINE_FOCUS_TRACK_AREA) {
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) app_timeline_guarded_value_edit(app, TIMELINE_VALUE_BUBBLE_VELOCITY, 5);
-            if(button_pressed(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) app_timeline_guarded_value_edit(app, TIMELINE_VALUE_BUBBLE_VELOCITY, -5);
-            if(SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP) ||
-               SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) return;
+            bool up = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP);
+            bool down = SDL_GetGamepadButton(app->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+            int vertical = (up ? 1 : 0) - (down ? 1 : 0);
+            if(vertical != 0) {
+                update_timeline_value_dpad_repeat(app, dt, TIMELINE_VALUE_BUBBLE_VELOCITY, vertical);
+                return;
+            }
+            reset_timeline_value_dpad_repeat();
         }
         if(l2_shift && r2_shift &&
            app->timeline_focus_zone == TIMELINE_FOCUS_RULER &&

@@ -769,30 +769,8 @@ static void timeline_format_length_ticks(const MasterTimeline *timeline,
                                          int64_t ticks,
                                          char *out,
                                          size_t out_size) {
+    (void)timeline;
     if (!out || out_size == 0) return;
-    if (ticks <= 0) {
-        SDL_snprintf(out, out_size, "len 0t");
-        return;
-    }
-    int64_t beat = timeline_snap_ticks(timeline);
-    int beats_per_bar = timeline && timeline->timeline_beats_per_bar > 0 ?
-        timeline->timeline_beats_per_bar : 4;
-    int64_t bar = beat * (int64_t)beats_per_bar;
-    int64_t sixteenth = timeline_sixteenth_ticks(timeline);
-    if (bar > 0 && ticks % bar == 0) {
-        long long bars = (long long)(ticks / bar);
-        SDL_snprintf(out, out_size, "%lld bar%s", bars, bars == 1 ? "" : "s");
-        return;
-    }
-    if (sixteenth > 0 && ticks % sixteenth == 0) {
-        long long units = (long long)(ticks / sixteenth);
-        if (units == 1) SDL_snprintf(out, out_size, "1/16");
-        else if (units == 2) SDL_snprintf(out, out_size, "1/8");
-        else if (units == 4) SDL_snprintf(out, out_size, "1/4");
-        else if (units == 8) SDL_snprintf(out, out_size, "1/2");
-        else SDL_snprintf(out, out_size, "%lld/16", units);
-        return;
-    }
     SDL_snprintf(out, out_size, "len %lldt", (long long)ticks);
 }
 
@@ -819,13 +797,8 @@ static bool timeline_value_bubble_label(const App *app, char *out, size_t out_si
             return true;
         }
         case TIMELINE_VALUE_BUBBLE_LENGTH:
-        {
-            char length[32];
-            timeline_format_length_ticks(&app->timeline, instance->duration_ticks, length, sizeof(length));
-            if (SDL_strncmp(length, "len ", 4) == 0) SDL_snprintf(out, out_size, "%s", length);
-            else SDL_snprintf(out, out_size, "len %s", length);
+            timeline_format_length_ticks(&app->timeline, instance->duration_ticks, out, out_size);
             return true;
-        }
         case TIMELINE_VALUE_BUBBLE_VELOCITY:
             SDL_snprintf(out, out_size, "v%d", clamp_int(instance->midi_velocity, 1, 127));
             return true;
@@ -8433,7 +8406,7 @@ void app_timeline_nudge_selected_instance_offset(App *app, int direction) {
 
     int64_t sixteenth = timeline_sixteenth_ticks(&app->timeline);
     int64_t anchor = timeline_instance_anchor_tick(&app->timeline, instance);
-    int64_t step = timeline_micro_offset_step(sixteenth) * (direction > 0 ? 1 : -1);
+    int64_t step = direction > 0 ? 1 : -1;
     int64_t proposed_start = instance->start_tick + step;
     proposed_start = timeline_clamp_start_to_anchor_offset_bounds(anchor, proposed_start, sixteenth);
     TimelineInstanceRef ignore = app->selected_timeline_instance;
@@ -8474,8 +8447,7 @@ void app_timeline_adjust_selected_instance_length(App *app, int direction) {
         return;
     }
 
-    int64_t step = timeline_edit_snap_ticks(app);
-    if (step < 1) step = 1;
+    int64_t step = 1;
     int64_t proposed_duration = instance->duration_ticks + step * (direction > 0 ? 1 : -1);
     if (proposed_duration < 1) proposed_duration = 1;
     TimelineInstanceRef ignore = app->selected_timeline_instance;
@@ -8498,8 +8470,7 @@ void app_timeline_adjust_selected_instance_length(App *app, int direction) {
 
     char length[32];
     timeline_format_length_ticks(&app->timeline, proposed_duration, length, sizeof(length));
-    if (SDL_strncmp(length, "len ", 4) == 0) app_set_status(app, length);
-    else SDL_snprintf(app->status_text, sizeof(app->status_text), "length %s", length);
+    app_set_status(app, length);
 }
 
 void app_timeline_guarded_value_edit(App *app, TimelineValueBubbleMode mode, int direction) {
